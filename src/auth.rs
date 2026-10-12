@@ -160,6 +160,96 @@ pub fn effective_access_level(
     db.effective_access_level(user, project_id)
 }
 
+#[derive(Clone, Debug)]
+pub struct AuthContext {
+    pub user: crate::models::User,
+    pub active_project_id: i64,
+    pub visible_projects: Vec<(crate::models::Project, usize)>,
+}
+
+pub fn parse_cookies(headers: &axum::http::HeaderMap) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Some(cookie_val) = headers.get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()) {
+        for piece in cookie_val.split(';') {
+            let piece = piece.trim();
+            if let Some((k, v)) = piece.split_once('=') {
+                map.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+    }
+    map
+}
+
+pub fn make_cookie_header(name: &str, value: &str, http_only: bool, max_age: Option<i64>) -> String {
+    let mut parts = vec![
+        format!("{}={}", name, value),
+        "Path=/".to_string(),
+        "SameSite=Lax".to_string(),
+    ];
+    if http_only {
+        parts.push("HttpOnly".to_string());
+    }
+    if let Some(age) = max_age {
+        parts.push(format!("Max-Age={}", age));
+    }
+    parts.join("; ")
+}
+
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for AuthContext
+where
+    crate::db::Db: axum::extract::FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::extract::FromRef;
+        use axum::response::IntoResponse;
+
+        let db = crate::db::Db::from_ref(state);
+        let cookies = parse_cookies(&parts.headers);
+        let cookie_string = match cookies.get("MANTIS_STRING_COOKIE") {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                return Err(axum::response::Redirect::to("/login").into_response());
+            }
+        };
+
+        let user = match db.get_user_by_cookie(cookie_string) {
+            Ok(Some(u)) if u.enabled == 1 => u,
+            _ => {
+                return Err(axum::response::Redirect::to("/login").into_response());
+            }
+        };
+
+        let mut active_project_id = 0;
+        if let Some(pid_str) = cookies.get("MANTIS_PROJECT_COOKIE") {
+            if let Ok(pid) = pid_str.parse::<i64>() {
+                if pid > 0 {
+                    if let Ok(level) = db.effective_access_level(&user, pid) {
+                        if level > 0 {
+                            active_project_id = pid;
+                        }
+                    }
+                }
+            }
+        }
+
+        let visible_projects = db.list_visible_projects(&user).unwrap_or_default();
+
+        Ok(AuthContext {
+            user,
+            active_project_id,
+            visible_projects,
+        })
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

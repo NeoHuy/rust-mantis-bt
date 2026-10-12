@@ -767,6 +767,90 @@ impl Db {
         Ok(())
     }
 
+    pub fn list_subprojects(&self, parent_id: i64) -> rusqlite::Result<Vec<(Project, bool)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.name, p.status, p.enabled, p.view_state, p.access_min, p.description, p.category_id, p.inherit_global, h.inherit_parent
+             FROM mantis_project_hierarchy_table h
+             JOIN mantis_project_table p ON h.child_id = p.id
+             WHERE h.parent_id = ?1
+             ORDER BY p.name ASC",
+        )?;
+        let rows = stmt.query_map(params![parent_id], |row| {
+            let proj = Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                status: row.get(2)?,
+                enabled: row.get(3)?,
+                view_state: row.get(4)?,
+                access_min: row.get(5)?,
+                description: row.get(6)?,
+                category_id: row.get(7)?,
+                inherit_global: row.get(8)?,
+            };
+            let inherit_parent: i32 = row.get(9)?;
+            Ok((proj, inherit_parent == 1))
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_project_users(&self, project_id: i64) -> rusqlite::Result<Vec<(User, i32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected, u.access_level,
+                    u.login_count, u.lost_password_request_count, u.failed_login_count, u.cookie_string, u.last_visit, u.date_created,
+                    pu.access_level
+             FROM mantis_project_user_list_table pu
+             JOIN mantis_user_table u ON pu.user_id = u.id
+             WHERE pu.project_id = ?1
+             ORDER BY u.username ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            let user = User {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                realname: row.get(2)?,
+                email: row.get(3)?,
+                password: row.get(4)?,
+                enabled: row.get(5)?,
+                protected: row.get(6)?,
+                access_level: row.get(7)?,
+                login_count: row.get(8)?,
+                lost_password_request_count: row.get(9)?,
+                failed_login_count: row.get(10)?,
+                cookie_string: row.get(11)?,
+                last_visit: row.get(12)?,
+                date_created: row.get(13)?,
+            };
+            let access_level: i32 = row.get(14)?;
+            Ok((user, access_level))
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_all_projects(&self) -> rusqlite::Result<Vec<Project>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, status, enabled, view_state, access_min, description, category_id, inherit_global
+             FROM mantis_project_table
+             ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                status: row.get(2)?,
+                enabled: row.get(3)?,
+                view_state: row.get(4)?,
+                access_min: row.get(5)?,
+                description: row.get(6)?,
+                category_id: row.get(7)?,
+                inherit_global: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn effective_access_level(&self, user: &User, project_id: i64) -> rusqlite::Result<i32> {
         // 1. All Projects context
         if project_id == 0 {
@@ -1012,6 +1096,47 @@ impl Db {
         Ok(())
     }
 
+    pub fn get_category_by_id(&self, id: i64) -> rusqlite::Result<Option<Category>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, project_id, user_id, name, status FROM mantis_category_table WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Category {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    user_id: row.get(2)?,
+                    name: row.get(3)?,
+                    status: row.get(4)?,
+                })
+            },
+        ) {
+            Ok(c) => Ok(Some(c)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn list_direct_categories(&self, project_id: i64) -> rusqlite::Result<Vec<Category>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, user_id, name, status
+             FROM mantis_category_table
+             WHERE project_id = ?1
+             ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok(Category {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                user_id: row.get(2)?,
+                name: row.get(3)?,
+                status: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     pub fn list_effective_categories(&self, project_id: i64) -> rusqlite::Result<Vec<Category>> {
         let conn = self.conn();
         if project_id == 0 {
@@ -1240,6 +1365,29 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn get_version_by_id(&self, id: i64) -> rusqlite::Result<Option<ProjectVersion>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, project_id, version, description, released, obsolete, date_order FROM mantis_project_version_table WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ProjectVersion {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    version: row.get(2)?,
+                    description: row.get(3)?,
+                    released: row.get(4)?,
+                    obsolete: row.get(5)?,
+                    date_order: row.get(6)?,
+                })
+            },
+        ) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 

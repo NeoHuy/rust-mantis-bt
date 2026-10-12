@@ -1,4 +1,7 @@
-use crate::models::{Category, Project, ProjectVersion, User};
+use crate::models::{
+    Bug, BugFile, BugFull, BugHistory, BugRelationship, BugUpdate, Bugnote, Category, Project,
+    ProjectVersion, User,
+};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -108,6 +111,91 @@ impl Db {
                 obsolete INTEGER NOT NULL DEFAULT 0,
                 date_order INTEGER NOT NULL DEFAULT 0,
                 UNIQUE (project_id, version)
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL REFERENCES mantis_project_table(id) ON DELETE CASCADE,
+                reporter_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
+                handler_id INTEGER NOT NULL DEFAULT 0,
+                duplicate_id INTEGER NOT NULL DEFAULT 0,
+                priority INTEGER NOT NULL DEFAULT 30,
+                severity INTEGER NOT NULL DEFAULT 50,
+                reproducibility INTEGER NOT NULL DEFAULT 70,
+                status INTEGER NOT NULL DEFAULT 10,
+                resolution INTEGER NOT NULL DEFAULT 10,
+                category_id INTEGER NOT NULL DEFAULT 0,
+                date_submitted INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL DEFAULT 0,
+                os TEXT NOT NULL DEFAULT '',
+                os_build TEXT NOT NULL DEFAULT '',
+                platform TEXT NOT NULL DEFAULT '',
+                version TEXT NOT NULL DEFAULT '',
+                fixed_in_version TEXT NOT NULL DEFAULT '',
+                target_version TEXT NOT NULL DEFAULT '',
+                build TEXT NOT NULL DEFAULT '',
+                summary TEXT NOT NULL DEFAULT '',
+                view_state INTEGER NOT NULL DEFAULT 10,
+                sticky INTEGER NOT NULL DEFAULT 0,
+                due_date INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_text_table (
+                id INTEGER PRIMARY KEY REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                description TEXT NOT NULL DEFAULT '',
+                steps_to_reproduce TEXT NOT NULL DEFAULT '',
+                additional_information TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bugnote_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                reporter_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
+                bugnote_text_id INTEGER NOT NULL,
+                view_state INTEGER NOT NULL DEFAULT 10,
+                date_submitted INTEGER NOT NULL DEFAULT 0,
+                last_modified INTEGER NOT NULL DEFAULT 0,
+                note_type INTEGER NOT NULL DEFAULT 0,
+                note_attr TEXT NOT NULL DEFAULT '',
+                time_tracking INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bugnote_text_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_history_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
+                bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                date_modified INTEGER NOT NULL DEFAULT 0,
+                field_name TEXT NOT NULL DEFAULT '',
+                old_value TEXT NOT NULL DEFAULT '',
+                new_value TEXT NOT NULL DEFAULT '',
+                type INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_relationship_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                destination_bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                relationship_type INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_file_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                title TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                diskfile TEXT NOT NULL DEFAULT '',
+                filename TEXT NOT NULL DEFAULT '',
+                folder TEXT NOT NULL DEFAULT '',
+                filesize INTEGER NOT NULL DEFAULT 0,
+                file_type TEXT NOT NULL DEFAULT '',
+                content BLOB,
+                date_added INTEGER NOT NULL DEFAULT 0,
+                user_id INTEGER NOT NULL DEFAULT 0
             );",
         )?;
 
@@ -1395,6 +1483,1149 @@ impl Db {
             Err(e) => Err(e),
         }
     }
+
+    // ─── Sub-project 2: Issue Tracking & Workflow ────────────────────────────
+
+    fn map_bug_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bug> {
+        Ok(Bug {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            reporter_id: row.get(2)?,
+            handler_id: row.get(3)?,
+            duplicate_id: row.get(4)?,
+            priority: row.get(5)?,
+            severity: row.get(6)?,
+            reproducibility: row.get(7)?,
+            status: row.get(8)?,
+            resolution: row.get(9)?,
+            category_id: row.get(10)?,
+            date_submitted: row.get(11)?,
+            last_updated: row.get(12)?,
+            os: row.get(13)?,
+            os_build: row.get(14)?,
+            platform: row.get(15)?,
+            version: row.get(16)?,
+            fixed_in_version: row.get(17)?,
+            target_version: row.get(18)?,
+            build: row.get(19)?,
+            summary: row.get(20)?,
+            view_state: row.get(21)?,
+            sticky: row.get(22)?,
+            due_date: row.get(23)?,
+        })
+    }
+
+    fn query_bug_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<Bug>> {
+        match conn.query_row(
+            "SELECT id, project_id, reporter_id, handler_id, duplicate_id,
+                    priority, severity, reproducibility, status, resolution,
+                    category_id, date_submitted, last_updated, os, os_build,
+                    platform, version, fixed_in_version, target_version, build,
+                    summary, view_state, sticky, due_date
+             FROM mantis_bug_table
+             WHERE id = ?1",
+            params![id],
+            Self::map_bug_row,
+        ) {
+            Ok(b) => Ok(Some(b)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_history(
+        &self,
+        conn: &Connection,
+        bug_id: i64,
+        user_id: i64,
+        field_name: &str,
+        old_value: &str,
+        new_value: &str,
+        type_: i32,
+    ) -> rusqlite::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO mantis_bug_history_table (
+                user_id, bug_id, date_modified, field_name, old_value, new_value, type
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![user_id, bug_id, now, field_name, old_value, new_value, type_],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bug(
+        &self,
+        project_id: i64,
+        reporter_id: i64,
+        category_id: i64,
+        summary: &str,
+        description: &str,
+        steps_to_reproduce: &str,
+        additional_information: &str,
+        priority: i32,
+        severity: i32,
+        reproducibility: i32,
+        version: &str,
+        os: &str,
+        os_build: &str,
+        platform: &str,
+        view_state: i32,
+    ) -> Result<i64, String> {
+        let trimmed_summary = summary.trim();
+        if trimmed_summary.is_empty() {
+            return Err("Summary cannot be empty".to_string());
+        }
+
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        conn.execute(
+            "INSERT INTO mantis_bug_table (
+                project_id, reporter_id, handler_id, duplicate_id,
+                priority, severity, reproducibility, status, resolution,
+                category_id, date_submitted, last_updated, os, os_build,
+                platform, version, fixed_in_version, target_version, build,
+                summary, view_state, sticky, due_date
+            ) VALUES (?1, ?2, 0, 0, ?3, ?4, ?5, 10, 10, ?6, ?7, ?7, ?8, ?9, ?10, ?11, '', '', '', ?12, ?13, 0, 0)",
+            params![
+                project_id,
+                reporter_id,
+                priority,
+                severity,
+                reproducibility,
+                category_id,
+                now,
+                os,
+                os_build,
+                platform,
+                version,
+                trimmed_summary,
+                view_state,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let bug_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "INSERT INTO mantis_bug_text_table (
+                id, description, steps_to_reproduce, additional_information
+            ) VALUES (?1, ?2, ?3, ?4)",
+            params![bug_id, description, steps_to_reproduce, additional_information],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Record new bug creation in history (type = 1)
+        let _ = self.record_history(&conn, bug_id, reporter_id, "", "", "", 1);
+
+        Ok(bug_id)
+    }
+
+    pub fn get_bug(&self, id: i64) -> rusqlite::Result<Option<Bug>> {
+        let conn = self.conn();
+        Self::query_bug_by_id(&conn, id)
+    }
+
+    pub fn get_bug_full(&self, id: i64) -> rusqlite::Result<Option<BugFull>> {
+        let conn = self.conn();
+        let bug = match Self::query_bug_by_id(&conn, id)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let (description, steps_to_reproduce, additional_information) = match conn.query_row(
+            "SELECT description, steps_to_reproduce, additional_information
+             FROM mantis_bug_text_table
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        ) {
+            Ok(t) => t,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                (String::new(), String::new(), String::new())
+            }
+            Err(e) => return Err(e),
+        };
+
+        Ok(Some(BugFull {
+            bug,
+            description,
+            steps_to_reproduce,
+            additional_information,
+        }))
+    }
+
+    pub fn list_bugs(
+        &self,
+        project_id: i64,
+        user_access: i32,
+        offset: i64,
+        limit: i64,
+    ) -> rusqlite::Result<Vec<Bug>> {
+        let conn = self.conn();
+        if project_id > 0 {
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, reporter_id, handler_id, duplicate_id,
+                        priority, severity, reproducibility, status, resolution,
+                        category_id, date_submitted, last_updated, os, os_build,
+                        platform, version, fixed_in_version, target_version, build,
+                        summary, view_state, sticky, due_date
+                 FROM mantis_bug_table
+                 WHERE project_id = ?1 AND (view_state = 10 OR ?2 >= 55)
+                 ORDER BY sticky DESC, last_updated DESC, id DESC
+                 LIMIT ?3 OFFSET ?4",
+            )?;
+            let rows = stmt.query_map(
+                params![project_id, user_access, limit, offset],
+                Self::map_bug_row,
+            )?;
+            rows.collect()
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, reporter_id, handler_id, duplicate_id,
+                        priority, severity, reproducibility, status, resolution,
+                        category_id, date_submitted, last_updated, os, os_build,
+                        platform, version, fixed_in_version, target_version, build,
+                        summary, view_state, sticky, due_date
+                 FROM mantis_bug_table
+                 WHERE (view_state = 10 OR ?1 >= 55)
+                 ORDER BY sticky DESC, last_updated DESC, id DESC
+                 LIMIT ?2 OFFSET ?3",
+            )?;
+            let rows = stmt.query_map(params![user_access, limit, offset], Self::map_bug_row)?;
+            rows.collect()
+        }
+    }
+
+    pub fn update_bug_fields(
+        &self,
+        id: i64,
+        updater_id: i64,
+        fields: BugUpdate,
+    ) -> Result<Vec<BugHistory>, String> {
+        let conn = self.conn();
+        let bug = Self::query_bug_by_id(&conn, id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Bug {} not found", id))?;
+
+        let (cur_desc, cur_steps, cur_add_info) = conn
+            .query_row(
+                "SELECT description, steps_to_reproduce, additional_information
+                 FROM mantis_bug_text_table WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap_or_else(|_| (String::new(), String::new(), String::new()));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let mut changes: Vec<(&str, String, String)> = Vec::new();
+
+        let new_summary = match fields.summary {
+            Some(ref s) => {
+                let t = s.trim().to_string();
+                if t.is_empty() {
+                    return Err("Summary cannot be empty".to_string());
+                }
+                if t != bug.summary {
+                    changes.push(("summary", bug.summary.clone(), t.clone()));
+                }
+                t
+            }
+            None => bug.summary.clone(),
+        };
+
+        let new_category_id = match fields.category_id {
+            Some(v) => {
+                if v != bug.category_id {
+                    changes.push(("category_id", bug.category_id.to_string(), v.to_string()));
+                }
+                v
+            }
+            None => bug.category_id,
+        };
+
+        let new_priority = match fields.priority {
+            Some(v) => {
+                if v != bug.priority {
+                    changes.push(("priority", bug.priority.to_string(), v.to_string()));
+                }
+                v
+            }
+            None => bug.priority,
+        };
+
+        let new_severity = match fields.severity {
+            Some(v) => {
+                if v != bug.severity {
+                    changes.push(("severity", bug.severity.to_string(), v.to_string()));
+                }
+                v
+            }
+            None => bug.severity,
+        };
+
+        let new_reproducibility = match fields.reproducibility {
+            Some(v) => {
+                if v != bug.reproducibility {
+                    changes.push((
+                        "reproducibility",
+                        bug.reproducibility.to_string(),
+                        v.to_string(),
+                    ));
+                }
+                v
+            }
+            None => bug.reproducibility,
+        };
+
+        let new_version = match fields.version {
+            Some(ref v) => {
+                if *v != bug.version {
+                    changes.push(("version", bug.version.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => bug.version.clone(),
+        };
+
+        let new_target_version = match fields.target_version {
+            Some(ref v) => {
+                if *v != bug.target_version {
+                    changes.push(("target_version", bug.target_version.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => bug.target_version.clone(),
+        };
+
+        let new_fixed_in_version = match fields.fixed_in_version {
+            Some(ref v) => {
+                if *v != bug.fixed_in_version {
+                    changes.push(("fixed_in_version", bug.fixed_in_version.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => bug.fixed_in_version.clone(),
+        };
+
+        let new_view_state = match fields.view_state {
+            Some(v) => {
+                if v != bug.view_state {
+                    changes.push(("view_state", bug.view_state.to_string(), v.to_string()));
+                }
+                v
+            }
+            None => bug.view_state,
+        };
+
+        let new_handler_id = match fields.handler_id {
+            Some(v) => {
+                if v != bug.handler_id {
+                    changes.push(("handler_id", bug.handler_id.to_string(), v.to_string()));
+                }
+                v
+            }
+            None => bug.handler_id,
+        };
+
+        let new_desc = match fields.description {
+            Some(ref v) => {
+                if *v != cur_desc {
+                    changes.push(("description", cur_desc.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => cur_desc.clone(),
+        };
+
+        let new_steps = match fields.steps_to_reproduce {
+            Some(ref v) => {
+                if *v != cur_steps {
+                    changes.push(("steps_to_reproduce", cur_steps.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => cur_steps.clone(),
+        };
+
+        let new_add_info = match fields.additional_information {
+            Some(ref v) => {
+                if *v != cur_add_info {
+                    changes.push(("additional_information", cur_add_info.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => cur_add_info.clone(),
+        };
+
+        if !changes.is_empty() {
+            conn.execute(
+                "UPDATE mantis_bug_table
+                 SET summary = ?1, category_id = ?2, priority = ?3, severity = ?4,
+                     reproducibility = ?5, version = ?6, target_version = ?7,
+                     fixed_in_version = ?8, view_state = ?9, handler_id = ?10,
+                     last_updated = ?11
+                 WHERE id = ?12",
+                params![
+                    new_summary,
+                    new_category_id,
+                    new_priority,
+                    new_severity,
+                    new_reproducibility,
+                    new_version,
+                    new_target_version,
+                    new_fixed_in_version,
+                    new_view_state,
+                    new_handler_id,
+                    now,
+                    id,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+            conn.execute(
+                "UPDATE mantis_bug_text_table
+                 SET description = ?1, steps_to_reproduce = ?2, additional_information = ?3
+                 WHERE id = ?4",
+                params![new_desc, new_steps, new_add_info, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        let mut recorded = Vec::new();
+        for (field_name, old_val, new_val) in changes {
+            self.record_history(&conn, id, updater_id, field_name, &old_val, &new_val, 0)
+                .map_err(|e| e.to_string())?;
+            let hid = conn.last_insert_rowid();
+            recorded.push(BugHistory {
+                id: hid,
+                user_id: updater_id,
+                bug_id: id,
+                date_modified: now,
+                field_name: field_name.to_string(),
+                old_value: old_val,
+                new_value: new_val,
+                type_: 0,
+            });
+        }
+
+        Ok(recorded)
+    }
+
+    pub fn delete_bug(&self, id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM mantis_bug_table WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn change_bug_status(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        new_status: i32,
+        resolution: i32,
+        note: Option<&str>,
+    ) -> Result<(), String> {
+        let conn = self.conn();
+        let bug = Self::query_bug_by_id(&conn, bug_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Bug {} not found", bug_id))?;
+
+        // Closed bug (status == 90) can only transition to feedback (20) to reopen
+        if bug.status == 90 && new_status != 20 && new_status != 90 {
+            return Err(
+                "Closed bug can only be reopened to feedback (status 20)".to_string(),
+            );
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        conn.execute(
+            "UPDATE mantis_bug_table
+             SET status = ?1, resolution = ?2, last_updated = ?3
+             WHERE id = ?4",
+            params![new_status, resolution, now, bug_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        if bug.status != new_status {
+            self.record_history(
+                &conn,
+                bug_id,
+                user_id,
+                "status",
+                &bug.status.to_string(),
+                &new_status.to_string(),
+                0,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        if bug.resolution != resolution {
+            self.record_history(
+                &conn,
+                bug_id,
+                user_id,
+                "resolution",
+                &bug.resolution.to_string(),
+                &resolution.to_string(),
+                0,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        if let Some(note_text) = note {
+            let trimmed = note_text.trim();
+            if !trimmed.is_empty() {
+                Self::insert_bugnote_inner(&conn, self, bug_id, user_id, trimmed, 10)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn assign_bug(&self, bug_id: i64, user_id: i64, handler_id: i64) -> Result<(), String> {
+        let conn = self.conn();
+        let bug = Self::query_bug_by_id(&conn, bug_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Bug {} not found", bug_id))?;
+
+        if handler_id > 0
+            && Self::query_user_by_id(&conn, handler_id)
+                .map_err(|e| e.to_string())?
+                .is_none()
+        {
+            return Err(format!("User {} not found", handler_id));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let new_status = if handler_id > 0 && bug.status < 50 {
+            50 // Assigned
+        } else {
+            bug.status
+        };
+
+        conn.execute(
+            "UPDATE mantis_bug_table
+             SET handler_id = ?1, status = ?2, last_updated = ?3
+             WHERE id = ?4",
+            params![handler_id, new_status, now, bug_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        if bug.handler_id != handler_id {
+            self.record_history(
+                &conn,
+                bug_id,
+                user_id,
+                "handler_id",
+                &bug.handler_id.to_string(),
+                &handler_id.to_string(),
+                0,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        if bug.status != new_status {
+            self.record_history(
+                &conn,
+                bug_id,
+                user_id,
+                "status",
+                &bug.status.to_string(),
+                &new_status.to_string(),
+                0,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    fn insert_bugnote_inner(
+        conn: &Connection,
+        db: &Db,
+        bug_id: i64,
+        reporter_id: i64,
+        note: &str,
+        view_state: i32,
+    ) -> rusqlite::Result<i64> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        conn.execute(
+            "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
+            params![note],
+        )?;
+        let text_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "INSERT INTO mantis_bugnote_table (
+                bug_id, reporter_id, bugnote_text_id, view_state,
+                date_submitted, last_modified, note_type, note_attr, time_tracking
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, '', 0)",
+            params![bug_id, reporter_id, text_id, view_state, now],
+        )?;
+        let note_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "UPDATE mantis_bug_table SET last_updated = ?1 WHERE id = ?2",
+            params![now, bug_id],
+        )?;
+
+        db.record_history(
+            conn,
+            bug_id,
+            reporter_id,
+            "bugnote_added",
+            "",
+            &note_id.to_string(),
+            1,
+        )?;
+
+        Ok(note_id)
+    }
+
+    pub fn add_bugnote(
+        &self,
+        bug_id: i64,
+        reporter_id: i64,
+        note: &str,
+        view_state: i32,
+    ) -> Result<i64, String> {
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            return Err("Note cannot be empty".to_string());
+        }
+
+        let conn = self.conn();
+        if Self::query_bug_by_id(&conn, bug_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("Bug {} not found", bug_id));
+        }
+
+        Self::insert_bugnote_inner(&conn, self, bug_id, reporter_id, trimmed, view_state)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn get_bugnote_by_id(&self, note_id: i64) -> rusqlite::Result<Option<Bugnote>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT n.id, n.bug_id, n.reporter_id, n.bugnote_text_id, n.view_state,
+                    n.date_submitted, n.last_modified, n.note_type, n.note_attr,
+                    n.time_tracking, COALESCE(t.note, '')
+             FROM mantis_bugnote_table n
+             LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+             WHERE n.id = ?1",
+            params![note_id],
+            |row| {
+                Ok(Bugnote {
+                    id: row.get(0)?,
+                    bug_id: row.get(1)?,
+                    reporter_id: row.get(2)?,
+                    bugnote_text_id: row.get(3)?,
+                    view_state: row.get(4)?,
+                    date_submitted: row.get(5)?,
+                    last_modified: row.get(6)?,
+                    note_type: row.get(7)?,
+                    note_attr: row.get(8)?,
+                    time_tracking: row.get(9)?,
+                    note: row.get(10)?,
+                })
+            },
+        ) {
+            Ok(n) => Ok(Some(n)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn delete_bugnote(&self, note_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        let text_id: Option<i64> = conn
+            .query_row(
+                "SELECT bugnote_text_id FROM mantis_bugnote_table WHERE id = ?1",
+                params![note_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        conn.execute(
+            "DELETE FROM mantis_bugnote_table WHERE id = ?1",
+            params![note_id],
+        )?;
+
+        if let Some(tid) = text_id {
+            let _ = conn.execute(
+                "DELETE FROM mantis_bugnote_text_table WHERE id = ?1",
+                params![tid],
+            );
+        }
+        Ok(())
+    }
+
+    pub fn list_bugnotes(&self, bug_id: i64, user_access: i32) -> rusqlite::Result<Vec<Bugnote>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.bug_id, n.reporter_id, n.bugnote_text_id, n.view_state,
+                    n.date_submitted, n.last_modified, n.note_type, n.note_attr,
+                    n.time_tracking, COALESCE(t.note, '')
+             FROM mantis_bugnote_table n
+             LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+             WHERE n.bug_id = ?1 AND (n.view_state = 10 OR ?2 >= 55)
+             ORDER BY n.date_submitted ASC, n.id ASC",
+        )?;
+        let rows = stmt.query_map(params![bug_id, user_access], |row| {
+            Ok(Bugnote {
+                id: row.get(0)?,
+                bug_id: row.get(1)?,
+                reporter_id: row.get(2)?,
+                bugnote_text_id: row.get(3)?,
+                view_state: row.get(4)?,
+                date_submitted: row.get(5)?,
+                last_modified: row.get(6)?,
+                note_type: row.get(7)?,
+                note_attr: row.get(8)?,
+                time_tracking: row.get(9)?,
+                note: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_bug_history(&self, bug_id: i64) -> rusqlite::Result<Vec<BugHistory>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, bug_id, date_modified, field_name, old_value, new_value, type
+             FROM mantis_bug_history_table
+             WHERE bug_id = ?1
+             ORDER BY date_modified ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![bug_id], |row| {
+            Ok(BugHistory {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                bug_id: row.get(2)?,
+                date_modified: row.get(3)?,
+                field_name: row.get(4)?,
+                old_value: row.get(5)?,
+                new_value: row.get(6)?,
+                type_: row.get(7)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn add_bug_relationship(
+        &self,
+        source_id: i64,
+        dest_id: i64,
+        rel_type: i32,
+    ) -> Result<(), String> {
+        if source_id == dest_id {
+            return Err("A bug cannot have a relationship with itself".to_string());
+        }
+
+        let conn = self.conn();
+        if Self::query_bug_by_id(&conn, source_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("Source bug {} not found", source_id));
+        }
+        if Self::query_bug_by_id(&conn, dest_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("Destination bug {} not found", dest_id));
+        }
+
+        conn.execute(
+            "INSERT INTO mantis_bug_relationship_table (
+                source_bug_id, destination_bug_id, relationship_type
+            ) VALUES (?1, ?2, ?3)",
+            params![source_id, dest_id, rel_type],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Auto-create reverse relationship for duplicate_of (1) <-> has_duplicate (2)
+        if rel_type == 1 {
+            conn.execute(
+                "UPDATE mantis_bug_table SET duplicate_id = ?1 WHERE id = ?2",
+                params![dest_id, source_id],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO mantis_bug_relationship_table (
+                    source_bug_id, destination_bug_id, relationship_type
+                ) VALUES (?1, ?2, 2)",
+                params![dest_id, source_id],
+            )
+            .map_err(|e| e.to_string())?;
+        } else if rel_type == 2 {
+            conn.execute(
+                "UPDATE mantis_bug_table SET duplicate_id = ?1 WHERE id = ?2",
+                params![source_id, dest_id],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO mantis_bug_relationship_table (
+                    source_bug_id, destination_bug_id, relationship_type
+                ) VALUES (?1, ?2, 1)",
+                params![dest_id, source_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    pub fn get_bug_relationship_by_id(
+        &self,
+        rel_id: i64,
+    ) -> rusqlite::Result<Option<BugRelationship>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, source_bug_id, destination_bug_id, relationship_type
+             FROM mantis_bug_relationship_table
+             WHERE id = ?1",
+            params![rel_id],
+            |row| {
+                Ok(BugRelationship {
+                    id: row.get(0)?,
+                    source_bug_id: row.get(1)?,
+                    destination_bug_id: row.get(2)?,
+                    relationship_type: row.get(3)?,
+                })
+            },
+        ) {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn delete_bug_relationship(&self, rel_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        let rel: Option<(i64, i64, i32)> = conn
+            .query_row(
+                "SELECT source_bug_id, destination_bug_id, relationship_type
+                 FROM mantis_bug_relationship_table
+                 WHERE id = ?1",
+                params![rel_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .ok();
+
+        conn.execute(
+            "DELETE FROM mantis_bug_relationship_table WHERE id = ?1",
+            params![rel_id],
+        )?;
+
+        if let Some((src, dst, rtype)) = rel {
+            if rtype == 1 {
+                conn.execute(
+                    "DELETE FROM mantis_bug_relationship_table
+                     WHERE source_bug_id = ?1 AND destination_bug_id = ?2 AND relationship_type = 2",
+                    params![dst, src],
+                )?;
+                conn.execute(
+                    "UPDATE mantis_bug_table SET duplicate_id = 0 WHERE id = ?1 AND duplicate_id = ?2",
+                    params![src, dst],
+                )?;
+            } else if rtype == 2 {
+                conn.execute(
+                    "DELETE FROM mantis_bug_relationship_table
+                     WHERE source_bug_id = ?1 AND destination_bug_id = ?2 AND relationship_type = 1",
+                    params![dst, src],
+                )?;
+                conn.execute(
+                    "UPDATE mantis_bug_table SET duplicate_id = 0 WHERE id = ?1 AND duplicate_id = ?2",
+                    params![dst, src],
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn list_bug_relationships(&self, bug_id: i64) -> rusqlite::Result<Vec<BugRelationship>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, source_bug_id, destination_bug_id, relationship_type
+             FROM mantis_bug_relationship_table
+             WHERE source_bug_id = ?1
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![bug_id], |row| {
+            Ok(BugRelationship {
+                id: row.get(0)?,
+                source_bug_id: row.get(1)?,
+                destination_bug_id: row.get(2)?,
+                relationship_type: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn add_bug_file(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        filename: &str,
+        file_type: &str,
+        content: Vec<u8>,
+        upload_dir: &str,
+    ) -> Result<i64, String> {
+        let trimmed_filename = filename.trim();
+        if trimmed_filename.is_empty() {
+            return Err("Filename cannot be empty".to_string());
+        }
+
+        let conn = self.conn();
+        if Self::query_bug_by_id(&conn, bug_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("Bug {} not found", bug_id));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let filesize = content.len() as i64;
+
+        let (diskfile, folder, blob_opt): (String, String, Option<Vec<u8>>) =
+            if upload_dir.trim().is_empty() {
+                (String::new(), String::new(), Some(content))
+            } else {
+                std::fs::create_dir_all(upload_dir).map_err(|e| e.to_string())?;
+                let uuid_name = format!(
+                    "{:016x}{:016x}",
+                    rand::random::<u64>(),
+                    rand::random::<u64>()
+                );
+                let full_path = std::path::Path::new(upload_dir).join(&uuid_name);
+                std::fs::write(full_path, &content).map_err(|e| e.to_string())?;
+                (uuid_name, upload_dir.to_string(), None)
+            };
+
+        conn.execute(
+            "INSERT INTO mantis_bug_file_table (
+                bug_id, title, description, diskfile, filename, folder,
+                filesize, file_type, content, date_added, user_id
+            ) VALUES (?1, '', '', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                bug_id,
+                diskfile,
+                trimmed_filename,
+                folder,
+                filesize,
+                file_type,
+                blob_opt,
+                now,
+                user_id,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let file_id = conn.last_insert_rowid();
+
+        self.record_history(&conn, bug_id, user_id, "file_added", "", trimmed_filename, 2)
+            .map_err(|e| e.to_string())?;
+
+        Ok(file_id)
+    }
+
+    pub fn get_bug_file(
+        &self,
+        file_id: i64,
+        upload_dir: &str,
+    ) -> rusqlite::Result<Option<(BugFile, Vec<u8>)>> {
+        let conn = self.conn();
+        let query_res = conn.query_row(
+            "SELECT id, bug_id, title, description, diskfile, filename, folder,
+                    filesize, file_type, content, date_added, user_id
+             FROM mantis_bug_file_table
+             WHERE id = ?1",
+            params![file_id],
+            |row| {
+                let meta = BugFile {
+                    id: row.get(0)?,
+                    bug_id: row.get(1)?,
+                    title: row.get(2)?,
+                    description: row.get(3)?,
+                    diskfile: row.get(4)?,
+                    filename: row.get(5)?,
+                    folder: row.get(6)?,
+                    filesize: row.get(7)?,
+                    file_type: row.get(8)?,
+                    date_added: row.get(10)?,
+                    user_id: row.get(11)?,
+                };
+                let blob: Option<Vec<u8>> = row.get(9)?;
+                Ok((meta, blob))
+            },
+        );
+        let row_opt = match query_res {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e),
+        };
+
+        let (meta, blob_opt) = match row_opt {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        if let Some(bytes) = blob_opt {
+            return Ok(Some((meta, bytes)));
+        }
+
+        let dir = if !upload_dir.trim().is_empty() {
+            upload_dir
+        } else {
+            &meta.folder
+        };
+        let path = std::path::Path::new(dir).join(&meta.diskfile);
+        let bytes = std::fs::read(path).unwrap_or_default();
+        Ok(Some((meta, bytes)))
+    }
+
+    pub fn get_bug_file_meta(&self, file_id: i64) -> rusqlite::Result<Option<BugFile>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, bug_id, title, description, diskfile, filename, folder,
+                    filesize, file_type, date_added, user_id
+             FROM mantis_bug_file_table
+             WHERE id = ?1",
+            params![file_id],
+            |row| {
+                Ok(BugFile {
+                    id: row.get(0)?,
+                    bug_id: row.get(1)?,
+                    title: row.get(2)?,
+                    description: row.get(3)?,
+                    diskfile: row.get(4)?,
+                    filename: row.get(5)?,
+                    folder: row.get(6)?,
+                    filesize: row.get(7)?,
+                    file_type: row.get(8)?,
+                    date_added: row.get(9)?,
+                    user_id: row.get(10)?,
+                })
+            },
+        ) {
+            Ok(f) => Ok(Some(f)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn delete_bug_file(&self, file_id: i64, upload_dir: &str) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        let meta: Option<(i64, i64, String, String, String)> = conn
+            .query_row(
+                "SELECT bug_id, user_id, filename, diskfile, folder
+                 FROM mantis_bug_file_table
+                 WHERE id = ?1",
+                params![file_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .ok();
+
+        conn.execute(
+            "DELETE FROM mantis_bug_file_table WHERE id = ?1",
+            params![file_id],
+        )?;
+
+        if let Some((bug_id, user_id, filename, diskfile, folder)) = meta {
+            if !diskfile.is_empty() {
+                let dir = if !upload_dir.trim().is_empty() {
+                    upload_dir
+                } else {
+                    &folder
+                };
+                let path = std::path::Path::new(dir).join(&diskfile);
+                let _ = std::fs::remove_file(path);
+            }
+            let _ = self.record_history(&conn, bug_id, user_id, "file_deleted", &filename, "", 2);
+        }
+
+        Ok(())
+    }
+
+    pub fn list_bug_files(&self, bug_id: i64) -> rusqlite::Result<Vec<BugFile>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, bug_id, title, description, diskfile, filename, folder,
+                    filesize, file_type, date_added, user_id
+             FROM mantis_bug_file_table
+             WHERE bug_id = ?1
+             ORDER BY date_added ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![bug_id], |row| {
+            Ok(BugFile {
+                id: row.get(0)?,
+                bug_id: row.get(1)?,
+                title: row.get(2)?,
+                description: row.get(3)?,
+                diskfile: row.get(4)?,
+                filename: row.get(5)?,
+                folder: row.get(6)?,
+                filesize: row.get(7)?,
+                file_type: row.get(8)?,
+                date_added: row.get(9)?,
+                user_id: row.get(10)?,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]
@@ -1853,4 +3084,220 @@ mod tests {
         // Delete nonexistent fails
         assert!(db.delete_version(v1).is_err());
     }
+
+    #[test]
+    fn test_bug_schema_bootstrap_and_crud() {
+        let db = Db::open_in_memory().unwrap();
+        let proj_id = db.create_project("TestProj", 10, 10, "", true).unwrap();
+        let uid = db
+            .create_user("alice", "Alice", "a@x.com", "pw", 25, true, false)
+            .unwrap();
+
+        let bug_id = db
+            .create_bug(
+                proj_id,
+                uid,
+                1,
+                "Test summary",
+                "Description here",
+                "Steps",
+                "Additional",
+                30,
+                50,
+                70,
+                "1.0",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+        assert!(bug_id > 0);
+
+        let bug = db.get_bug(bug_id).unwrap().expect("bug exists");
+        assert_eq!(bug.summary, "Test summary");
+        assert_eq!(bug.status, 10); // new
+        assert_eq!(bug.priority, 30); // normal
+        assert_eq!(bug.severity, 50); // minor
+
+        let full = db.get_bug_full(bug_id).unwrap().expect("full bug");
+        assert_eq!(full.description, "Description here");
+        assert_eq!(full.steps_to_reproduce, "Steps");
+
+        let bugs = db.list_bugs(proj_id, 10, 0, 25).unwrap();
+        assert_eq!(bugs.len(), 1);
+
+        // Private bug filtering at SQL level
+        let priv_bug_id = db
+            .create_bug(
+                proj_id,
+                uid,
+                1,
+                "Secret bug",
+                "Private",
+                "",
+                "",
+                30,
+                50,
+                70,
+                "",
+                "",
+                "",
+                "",
+                50,
+            )
+            .unwrap();
+        assert!(priv_bug_id > 0);
+        // Viewer (10) only sees public bug
+        assert_eq!(db.list_bugs(proj_id, 10, 0, 25).unwrap().len(), 1);
+        // Developer (55) sees both
+        assert_eq!(db.list_bugs(proj_id, 55, 0, 25).unwrap().len(), 2);
+
+        // Update bug fields & verify history only records changed fields
+        let changed = db
+            .update_bug_fields(
+                bug_id,
+                uid,
+                BugUpdate {
+                    summary: Some("Updated summary".to_string()),
+                    priority: Some(30), // unchanged!
+                    severity: Some(60), // changed 50 -> 60
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(changed.len(), 2);
+        assert!(changed.iter().any(|h| h.field_name == "summary"
+            && h.old_value == "Test summary"
+            && h.new_value == "Updated summary"));
+        assert!(changed
+            .iter()
+            .any(|h| h.field_name == "severity" && h.old_value == "50" && h.new_value == "60"));
+
+        db.delete_bug(bug_id).unwrap();
+        assert!(db.get_bug(bug_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_bug_status_workflow_and_history() {
+        let db = Db::open_in_memory().unwrap();
+        let proj_id = db.create_project("P", 10, 10, "", true).unwrap();
+        let uid = db
+            .create_user("dev", "Dev", "d@x.com", "pw", 55, true, false)
+            .unwrap();
+        let bug_id = db
+            .create_bug(
+                proj_id, uid, 1, "Summary", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
+            )
+            .unwrap();
+
+        // new -> resolved (with note)
+        db.change_bug_status(bug_id, uid, 80, 20, Some("Fixed it"))
+            .unwrap();
+        let bug = db.get_bug(bug_id).unwrap().unwrap();
+        assert_eq!(bug.status, 80);
+        assert_eq!(bug.resolution, 20);
+
+        let history = db.list_bug_history(bug_id).unwrap();
+        let status_change = history.iter().find(|h| h.field_name == "status").unwrap();
+        assert_eq!(status_change.old_value, "10");
+        assert_eq!(status_change.new_value, "80");
+
+        let notes = db.list_bugnotes(bug_id, 55).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].note, "Fixed it");
+
+        // Private note filtering
+        db.add_bugnote(bug_id, uid, "Private internal note", 50)
+            .unwrap();
+        assert_eq!(db.list_bugnotes(bug_id, 25).unwrap().len(), 1);
+        assert_eq!(db.list_bugnotes(bug_id, 55).unwrap().len(), 2);
+
+        // closed -> cannot go to resolved directly
+        db.change_bug_status(bug_id, uid, 90, 20, None).unwrap();
+        assert!(db.change_bug_status(bug_id, uid, 80, 20, None).is_err());
+        // closed -> feedback (20) is allowed
+        assert!(db.change_bug_status(bug_id, uid, 20, 30, None).is_ok());
+    }
+
+    #[test]
+    fn test_bug_relationships_and_duplicate_reverse() {
+        let db = Db::open_in_memory().unwrap();
+        let proj_id = db.create_project("P", 10, 10, "", true).unwrap();
+        let uid = db
+            .create_user("dev", "Dev", "d@x.com", "pw", 55, true, false)
+            .unwrap();
+        let b1 = db
+            .create_bug(
+                proj_id, uid, 1, "Bug 1", "", "", "", 30, 50, 70, "", "", "", "", 10,
+            )
+            .unwrap();
+        let b2 = db
+            .create_bug(
+                proj_id, uid, 1, "Bug 2", "", "", "", 30, 50, 70, "", "", "", "", 10,
+            )
+            .unwrap();
+
+        // add duplicate_of relationship -> reverse must be auto-created
+        db.add_bug_relationship(b2, b1, 1).unwrap(); // b2 is duplicate_of b1
+        let rels = db.list_bug_relationships(b1).unwrap();
+        assert!(rels
+            .iter()
+            .any(|r| r.relationship_type == 2 && r.destination_bug_id == b2)); // b1 has_duplicate b2
+        assert_eq!(db.get_bug(b2).unwrap().unwrap().duplicate_id, b1);
+
+        // Deleting one side deletes both sides
+        let rel_on_b1 = rels[0].id;
+        db.delete_bug_relationship(rel_on_b1).unwrap();
+        assert!(db.list_bug_relationships(b1).unwrap().is_empty());
+        assert!(db.list_bug_relationships(b2).unwrap().is_empty());
+        assert_eq!(db.get_bug(b2).unwrap().unwrap().duplicate_id, 0);
+
+        // add related_to -> no reverse auto-created
+        db.add_bug_relationship(b1, b2, 0).unwrap();
+        let rels2 = db.list_bug_relationships(b2).unwrap();
+        assert!(!rels2
+            .iter()
+            .any(|r| r.source_bug_id == b2 && r.relationship_type == 0));
+    }
+
+    #[test]
+    fn test_bug_file_attachment_inline_and_cascade() {
+        let db = Db::open_in_memory().unwrap();
+        let proj_id = db.create_project("P", 10, 10, "", true).unwrap();
+        let uid = db
+            .create_user("rep", "Rep", "r@x.com", "pw", 25, true, false)
+            .unwrap();
+        let bug_id = db
+            .create_bug(
+                proj_id, uid, 1, "Bug", "", "", "", 30, 50, 70, "", "", "", "", 10,
+            )
+            .unwrap();
+
+        let content = b"hello file".to_vec();
+        let fid = db
+            .add_bug_file(bug_id, uid, "test.txt", "text/plain", content.clone(), "")
+            .unwrap();
+        assert!(fid > 0);
+
+        let files = db.list_bug_files(bug_id).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "test.txt");
+        assert_eq!(files[0].filesize, 10);
+
+        let (_, fetched) = db.get_bug_file(fid, "").unwrap().unwrap();
+        assert_eq!(fetched, content);
+
+        db.delete_bug_file(fid, "").unwrap();
+        assert!(db.list_bug_files(bug_id).unwrap().is_empty());
+
+        // Cascade: deleting the bug removes all attachments
+        let fid2 = db
+            .add_bug_file(bug_id, uid, "test2.txt", "text/plain", b"data".to_vec(), "")
+            .unwrap();
+        assert!(fid2 > 0);
+        db.delete_bug(bug_id).unwrap();
+        assert!(db.get_bug_file(fid2, "").unwrap().is_none());
+    }
 }
+

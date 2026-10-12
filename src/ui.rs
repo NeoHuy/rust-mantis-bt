@@ -118,16 +118,19 @@ pub fn render_layout(
     }
 
     let mut nav_links = vec![
+        r#"<a href="/my_view_page">My View</a>"#.to_string(),
         r#"<a href="/view_all_bug_page">View Issues</a>"#.to_string(),
     ];
     if ctx.user.access_level >= 25 {
         nav_links.push(r#"<a href="/bug_report_page">Report Issue</a>"#.to_string());
     }
+    nav_links.push(r#"<a href="/manage_tags_page">Tags</a>"#.to_string());
     nav_links.push(r#"<a href="/account_page">My Account</a>"#.to_string());
     if ctx.user.access_level >= 70 {
         nav_links.push(r#"<a href="/manage_proj_page">Manage Projects</a>"#.to_string());
     }
     if ctx.user.access_level >= 90 {
+        nav_links.push(r#"<a href="/manage_custom_field_page">Custom Fields</a>"#.to_string());
         nav_links.push(r#"<a href="/manage_user_page">Manage Users</a>"#.to_string());
     }
 

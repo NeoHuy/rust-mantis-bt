@@ -1,6 +1,9 @@
 pub mod auth;
 pub mod bugs;
+pub mod custom_fields;
+pub mod filters;
 pub mod projects;
+pub mod tags;
 pub mod users;
 
 use crate::auth::AuthContext;
@@ -81,6 +84,46 @@ pub fn build_router(db: Db) -> Router {
         )
         .route("/file/bug/:id/:filename", get(bugs::bug_file_download))
         .route("/bug_file_delete/:id", post(bugs::bug_file_delete))
+        // Sub-project 3: My View, Search, Saved Filters, Custom Fields, Tags, Monitors & CSV Export
+        .route("/my_view_page", get(bugs::my_view_page))
+        .route("/csv_export", get(bugs::csv_export))
+        .route("/bug_monitor_add/:bug_id", post(bugs::bug_monitor_add))
+        .route("/bug_monitor_delete/:bug_id", post(bugs::bug_monitor_delete))
+        .route("/manage_tags_page", get(tags::manage_tags_page))
+        .route("/tag_create", post(tags::tag_create))
+        .route("/tag_update/:id", post(tags::tag_update))
+        .route("/tag_delete/:id", post(tags::tag_delete))
+        .route("/bug_tag_attach/:bug_id", post(tags::bug_tag_attach))
+        .route("/bug_tag_detach/:bug_id/:tag_id", post(tags::bug_tag_detach))
+        .route(
+            "/manage_custom_field_page",
+            get(custom_fields::manage_custom_field_page),
+        )
+        .route(
+            "/manage_custom_field_create",
+            post(custom_fields::manage_custom_field_create),
+        )
+        .route(
+            "/manage_custom_field_edit_page/:id",
+            get(custom_fields::manage_custom_field_edit_page),
+        )
+        .route(
+            "/manage_custom_field_update/:id",
+            post(custom_fields::manage_custom_field_update),
+        )
+        .route(
+            "/manage_custom_field_delete/:id",
+            post(custom_fields::manage_custom_field_delete),
+        )
+        .route(
+            "/manage_custom_field_proj_add/:id",
+            post(custom_fields::manage_custom_field_proj_add),
+        )
+        .route(
+            "/manage_custom_field_proj_remove/:id/:project_id",
+            post(custom_fields::manage_custom_field_proj_remove),
+        )
+        .route("/filter_save", post(filters::filter_save))
+        .route("/filter_delete/:id", post(filters::filter_delete))
         .with_state(db)
 }
-

@@ -1,8 +1,8 @@
 use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::models::{
-    BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus, BugUpdate,
-    RelationshipType, ViewState,
+    Bug, BugFilter, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus,
+    BugUpdate, RelationshipType, ViewState,
 };
 use crate::ui::{html_escape, render_layout};
 use axum::body::Bytes;
@@ -15,10 +15,18 @@ use std::collections::HashMap;
 #[derive(Deserialize, Default)]
 pub struct ListBugsQuery {
     pub page: Option<i64>,
+    pub filter_id: Option<i64>,
+    pub q: Option<String>,
+    pub search: Option<String>,
     pub status: Option<i32>,
+    pub hide_status: Option<i32>,
     pub priority: Option<i32>,
     pub severity: Option<i32>,
+    pub category_id: Option<i64>,
+    pub reporter_id: Option<i64>,
     pub handler_id: Option<i64>,
+    pub tag_id: Option<i64>,
+    pub monitored_by: Option<i64>,
     pub msg: Option<String>,
     pub err: Option<String>,
 }
@@ -94,6 +102,298 @@ fn upload_dir() -> String {
     std::env::var("MANTIS_UPLOAD_DIR").unwrap_or_default()
 }
 
+fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilter {
+    if let Some(fid) = q.filter_id {
+        if let Ok(Some((sf, mut bf))) = db.get_filter(fid) {
+            if sf.is_public != 0 || sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
+                if ctx.active_project_id > 0 {
+                    bf.project_id = Some(ctx.active_project_id);
+                }
+                return bf;
+            }
+        }
+    }
+
+    let kw = q
+        .q
+        .clone()
+        .or_else(|| q.search.clone())
+        .filter(|s| !s.trim().is_empty());
+
+    BugFilter {
+        project_id: if ctx.active_project_id > 0 {
+            Some(ctx.active_project_id)
+        } else {
+            None
+        },
+        search: kw,
+        status: q.status.filter(|&v| v > 0),
+        hide_status: q.hide_status.filter(|&v| v > 0),
+        priority: q.priority.filter(|&v| v > 0),
+        severity: q.severity.filter(|&v| v > 0),
+        category_id: q.category_id.filter(|&v| v > 0),
+        reporter_id: q.reporter_id.filter(|&v| v > 0),
+        handler_id: q.handler_id.filter(|&v| v != 0),
+        tag_id: q.tag_id.filter(|&v| v > 0),
+        monitored_by: q.monitored_by.filter(|&v| v > 0),
+    }
+}
+
+fn render_my_view_box(title: &str, link: &str, bugs: &[Bug]) -> String {
+    let mut rows = String::new();
+    if bugs.is_empty() {
+        rows.push_str(
+            r#"<tr><td colspan="3" style="text-align:center; padding:8px;">No issues.</td></tr>"#,
+        );
+    } else {
+        for b in bugs.iter().take(10) {
+            rows.push_str(&format!(
+                r#"<tr>
+                    <td style="width:80px;"><a href="/view_bug_page/{}">{:07}</a></td>
+                    <td style="width:90px;">{}</td>
+                    <td><a href="/view_bug_page/{}">{}</a></td>
+                </tr>"#,
+                b.id,
+                b.id,
+                html_escape(status_label(b.status)),
+                b.id,
+                html_escape(&b.summary)
+            ));
+        }
+    }
+    format!(
+        r#"<div class="panel">
+            <div class="panel-header" style="display:flex; justify-content:space-between;">
+                <span>{} ({})</span>
+                <a href="{}" style="font-size:12px;">View all</a>
+            </div>
+            <div class="panel-body" style="padding:8px;">
+                <table class="data-table" style="margin-bottom:0;">
+                    <tbody>{}</tbody>
+                </table>
+            </div>
+        </div>"#,
+        html_escape(title),
+        bugs.len(),
+        link,
+        rows
+    )
+}
+
+pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
+    let pid = if ctx.active_project_id > 0 {
+        Some(ctx.active_project_id)
+    } else {
+        None
+    };
+
+    let assigned_to_me = db
+        .filter_bugs(
+            &BugFilter {
+                project_id: pid,
+                handler_id: Some(ctx.user.id),
+                hide_status: Some(80),
+                ..Default::default()
+            },
+            &ctx.user,
+        )
+        .unwrap_or_default();
+
+    let unassigned = db
+        .filter_bugs(
+            &BugFilter {
+                project_id: pid,
+                handler_id: Some(-1),
+                hide_status: Some(80),
+                ..Default::default()
+            },
+            &ctx.user,
+        )
+        .unwrap_or_default();
+
+    let reported_by_me = db
+        .filter_bugs(
+            &BugFilter {
+                project_id: pid,
+                reporter_id: Some(ctx.user.id),
+                ..Default::default()
+            },
+            &ctx.user,
+        )
+        .unwrap_or_default();
+
+    let resolved = db
+        .filter_bugs(
+            &BugFilter {
+                project_id: pid,
+                status: Some(80),
+                ..Default::default()
+            },
+            &ctx.user,
+        )
+        .unwrap_or_default();
+
+    let recently_modified = db
+        .filter_bugs(
+            &BugFilter {
+                project_id: pid,
+                ..Default::default()
+            },
+            &ctx.user,
+        )
+        .unwrap_or_default();
+
+    let monitored_by_me = db
+        .filter_bugs(
+            &BugFilter {
+                project_id: pid,
+                monitored_by: Some(ctx.user.id),
+                ..Default::default()
+            },
+            &ctx.user,
+        )
+        .unwrap_or_default();
+
+    let content = format!(
+        r#"<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap:16px;">
+            {}
+            {}
+            {}
+            {}
+            {}
+            {}
+        </div>"#,
+        render_my_view_box(
+            "Assigned to Me (Unresolved)",
+            &format!("/view_all_bug_page?handler_id={}&hide_status=80", ctx.user.id),
+            &assigned_to_me
+        ),
+        render_my_view_box(
+            "Unassigned",
+            "/view_all_bug_page?handler_id=-1&hide_status=80",
+            &unassigned
+        ),
+        render_my_view_box(
+            "Reported by Me",
+            &format!("/view_all_bug_page?reporter_id={}", ctx.user.id),
+            &reported_by_me
+        ),
+        render_my_view_box("Resolved", "/view_all_bug_page?status=80", &resolved),
+        render_my_view_box("Recently Modified", "/view_all_bug_page", &recently_modified),
+        render_my_view_box(
+            "Monitored by Me",
+            &format!("/view_all_bug_page?monitored_by={}", ctx.user.id),
+            &monitored_by_me
+        ),
+    );
+
+    render_layout("My View", &ctx, None, &content).into_response()
+}
+
+fn sanitize_csv_cell(val: &str) -> String {
+    let trimmed = val.trim_start();
+    let needs_prefix = trimmed.starts_with('=')
+        || trimmed.starts_with('+')
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('@');
+    let safe = if needs_prefix {
+        format!("'{}", val)
+    } else {
+        val.to_string()
+    };
+    if safe.contains(',') || safe.contains('"') || safe.contains('\n') || safe.contains('\r') {
+        format!("\"{}\"", safe.replace('"', "\"\""))
+    } else {
+        safe
+    }
+}
+
+pub async fn csv_export(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<ListBugsQuery>,
+) -> Response {
+    if ctx.active_project_id > 0 {
+        let eff = db
+            .effective_access_level(&ctx.user, ctx.active_project_id)
+            .unwrap_or(0);
+        if eff < 10 {
+            return forbidden(&ctx, "You do not have access to this project.");
+        }
+    }
+
+    let filter = resolve_bug_filter(&db, &ctx, &q);
+    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+
+    let users_map: HashMap<i64, String> = db
+        .list_users(None, false)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| (u.id, u.username))
+        .collect();
+
+    let mut out = String::from(
+        "Id,Project,Reporter,Assigned To,Priority,Severity,Reproducibility,Status,Resolution,Category,Summary,Updated\r\n",
+    );
+
+    for b in &bugs {
+        let proj = db
+            .get_project_by_id(b.project_id)
+            .ok()
+            .flatten()
+            .map(|p| p.name)
+            .unwrap_or_else(|| format!("#{}", b.project_id));
+        let rep = users_map
+            .get(&b.reporter_id)
+            .cloned()
+            .unwrap_or_else(|| format!("user#{}", b.reporter_id));
+        let handler = if b.handler_id > 0 {
+            users_map
+                .get(&b.handler_id)
+                .cloned()
+                .unwrap_or_else(|| format!("user#{}", b.handler_id))
+        } else {
+            String::new()
+        };
+        let cat = db
+            .get_category_by_id(b.category_id)
+            .ok()
+            .flatten()
+            .map(|c| c.name)
+            .unwrap_or_else(|| "General".to_string());
+
+        let row = [
+            format!("{:07}", b.id),
+            sanitize_csv_cell(&proj),
+            sanitize_csv_cell(&rep),
+            sanitize_csv_cell(&handler),
+            sanitize_csv_cell(priority_label(b.priority)),
+            sanitize_csv_cell(severity_label(b.severity)),
+            sanitize_csv_cell(reproducibility_label(b.reproducibility)),
+            sanitize_csv_cell(status_label(b.status)),
+            sanitize_csv_cell(resolution_label(b.resolution)),
+            sanitize_csv_cell(&cat),
+            sanitize_csv_cell(&b.summary),
+            b.last_updated.to_string(),
+        ];
+        out.push_str(&row.join(","));
+        out.push_str("\r\n");
+    }
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"issues.csv\"".to_string(),
+            ),
+        ],
+        out,
+    )
+        .into_response()
+}
+
 pub async fn view_all_bug_page(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -103,47 +403,17 @@ pub async fn view_all_bug_page(
     let per_page: i64 = 25;
     let offset = (page - 1) * per_page;
 
-    let mut bugs = if ctx.active_project_id > 0 {
+    if ctx.active_project_id > 0 {
         let eff = db
             .effective_access_level(&ctx.user, ctx.active_project_id)
             .unwrap_or(0);
         if eff < 10 {
             return forbidden(&ctx, "You do not have access to this project.");
         }
-        db.list_bugs(ctx.active_project_id, eff, 0, 10_000)
-            .unwrap_or_default()
-    } else {
-        let all = db.list_bugs(0, 90, 0, 10_000).unwrap_or_default();
-        all.into_iter()
-            .filter(|b| {
-                let eff = db
-                    .effective_access_level(&ctx.user, b.project_id)
-                    .unwrap_or(0);
-                eff >= 10 && (b.view_state == 10 || eff >= 55)
-            })
-            .collect()
-    };
+    }
 
-    if let Some(st) = q.status {
-        if st > 0 {
-            bugs.retain(|b| b.status == st);
-        }
-    }
-    if let Some(pr) = q.priority {
-        if pr > 0 {
-            bugs.retain(|b| b.priority == pr);
-        }
-    }
-    if let Some(sev) = q.severity {
-        if sev > 0 {
-            bugs.retain(|b| b.severity == sev);
-        }
-    }
-    if let Some(hid) = q.handler_id {
-        if hid > 0 {
-            bugs.retain(|b| b.handler_id == hid);
-        }
-    }
+    let filter = resolve_bug_filter(&db, &ctx, &q);
+    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
 
     let total = bugs.len();
     let paged_bugs: Vec<_> = bugs
@@ -168,7 +438,7 @@ pub async fn view_all_bug_page(
     let mut rows_html = String::new();
     if paged_bugs.is_empty() {
         rows_html.push_str(
-            r#"<tr><td colspan="9" style="text-align:center; padding:16px;">No issues found.</td></tr>"#,
+            r#"<tr><td colspan="8" style="text-align:center; padding:16px;">No issues found.</td></tr>"#,
         );
     } else {
         for (idx, b) in paged_bugs.iter().enumerate() {
@@ -259,15 +529,72 @@ pub async fn view_all_bug_page(
         String::new()
     };
 
+    let all_tags = db.list_tags().unwrap_or_default();
+    let mut tag_opts = String::from(r#"<option value="0">All</option>"#);
+    for t in &all_tags {
+        let sel = if filter.tag_id == Some(t.id) {
+            "selected"
+        } else {
+            ""
+        };
+        tag_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            t.id,
+            sel,
+            html_escape(&t.name)
+        ));
+    }
+
+    let saved_filters = db
+        .list_visible_filters(ctx.user.id, ctx.active_project_id)
+        .unwrap_or_default();
+    let mut saved_filters_html = String::new();
+    for sf in &saved_filters {
+        saved_filters_html.push_str(&format!(
+            r#"<a class="btn btn-secondary btn-sm" href="/view_all_bug_page?filter_id={}">{}</a> "#,
+            sf.id,
+            html_escape(&sf.name)
+        ));
+    }
+
+    let search_val = filter.search.as_deref().unwrap_or("");
+    let save_filter_form = if ctx.user.access_level >= 25 {
+        format!(
+            r#"<form method="POST" action="/filter_save" style="display:flex; gap:6px; align-items:center; margin-top:8px;">
+                <input type="hidden" name="search" value="{}">
+                <input type="hidden" name="status" value="{}">
+                <input type="hidden" name="priority" value="{}">
+                <input type="hidden" name="severity" value="{}">
+                <input type="hidden" name="tag_id" value="{}">
+                <input type="text" name="name" placeholder="Saved filter name" style="max-width:180px;" required>
+                <label><input type="checkbox" name="is_public" value="1"> Public</label>
+                <button type="submit" class="btn btn-secondary btn-sm">Save Filter</button>
+            </form>"#,
+            html_escape(search_val),
+            filter.status.unwrap_or(0),
+            filter.priority.unwrap_or(0),
+            filter.severity.unwrap_or(0),
+            filter.tag_id.unwrap_or(0)
+        )
+    } else {
+        String::new()
+    };
+
     let content = format!(
         r#"{}
         <div class="panel">
             <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
                 <span>Viewing Issues ({})</span>
-                <a class="btn btn-sm" href="/bug_report_page">Report Issue</a>
+                <div style="display:flex; gap:8px;">
+                    <a class="btn btn-secondary btn-sm" href="/csv_export?q={}&status={}&priority={}&severity={}&tag_id={}">CSV Export</a>
+                    <a class="btn btn-sm" href="/bug_report_page">Report Issue</a>
+                </div>
             </div>
             <div class="panel-body">
-                <form method="GET" action="/view_all_bug_page" style="display:flex; gap:10px; align-items:center; margin-bottom:12px; flex-wrap:wrap;">
+                <form method="GET" action="/view_all_bug_page" style="display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+                    <label>Search:
+                        <input type="text" name="q" value="{}" placeholder="Keyword..." style="width:150px;">
+                    </label>
                     <label>Status:
                         <select name="status" style="width:auto;">
                             <option value="0">All</option>
@@ -304,8 +631,15 @@ pub async fn view_all_bug_page(
                             <option value="80">block</option>
                         </select>
                     </label>
+                    <label>Tag:
+                        <select name="tag_id" style="width:auto;">{}</select>
+                    </label>
                     <button type="submit" class="btn btn-secondary btn-sm">Apply Filter</button>
                 </form>
+                <div style="margin-bottom:10px;">
+                    {}
+                    {}
+                </div>
                 <table class="data-table">
                     <thead>
                         <tr>
@@ -328,7 +662,20 @@ pub async fn view_all_bug_page(
                 </div>
             </div>
         </div>"#,
-        err_banner, total, rows_html, prev_link, next_link
+        err_banner,
+        total,
+        html_escape(search_val),
+        filter.status.unwrap_or(0),
+        filter.priority.unwrap_or(0),
+        filter.severity.unwrap_or(0),
+        filter.tag_id.unwrap_or(0),
+        html_escape(search_val),
+        tag_opts,
+        saved_filters_html,
+        save_filter_form,
+        rows_html,
+        prev_link,
+        next_link
     );
 
     render_layout("View Issues", &ctx, q.msg.as_deref(), &content).into_response()
@@ -367,6 +714,12 @@ pub async fn bug_report_page(
     } else {
         Vec::new()
     };
+    let custom_fields = if default_proj_id > 0 {
+        db.list_custom_fields_for_project(default_proj_id)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let mut proj_opts = String::new();
     for (p, _) in &ctx.visible_projects {
@@ -402,6 +755,28 @@ pub async fn bug_report_page(
             html_escape(&v.version),
             html_escape(&v.version)
         ));
+    }
+
+    let mut cf_rows_html = String::new();
+    for cf in &custom_fields {
+        if cf.display_report != 0 {
+            let req = if cf.require_report != 0 {
+                "required"
+            } else {
+                ""
+            };
+            cf_rows_html.push_str(&format!(
+                r#"<tr>
+                    <td class="label-col">{}{}</td>
+                    <td class="input-col"><input type="text" name="custom_field_{}" value="{}" {}></td>
+                </tr>"#,
+                html_escape(&cf.name),
+                if cf.require_report != 0 { " *" } else { "" },
+                cf.id,
+                html_escape(&cf.default_value),
+                req
+            ));
+        }
     }
 
     let err_banner = q
@@ -494,6 +869,7 @@ pub async fn bug_report_page(
                             <td class="label-col">Additional Information</td>
                             <td class="input-col"><textarea name="additional_information"></textarea></td>
                         </tr>
+                        {}
                         <tr>
                             <td class="label-col">View Status</td>
                             <td class="input-col">
@@ -508,36 +884,21 @@ pub async fn bug_report_page(
                 </form>
             </div>
         </div>"#,
-        err_banner, proj_opts, cat_opts, ver_opts
+        err_banner, proj_opts, cat_opts, ver_opts, cf_rows_html
     );
 
     render_layout("Report Issue", &ctx, q.msg.as_deref(), &content).into_response()
 }
 
-#[derive(Deserialize)]
-pub struct BugReportForm {
-    pub project_id: Option<i64>,
-    pub category_id: Option<i64>,
-    pub reproducibility: Option<i32>,
-    pub severity: Option<i32>,
-    pub priority: Option<i32>,
-    pub version: Option<String>,
-    pub platform: Option<String>,
-    pub os: Option<String>,
-    pub os_build: Option<String>,
-    pub summary: Option<String>,
-    pub description: Option<String>,
-    pub steps_to_reproduce: Option<String>,
-    pub additional_information: Option<String>,
-    pub view_state: Option<i32>,
-}
-
 pub async fn bug_report(
     State(db): State<Db>,
     ctx: AuthContext,
-    axum::Form(form): axum::Form<BugReportForm>,
+    axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
-    let project_id = form.project_id.unwrap_or(ctx.active_project_id);
+    let project_id = form
+        .get("project_id")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(ctx.active_project_id);
     if project_id <= 0 {
         return Redirect::to("/bug_report_page?err=Please+select+a+valid+project").into_response();
     }
@@ -549,30 +910,70 @@ pub async fn bug_report(
         return forbidden(&ctx, "Reporter access required to create an issue.");
     }
 
-    let category_id = form.category_id.unwrap_or(1);
-    let priority = form.priority.unwrap_or(30);
-    let severity = form.severity.unwrap_or(50);
-    let reproducibility = form.reproducibility.unwrap_or(70);
-    let view_state = if form.view_state == Some(50) { 50 } else { 10 };
+    let category_id = form
+        .get("category_id")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(1);
+    let priority = form
+        .get("priority")
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(30);
+    let severity = form
+        .get("severity")
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(50);
+    let reproducibility = form
+        .get("reproducibility")
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(70);
+    let view_state = if form.get("view_state").map(|s| s.as_str()) == Some("50") {
+        50
+    } else {
+        10
+    };
+
+    let custom_fields = db
+        .list_custom_fields_for_project(project_id)
+        .unwrap_or_default();
+    for cf in &custom_fields {
+        let key = format!("custom_field_{}", cf.id);
+        let val = form.get(&key).map(|s| s.trim()).unwrap_or("");
+        if cf.require_report != 0 && val.is_empty() {
+            return Redirect::to("/bug_report_page?err=Required+custom+field+missing")
+                .into_response();
+        }
+    }
 
     match db.create_bug(
         project_id,
         ctx.user.id,
         category_id,
-        form.summary.as_deref().unwrap_or(""),
-        form.description.as_deref().unwrap_or(""),
-        form.steps_to_reproduce.as_deref().unwrap_or(""),
-        form.additional_information.as_deref().unwrap_or(""),
+        form.get("summary").map(|s| s.as_str()).unwrap_or(""),
+        form.get("description").map(|s| s.as_str()).unwrap_or(""),
+        form.get("steps_to_reproduce")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        form.get("additional_information")
+            .map(|s| s.as_str())
+            .unwrap_or(""),
         priority,
         severity,
         reproducibility,
-        form.version.as_deref().unwrap_or(""),
-        form.os.as_deref().unwrap_or(""),
-        form.os_build.as_deref().unwrap_or(""),
-        form.platform.as_deref().unwrap_or(""),
+        form.get("version").map(|s| s.as_str()).unwrap_or(""),
+        form.get("os").map(|s| s.as_str()).unwrap_or(""),
+        form.get("os_build").map(|s| s.as_str()).unwrap_or(""),
+        form.get("platform").map(|s| s.as_str()).unwrap_or(""),
         view_state,
     ) {
-        Ok(bug_id) => Redirect::to(&format!("/view_bug_page/{}", bug_id)).into_response(),
+        Ok(bug_id) => {
+            for cf in &custom_fields {
+                let key = format!("custom_field_{}", cf.id);
+                if let Some(val) = form.get(&key) {
+                    let _ = db.set_custom_field_value(cf.id, bug_id, ctx.user.id, val);
+                }
+            }
+            Redirect::to(&format!("/view_bug_page/{}", bug_id)).into_response()
+        }
         Err(_) => Redirect::to("/bug_report_page?err=Invalid+bug+fields").into_response(),
     }
 }
@@ -632,6 +1033,10 @@ pub async fn view_bug_page(
     let history = db.list_bug_history(id).unwrap_or_default();
     let rels = db.list_bug_relationships(id).unwrap_or_default();
     let files = db.list_bug_files(id).unwrap_or_default();
+    let bug_tags = db.list_bug_tags(id).unwrap_or_default();
+    let cf_values = db.get_custom_field_values_for_bug(id).unwrap_or_default();
+    let monitors = db.list_bug_monitors(id).unwrap_or_default();
+    let is_monitoring = monitors.iter().any(|u| u.id == ctx.user.id);
 
     let err_banner = q
         .err
@@ -645,6 +1050,22 @@ pub async fn view_bug_page(
     if can_edit {
         actions_html.push_str(&format!(
             r#"<a class="btn btn-sm" href="/update_bug_page/{}">Edit</a>"#,
+            bug.id
+        ));
+    }
+
+    if is_monitoring {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
+                <button type="submit" class="btn btn-secondary btn-sm">End Monitoring</button>
+            </form>"#,
+            bug.id
+        ));
+    } else {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_monitor_add/{}" style="display:inline;">
+                <button type="submit" class="btn btn-secondary btn-sm">Monitor</button>
+            </form>"#,
             bug.id
         ));
     }
@@ -735,6 +1156,52 @@ pub async fn view_bug_page(
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_delete/{}" style="display:inline;">
                 <button type="submit" class="btn btn-danger btn-sm">Delete Issue</button>
+            </form>"#,
+            bug.id
+        ));
+    }
+
+    // Custom fields rows
+    let mut cf_rows_html = String::new();
+    for cfv in &cf_values {
+        cf_rows_html.push_str(&format!(
+            r#"<tr>
+                <td class="label-col">{}</td>
+                <td class="input-col" colspan="3">{}</td>
+            </tr>"#,
+            html_escape(&cfv.field_name),
+            html_escape(&cfv.value)
+        ));
+    }
+
+    // Tags section
+    let mut tags_html = String::new();
+    if bug_tags.is_empty() {
+        tags_html.push_str("<span>No tags attached.</span>");
+    } else {
+        for bt in &bug_tags {
+            let can_detach = eff >= 55 || (eff >= 25 && bt.user_id == ctx.user.id);
+            let detach_form = if can_detach {
+                format!(
+                    r#" <form method="POST" action="/bug_tag_detach/{}/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">x</button></form>"#,
+                    bug.id, bt.tag_id
+                )
+            } else {
+                String::new()
+            };
+            tags_html.push_str(&format!(
+                r#"<span class="badge badge-success" style="margin-right:6px;"><a href="/view_all_bug_page?tag_id={}">{}</a>{}</span>"#,
+                bt.tag_id,
+                html_escape(&bt.tag_name),
+                detach_form
+            ));
+        }
+    }
+    if eff >= 25 {
+        tags_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_tag_attach/{}" style="margin-top:8px; display:flex; gap:6px; align-items:center;">
+                <input type="text" name="tag_string" placeholder="Attach tags (comma-separated)" style="width:240px;">
+                <button type="submit" class="btn btn-secondary btn-sm">Attach Tags</button>
             </form>"#,
             bug.id
         ));
@@ -1007,7 +1474,15 @@ pub async fn view_bug_page(
                         <td class="label-col">Additional Information</td>
                         <td class="input-col" colspan="3" style="white-space:pre-wrap;">{}</td>
                     </tr>
+                    {}
                 </table>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header">Tags</div>
+            <div class="panel-body">
+                {}
             </div>
         </div>
 
@@ -1063,6 +1538,8 @@ pub async fn view_bug_page(
         html_escape(&full.description),
         html_escape(&full.steps_to_reproduce),
         html_escape(&full.additional_information),
+        cf_rows_html,
+        tags_html,
         rels_html,
         rel_form_html,
         files_html,
@@ -1118,6 +1595,20 @@ pub async fn update_bug_page(
             c.id,
             sel,
             html_escape(&c.name)
+        ));
+    }
+
+    let cf_values = db.get_custom_field_values_for_bug(id).unwrap_or_default();
+    let mut cf_rows_html = String::new();
+    for cfv in &cf_values {
+        cf_rows_html.push_str(&format!(
+            r#"<tr>
+                <td class="label-col">{}</td>
+                <td class="input-col"><input type="text" name="custom_field_{}" value="{}"></td>
+            </tr>"#,
+            html_escape(&cfv.field_name),
+            cfv.field_id,
+            html_escape(&cfv.value)
         ));
     }
 
@@ -1209,6 +1700,7 @@ pub async fn update_bug_page(
                             <td class="label-col">Additional Information</td>
                             <td class="input-col"><textarea name="additional_information">{}</textarea></td>
                         </tr>
+                        {}
                     </table>
                     <button type="submit" class="btn">Update Information</button>
                 </form>
@@ -1246,6 +1738,7 @@ pub async fn update_bug_page(
         html_escape(&full.description),
         html_escape(&full.steps_to_reproduce),
         html_escape(&full.additional_information),
+        cf_rows_html
     );
 
     render_layout(&format!("Update Issue #{:07}", bug.id), &ctx, None, &content).into_response()
@@ -1255,7 +1748,7 @@ pub async fn update_bug(
     State(db): State<Db>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-    axum::Form(fields): axum::Form<BugUpdate>,
+    axum::Form(form): axum::Form<HashMap<String, String>>,
 ) -> Response {
     let bug = match db.get_bug(id) {
         Ok(Some(b)) => b,
@@ -1273,17 +1766,85 @@ pub async fn update_bug(
         return forbidden(&ctx, "Insufficient access to update this issue.");
     }
 
-    if let Some(hid) = fields.handler_id {
+    let handler_id = form.get("handler_id").and_then(|v| v.parse::<i64>().ok());
+    if let Some(hid) = handler_id {
         if hid != bug.handler_id && eff < 55 {
             return forbidden(&ctx, "Developer access required to assign issues.");
         }
     }
 
+    let fields = BugUpdate {
+        summary: form.get("summary").cloned(),
+        category_id: form.get("category_id").and_then(|v| v.parse::<i64>().ok()),
+        priority: form.get("priority").and_then(|v| v.parse::<i32>().ok()),
+        severity: form.get("severity").and_then(|v| v.parse::<i32>().ok()),
+        reproducibility: form
+            .get("reproducibility")
+            .and_then(|v| v.parse::<i32>().ok()),
+        version: form.get("version").cloned(),
+        target_version: form.get("target_version").cloned(),
+        fixed_in_version: form.get("fixed_in_version").cloned(),
+        view_state: form.get("view_state").and_then(|v| v.parse::<i32>().ok()),
+        handler_id,
+        description: form.get("description").cloned(),
+        steps_to_reproduce: form.get("steps_to_reproduce").cloned(),
+        additional_information: form.get("additional_information").cloned(),
+    };
+
     match db.update_bug_fields(id, ctx.user.id, fields) {
-        Ok(_) => Redirect::to(&format!("/view_bug_page/{}?msg=Issue+updated", id)).into_response(),
+        Ok(_) => {
+            let custom_fields = db
+                .list_custom_fields_for_project(bug.project_id)
+                .unwrap_or_default();
+            for cf in &custom_fields {
+                let key = format!("custom_field_{}", cf.id);
+                if let Some(val) = form.get(&key) {
+                    if db.set_custom_field_value(cf.id, id, ctx.user.id, val).is_err() {
+                        return Redirect::to(&format!(
+                            "/view_bug_page/{}?err=Invalid+custom+field",
+                            id
+                        ))
+                        .into_response();
+                    }
+                }
+            }
+            Redirect::to(&format!("/view_bug_page/{}?msg=Issue+updated", id)).into_response()
+        }
         Err(_) => Redirect::to(&format!("/view_bug_page/{}?err=Failed+to+update+issue", id))
             .into_response(),
     }
+}
+
+pub async fn bug_monitor_add(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(bug_id): Path<i64>,
+) -> Response {
+    let bug = match db.get_bug(bug_id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+        return forbidden(&ctx, "Insufficient access to monitor this issue.");
+    }
+    let _ = db.add_bug_monitor(bug_id, ctx.user.id);
+    Redirect::to(&format!("/view_bug_page/{}?msg=Issue+monitored", bug_id)).into_response()
+}
+
+pub async fn bug_monitor_delete(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(bug_id): Path<i64>,
+) -> Response {
+    let _ = db.remove_bug_monitor(bug_id, ctx.user.id);
+    Redirect::to(&format!(
+        "/view_bug_page/{}?msg=Stopped+monitoring+issue",
+        bug_id
+    ))
+    .into_response()
 }
 
 pub async fn bug_delete(
@@ -1527,17 +2088,12 @@ pub async fn bug_relationship_delete(
 }
 
 fn parse_multipart_file(headers: &HeaderMap, body: &[u8]) -> Option<(String, String, Vec<u8>)> {
-    let ct = headers
-        .get(header::CONTENT_TYPE)?
-        .to_str()
-        .ok()?;
-    let boundary = ct
-        .split(';')
-        .find_map(|part| {
-            let p = part.trim();
-            p.strip_prefix("boundary=")
-                .map(|b| b.trim_matches('"').to_string())
-        })?;
+    let ct = headers.get(header::CONTENT_TYPE)?.to_str().ok()?;
+    let boundary = ct.split(';').find_map(|part| {
+        let p = part.trim();
+        p.strip_prefix("boundary=")
+            .map(|b| b.trim_matches('"').to_string())
+    })?;
 
     let delimiter = format!("--{}", boundary);
     let delim_bytes = delimiter.as_bytes();

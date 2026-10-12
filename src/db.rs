@@ -1,6 +1,7 @@
 use crate::models::{
     Bug, BugFile, BugFilter, BugFull, BugHistory, BugRelationship, BugTag, BugUpdate, Bugnote,
-    Category, CustomField, CustomFieldValue, Project, ProjectVersion, SavedFilter, Tag, User,
+    Category, CustomField, CustomFieldValue, EmailMessage, NewsItem, Project, ProjectVersion,
+    SavedFilter, Tag, TimeTrackingEntry, User,
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -265,6 +266,27 @@ impl Db {
                 user_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
                 bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
                 PRIMARY KEY (user_id, bug_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_email_table (
+                email_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL DEFAULT '',
+                subject TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT '',
+                submitted INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_news_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL DEFAULT 0,
+                poster_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
+                date_posted INTEGER NOT NULL DEFAULT 0,
+                last_modified INTEGER NOT NULL DEFAULT 0,
+                view_state INTEGER NOT NULL DEFAULT 10,
+                announcement INTEGER NOT NULL DEFAULT 0,
+                headline TEXT NOT NULL DEFAULT '',
+                body TEXT NOT NULL DEFAULT ''
             );",
         )?;
 
@@ -1694,6 +1716,13 @@ impl Db {
 
         // Record new bug creation in history (type = 1)
         let _ = self.record_history(&conn, bug_id, reporter_id, "", "", "", 1);
+        self.notify_bug_event(
+            &conn,
+            bug_id,
+            reporter_id,
+            &format!("[Issue #{:07}] New: {}", bug_id, trimmed_summary),
+            &format!("Issue #{:07} reported: {}\n\n{}", bug_id, trimmed_summary, description),
+        );
 
         Ok(bug_id)
     }
@@ -2073,10 +2102,21 @@ impl Db {
         if let Some(note_text) = note {
             let trimmed = note_text.trim();
             if !trimmed.is_empty() {
-                Self::insert_bugnote_inner(&conn, self, bug_id, user_id, trimmed, 10)
+                Self::insert_bugnote_inner(&conn, self, bug_id, user_id, trimmed, 10, 0)
                     .map_err(|e| e.to_string())?;
             }
         }
+
+        self.notify_bug_event(
+            &conn,
+            bug_id,
+            user_id,
+            &format!("[Issue #{:07}] Status changed to {}", bug_id, new_status),
+            &format!(
+                "Issue #{:07} ({}) status changed from {} to {} (resolution {}).",
+                bug_id, bug.summary, bug.status, new_status, resolution
+            ),
+        );
 
         Ok(())
     }
@@ -2140,6 +2180,17 @@ impl Db {
             .map_err(|e| e.to_string())?;
         }
 
+        self.notify_bug_event(
+            &conn,
+            bug_id,
+            user_id,
+            &format!("[Issue #{:07}] Assigned: {}", bug_id, bug.summary),
+            &format!(
+                "Issue #{:07} ({}) assigned to user #{}.",
+                bug_id, bug.summary, handler_id
+            ),
+        );
+
         Ok(())
     }
 
@@ -2150,6 +2201,7 @@ impl Db {
         reporter_id: i64,
         note: &str,
         view_state: i32,
+        time_tracking: i32,
     ) -> rusqlite::Result<i64> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2162,12 +2214,13 @@ impl Db {
         )?;
         let text_id = conn.last_insert_rowid();
 
+        let safe_time = time_tracking.max(0);
         conn.execute(
             "INSERT INTO mantis_bugnote_table (
                 bug_id, reporter_id, bugnote_text_id, view_state,
                 date_submitted, last_modified, note_type, note_attr, time_tracking
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, '', 0)",
-            params![bug_id, reporter_id, text_id, view_state, now],
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, '', ?6)",
+            params![bug_id, reporter_id, text_id, view_state, now, safe_time],
         )?;
         let note_id = conn.last_insert_rowid();
 
@@ -2186,6 +2239,26 @@ impl Db {
             1,
         )?;
 
+        if safe_time > 0 {
+            db.record_history(
+                conn,
+                bug_id,
+                reporter_id,
+                "time_tracking",
+                "0",
+                &safe_time.to_string(),
+                0,
+            )?;
+        }
+
+        db.notify_bug_event(
+            conn,
+            bug_id,
+            reporter_id,
+            &format!("[Issue #{:07}] Note added", bug_id),
+            &format!("Note added to Issue #{:07}:\n\n{}", bug_id, note),
+        );
+
         Ok(note_id)
     }
 
@@ -2195,6 +2268,17 @@ impl Db {
         reporter_id: i64,
         note: &str,
         view_state: i32,
+    ) -> Result<i64, String> {
+        self.add_bugnote_with_time(bug_id, reporter_id, note, view_state, 0)
+    }
+
+    pub fn add_bugnote_with_time(
+        &self,
+        bug_id: i64,
+        reporter_id: i64,
+        note: &str,
+        view_state: i32,
+        time_tracking: i32,
     ) -> Result<i64, String> {
         let trimmed = note.trim();
         if trimmed.is_empty() {
@@ -2209,8 +2293,16 @@ impl Db {
             return Err(format!("Bug {} not found", bug_id));
         }
 
-        Self::insert_bugnote_inner(&conn, self, bug_id, reporter_id, trimmed, view_state)
-            .map_err(|e| e.to_string())
+        Self::insert_bugnote_inner(
+            &conn,
+            self,
+            bug_id,
+            reporter_id,
+            trimmed,
+            view_state,
+            time_tracking,
+        )
+        .map_err(|e| e.to_string())
     }
 
     pub fn get_bugnote_by_id(&self, note_id: i64) -> rusqlite::Result<Option<Bugnote>> {
@@ -3491,6 +3583,240 @@ impl Db {
 
         Ok(results)
     }
+
+    // ─── Sub-project 4: Email Queue, Time Tracking & Project News ────────────
+
+    pub fn enqueue_email(
+        &self,
+        conn: &Connection,
+        email: &str,
+        subject: &str,
+        body: &str,
+    ) -> rusqlite::Result<i64> {
+        let trimmed = email.trim();
+        if trimmed.is_empty() {
+            return Ok(0);
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO mantis_email_table (email, subject, metadata, body, submitted)
+             VALUES (?1, ?2, '', ?3, ?4)",
+            params![trimmed, subject, body, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn notify_bug_event(
+        &self,
+        conn: &Connection,
+        bug_id: i64,
+        _actor_id: i64,
+        event_subject: &str,
+        event_body: &str,
+    ) {
+        let bug = match Self::query_bug_by_id(conn, bug_id) {
+            Ok(Some(b)) => b,
+            _ => return,
+        };
+
+        let mut recipients = HashSet::new();
+        if let Ok(Some(reporter)) = Self::query_user_by_id(conn, bug.reporter_id) {
+            if reporter.enabled != 0 && !reporter.email.trim().is_empty() {
+                recipients.insert(reporter.email.trim().to_string());
+            }
+        }
+        if bug.handler_id > 0 {
+            if let Ok(Some(handler)) = Self::query_user_by_id(conn, bug.handler_id) {
+                if handler.enabled != 0 && !handler.email.trim().is_empty() {
+                    recipients.insert(handler.email.trim().to_string());
+                }
+            }
+        }
+
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT u.email
+             FROM mantis_bug_monitor_table bm
+             JOIN mantis_user_table u ON bm.user_id = u.id
+             WHERE bm.bug_id = ?1 AND u.enabled != 0",
+        ) {
+            if let Ok(rows) = stmt.query_map(params![bug_id], |row| row.get::<_, String>(0)) {
+                for email in rows.flatten() {
+                    let trimmed = email.trim();
+                    if !trimmed.is_empty() {
+                        recipients.insert(trimmed.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut sorted: Vec<String> = recipients.into_iter().collect();
+        sorted.sort();
+        for addr in sorted {
+            let _ = self.enqueue_email(conn, &addr, event_subject, event_body);
+        }
+    }
+
+    pub fn list_queued_emails(&self) -> rusqlite::Result<Vec<EmailMessage>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT email_id, email, subject, metadata, body, submitted
+             FROM mantis_email_table
+             ORDER BY submitted DESC, email_id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(EmailMessage {
+                email_id: row.get(0)?,
+                email: row.get(1)?,
+                subject: row.get(2)?,
+                metadata: row.get(3)?,
+                body: row.get(4)?,
+                submitted: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_queued_email(&self, email_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_email_table WHERE email_id = ?1",
+            params![email_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn flush_email_queue(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn();
+        let count = conn.execute("DELETE FROM mantis_email_table", [])?;
+        Ok(count)
+    }
+
+    pub fn list_time_tracking(&self, project_id: i64) -> rusqlite::Result<Vec<TimeTrackingEntry>> {
+        let conn = self.conn();
+        if project_id > 0 {
+            let mut stmt = conn.prepare(
+                "SELECT n.bug_id, b.summary, n.reporter_id, COALESCE(u.username, 'unknown'),
+                        n.time_tracking, n.date_submitted, COALESCE(t.note, '')
+                 FROM mantis_bugnote_table n
+                 JOIN mantis_bug_table b ON n.bug_id = b.id
+                 LEFT JOIN mantis_user_table u ON n.reporter_id = u.id
+                 LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+                 WHERE n.time_tracking > 0 AND b.project_id = ?1
+                 ORDER BY n.date_submitted DESC, n.id DESC",
+            )?;
+            let rows = stmt.query_map(params![project_id], |row| {
+                Ok(TimeTrackingEntry {
+                    bug_id: row.get(0)?,
+                    bug_summary: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    minutes: row.get(4)?,
+                    date_submitted: row.get(5)?,
+                    note: row.get(6)?,
+                })
+            })?;
+            rows.collect()
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT n.bug_id, b.summary, n.reporter_id, COALESCE(u.username, 'unknown'),
+                        n.time_tracking, n.date_submitted, COALESCE(t.note, '')
+                 FROM mantis_bugnote_table n
+                 JOIN mantis_bug_table b ON n.bug_id = b.id
+                 LEFT JOIN mantis_user_table u ON n.reporter_id = u.id
+                 LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+                 WHERE n.time_tracking > 0
+                 ORDER BY n.date_submitted DESC, n.id DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(TimeTrackingEntry {
+                    bug_id: row.get(0)?,
+                    bug_summary: row.get(1)?,
+                    user_id: row.get(2)?,
+                    username: row.get(3)?,
+                    minutes: row.get(4)?,
+                    date_submitted: row.get(5)?,
+                    note: row.get(6)?,
+                })
+            })?;
+            rows.collect()
+        }
+    }
+
+    pub fn create_news(
+        &self,
+        project_id: i64,
+        poster_id: i64,
+        headline: &str,
+        body: &str,
+        announcement: bool,
+        view_state: i32,
+    ) -> Result<i64, String> {
+        let trimmed_headline = headline.trim();
+        if trimmed_headline.is_empty() {
+            return Err("News headline cannot be empty".to_string());
+        }
+        let trimmed_body = body.trim();
+        if trimmed_body.is_empty() {
+            return Err("News body cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO mantis_news_table (
+                project_id, poster_id, date_posted, last_modified,
+                view_state, announcement, headline, body
+             ) VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                project_id,
+                poster_id,
+                now,
+                view_state,
+                if announcement { 1 } else { 0 },
+                trimmed_headline,
+                trimmed_body,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn delete_news(&self, id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM mantis_news_table WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn list_news(&self, project_id: i64, user_access: i32) -> rusqlite::Result<Vec<NewsItem>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, project_id, poster_id, date_posted, last_modified,
+                    view_state, announcement, headline, body
+             FROM mantis_news_table
+             WHERE (project_id = 0 OR project_id = ?1 OR ?1 = 0)
+               AND (view_state = 10 OR ?2 >= 55)
+             ORDER BY announcement DESC, date_posted DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![project_id, user_access], |row| {
+            Ok(NewsItem {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                poster_id: row.get(2)?,
+                date_posted: row.get(3)?,
+                last_modified: row.get(4)?,
+                view_state: row.get(5)?,
+                announcement: row.get(6)?,
+                headline: row.get(7)?,
+                body: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]
@@ -4319,6 +4645,112 @@ mod tests {
         let (sf, bf) = db.get_filter(filter_id).unwrap().unwrap();
         assert_eq!(sf.name, "High Priority Memory");
         assert_eq!(bf.tag_id, Some(tag_id));
+    }
+
+    #[test]
+    fn test_email_queue_time_tracking_and_news() {
+        let db = Db::open_in_memory().unwrap();
+        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+        let dev_id = db
+            .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
+            .unwrap();
+        let watcher_id = db
+            .create_user(
+                "watcher",
+                "Watcher",
+                "watcher@example.com",
+                "pw",
+                25,
+                true,
+                false,
+            )
+            .unwrap();
+        let proj_id = db
+            .create_project("Core", 10, 10, "desc", true)
+            .unwrap();
+
+        // 1. Creating bug queues email to reporter (admin: root@localhost)
+        let bug_id = db
+            .create_bug(
+                proj_id,
+                admin.id,
+                1,
+                "Null pointer in parser",
+                "Crash on empty token",
+                "",
+                "",
+                30,
+                50,
+                10,
+                "1.0",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+        let emails = db.list_queued_emails().unwrap();
+        assert_eq!(emails.len(), 1);
+        assert_eq!(emails[0].email, "root@localhost");
+        assert!(emails[0].subject.contains("Null pointer in parser"));
+
+        // Flush queue
+        assert_eq!(db.flush_email_queue().unwrap(), 1);
+        assert!(db.list_queued_emails().unwrap().is_empty());
+
+        // 2. Add monitor + assign to dev1 -> queues emails to reporter, handler, and monitor
+        db.add_bug_monitor(bug_id, watcher_id).unwrap();
+        db.assign_bug(bug_id, admin.id, dev_id).unwrap();
+        let emails2 = db.list_queued_emails().unwrap();
+        let addrs: Vec<&str> = emails2.iter().map(|e| e.email.as_str()).collect();
+        assert!(addrs.contains(&"root@localhost"));
+        assert!(addrs.contains(&"dev1@example.com"));
+        assert!(addrs.contains(&"watcher@example.com"));
+
+        // 3. Time tracking via bugnote
+        db.add_bugnote_with_time(bug_id, dev_id, "Investigated and fixed", 10, 95)
+            .unwrap();
+        let entries = db.list_time_tracking(proj_id).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].minutes, 95);
+        assert_eq!(entries[0].username, "dev1");
+
+        // History recorded for time_tracking
+        let hist = db.list_bug_history(bug_id).unwrap();
+        assert!(hist
+            .iter()
+            .any(|h| h.field_name == "time_tracking" && h.new_value == "95"));
+
+        // 4. Project News & visibility
+        let n_pub = db
+            .create_news(
+                proj_id,
+                admin.id,
+                "v1.0 Released",
+                "Release notes here",
+                true,
+                10,
+            )
+            .unwrap();
+        let _n_priv = db
+            .create_news(
+                proj_id,
+                admin.id,
+                "Internal Security Audit",
+                "Secret body",
+                false,
+                50,
+            )
+            .unwrap();
+
+        // Viewer (10) only sees public news
+        let viewer_news = db.list_news(proj_id, 10).unwrap();
+        assert_eq!(viewer_news.len(), 1);
+        assert_eq!(viewer_news[0].id, n_pub);
+
+        // Developer (55) sees both public and private news
+        let dev_news = db.list_news(proj_id, 55).unwrap();
+        assert_eq!(dev_news.len(), 2);
     }
 }
 

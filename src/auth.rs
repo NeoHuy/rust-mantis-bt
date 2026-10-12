@@ -152,6 +152,14 @@ pub fn verify_password(plain: &str, stored: &str) -> bool {
     stored == plain
 }
 
+pub fn effective_access_level(
+    db: &crate::db::Db,
+    user: &crate::models::User,
+    project_id: i64,
+) -> rusqlite::Result<i32> {
+    db.effective_access_level(user, project_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

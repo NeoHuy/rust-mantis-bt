@@ -32,6 +32,27 @@ pub fn hash_password(plain: &str) -> String {
     format!("sha256${}${}", salt, hash_str)
 }
 
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+pub fn constant_time_eq_ignore_ascii_case(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    a_bytes
+        .iter()
+        .zip(b_bytes.iter())
+        .fold(0u8, |acc, (&x, &y)| {
+            acc | (x.to_ascii_lowercase() ^ y.to_ascii_lowercase())
+        }) == 0
+}
+
 fn verify_sha256_salted(plain: &str, salt: &str, expected_hash: &str) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
@@ -42,7 +63,7 @@ fn verify_sha256_salted(plain: &str, salt: &str, expected_hash: &str) -> bool {
     for b in hash {
         computed.push_str(&format!("{:02x}", b));
     }
-    computed.eq_ignore_ascii_case(expected_hash)
+    constant_time_eq_ignore_ascii_case(&computed, expected_hash)
 }
 
 pub fn md5_hex(input: &str) -> String {
@@ -144,12 +165,15 @@ pub fn verify_password(plain: &str, stored: &str) -> bool {
         return verify_sha256_salted(plain, salt, expected_hash);
     }
 
-    if stored.len() == 32 && stored.chars().all(|c| c.is_ascii_hexdigit()) && md5_hex(plain).eq_ignore_ascii_case(stored) {
+    if stored.len() == 32
+        && stored.chars().all(|c| c.is_ascii_hexdigit())
+        && constant_time_eq_ignore_ascii_case(&md5_hex(plain), stored)
+    {
         return true;
     }
 
     // Plaintext fallback or legacy comparison
-    stored == plain
+    constant_time_eq(plain.as_bytes(), stored.as_bytes())
 }
 
 pub fn effective_access_level(
@@ -419,5 +443,17 @@ mod tests {
         assert!(verify_password("root", "63a9f0ea7bb98050796b649e85481845"));
         assert!(verify_password("root", "63A9F0EA7BB98050796B649E85481845"));
         assert!(!verify_password("wrong", "63a9f0ea7bb98050796b649e85481845"));
+    }
+
+    #[test]
+    fn test_constant_time_equality() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"world"));
+        assert!(!constant_time_eq(b"hello", b"hell"));
+
+        assert!(constant_time_eq_ignore_ascii_case("ABCdef", "abcdef"));
+        assert!(constant_time_eq_ignore_ascii_case("63A9F0", "63a9f0"));
+        assert!(!constant_time_eq_ignore_ascii_case("ABCdef", "xyz123"));
+        assert!(!constant_time_eq_ignore_ascii_case("short", "longer_str"));
     }
 }

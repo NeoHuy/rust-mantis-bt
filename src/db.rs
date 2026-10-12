@@ -522,19 +522,19 @@ impl Db {
             }
         };
 
-        if let Some(val) = query(project_id, user_id)? {
-            return Ok(Some(val));
-        }
+        let candidates = [
+            (project_id, user_id),
+            (0, user_id),
+            (project_id, 0),
+            (0, 0),
+        ];
 
-        if user_id != 0 {
-            if let Some(val) = query(project_id, 0)? {
-                return Ok(Some(val));
-            }
-        }
-
-        if project_id != 0 {
-            if let Some(val) = query(0, 0)? {
-                return Ok(Some(val));
+        let mut seen = HashSet::new();
+        for (p, u) in candidates {
+            if seen.insert((p, u)) {
+                if let Some(val) = query(p, u)? {
+                    return Ok(Some(val));
+                }
             }
         }
 
@@ -671,6 +671,9 @@ impl Db {
             None => return Err(format!("Project {} not found", id)),
         };
         let _ = existing;
+
+        conn.execute("DELETE FROM mantis_category_table WHERE project_id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
 
         conn.execute("DELETE FROM mantis_project_table WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
@@ -864,7 +867,21 @@ impl Db {
 
         let conn = self.conn();
 
-        // 3. Project-specific membership override
+        // 3. Project status & enabled check
+        let mut stmt = conn.prepare(
+            "SELECT enabled, view_state FROM mantis_project_table WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![project_id])?;
+        let (enabled, view_state) = match rows.next()? {
+            Some(row) => (row.get::<_, i32>(0)?, row.get::<_, i32>(1)?),
+            None => return Ok(0),
+        };
+
+        if enabled == 0 {
+            return Ok(0);
+        }
+
+        // 4. Project-specific membership override
         let mut stmt = conn.prepare(
             "SELECT access_level FROM mantis_project_user_list_table WHERE project_id = ?1 AND user_id = ?2",
         )?;
@@ -873,27 +890,16 @@ impl Db {
             return row.get(0);
         }
 
-        // 4. View state & project status
-        let mut stmt = conn.prepare(
-            "SELECT enabled, view_state FROM mantis_project_table WHERE id = ?1",
-        )?;
-        let mut rows = stmt.query(params![project_id])?;
-        if let Some(row) = rows.next()? {
-            let enabled: i32 = row.get(0)?;
-            let view_state: i32 = row.get(1)?;
-            if enabled == 0 {
-                return Ok(0);
-            }
-            if view_state == 10 {
-                // Public
+        // 5. View state access level
+        if view_state == 10 {
+            // Public
+            return Ok(user.access_level);
+        } else if view_state == 50 {
+            // Private
+            if user.access_level >= 70 {
                 return Ok(user.access_level);
-            } else if view_state == 50 {
-                // Private
-                if user.access_level >= 70 {
-                    return Ok(user.access_level);
-                } else {
-                    return Ok(0);
-                }
+            } else {
+                return Ok(0);
             }
         }
 
@@ -1468,6 +1474,17 @@ mod tests {
             db.get_config("theme", 10, 20).unwrap().as_deref(),
             Some("user_dark")
         );
+
+        // 4. Global user config override (0, user_id)
+        db.set_config("language", 0, 20, "french").unwrap();
+        assert_eq!(
+            db.get_config("language", 10, 20).unwrap().as_deref(),
+            Some("french")
+        );
+        assert_eq!(
+            db.get_config("language", 10, 30).unwrap().as_deref(),
+            None
+        );
     }
 
     #[test]
@@ -1561,6 +1578,11 @@ mod tests {
         // Grant Alice Developer (55) on PrivateProj
         db.set_project_user(priv_id, alice.id, 55).unwrap();
         assert_eq!(db.effective_access_level(&alice, priv_id).unwrap(), 55);
+
+        // Disabled project returns 0 even with explicit override
+        db.update_project(priv_id, "PrivateProj", 10, false, 50, "desc", true).unwrap();
+        assert_eq!(db.effective_access_level(&alice, priv_id).unwrap(), 0);
+        assert_eq!(db.effective_access_level(&bob, priv_id).unwrap(), 0);
     }
 
     #[test]
@@ -1624,10 +1646,20 @@ mod tests {
         // Update with empty name fails
         assert!(db.update_project(pid, "", 10, true, 10, "", true).is_err());
 
+        // Add a project-specific category and verify delete_project cleans it up
+        let p_cat = db.add_category(pid, "Project-Specific Cat", 0).unwrap();
+        assert!(db.get_category_by_id(p_cat).unwrap().is_some());
+
         // Delete project
         assert!(db.delete_project(pid).is_ok());
         assert!(db.get_project_by_id(pid).unwrap().is_none());
         assert!(db.delete_project(pid).is_err());
+
+        // Verify project-specific category was deleted
+        assert!(db.get_category_by_id(p_cat).unwrap().is_none());
+        // Verify global category General (project_id = 0) is still intact
+        let global_cats = db.list_effective_categories(0).unwrap();
+        assert!(global_cats.iter().any(|c| c.name == "General"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::models::{
-    Bug, BugFile, BugFull, BugHistory, BugRelationship, BugUpdate, Bugnote, Category, Project,
-    ProjectVersion, User,
+    Bug, BugFile, BugFilter, BugFull, BugHistory, BugRelationship, BugTag, BugUpdate, Bugnote,
+    Category, CustomField, CustomFieldValue, Project, ProjectVersion, SavedFilter, Tag, User,
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -196,6 +196,75 @@ impl Db {
                 content BLOB,
                 date_added INTEGER NOT NULL DEFAULT 0,
                 user_id INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_tag_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT NOT NULL DEFAULT '',
+                date_created INTEGER NOT NULL DEFAULT 0,
+                date_updated INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_tag_table (
+                bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL REFERENCES mantis_tag_table(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL DEFAULT 0,
+                date_attached INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (bug_id, tag_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_custom_field_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type INTEGER NOT NULL DEFAULT 0,
+                possible_values TEXT NOT NULL DEFAULT '',
+                default_value TEXT NOT NULL DEFAULT '',
+                valid_regexp TEXT NOT NULL DEFAULT '',
+                access_level_r INTEGER NOT NULL DEFAULT 10,
+                access_level_rw INTEGER NOT NULL DEFAULT 25,
+                length_min INTEGER NOT NULL DEFAULT 0,
+                length_max INTEGER NOT NULL DEFAULT 0,
+                require_report INTEGER NOT NULL DEFAULT 0,
+                require_update INTEGER NOT NULL DEFAULT 0,
+                display_report INTEGER NOT NULL DEFAULT 1,
+                display_update INTEGER NOT NULL DEFAULT 1,
+                require_resolved INTEGER NOT NULL DEFAULT 0,
+                display_resolved INTEGER NOT NULL DEFAULT 0,
+                display_closed INTEGER NOT NULL DEFAULT 0,
+                require_closed INTEGER NOT NULL DEFAULT 0,
+                filter_by INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_custom_field_project_table (
+                field_id INTEGER NOT NULL REFERENCES mantis_custom_field_table(id) ON DELETE CASCADE,
+                project_id INTEGER NOT NULL REFERENCES mantis_project_table(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (field_id, project_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_custom_field_string_table (
+                field_id INTEGER NOT NULL REFERENCES mantis_custom_field_table(id) ON DELETE CASCADE,
+                bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                value TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (field_id, bug_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_filters_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
+                project_id INTEGER NOT NULL DEFAULT 0,
+                is_public INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL DEFAULT '',
+                filter_string TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_monitor_table (
+                user_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
+                bug_id INTEGER NOT NULL REFERENCES mantis_bug_table(id) ON DELETE CASCADE,
+                PRIMARY KEY (user_id, bug_id)
             );",
         )?;
 
@@ -2626,6 +2695,802 @@ impl Db {
         })?;
         rows.collect()
     }
+
+    // ─── Sub-project 3: Tags, Custom Fields, Filters, Search & Monitors ──────
+
+    pub fn create_tag(&self, user_id: i64, name: &str, description: &str) -> Result<i64, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Tag name cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO mantis_tag_table (user_id, name, description, date_created, date_updated)
+             VALUES (?1, ?2, ?3, ?4, ?4)",
+            params![user_id, trimmed, description, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_tag_by_id(&self, id: i64) -> rusqlite::Result<Option<Tag>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, user_id, name, description, date_created, date_updated
+             FROM mantis_tag_table WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    date_created: row.get(4)?,
+                    date_updated: row.get(5)?,
+                })
+            },
+        ) {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn get_tag_by_name(&self, name: &str) -> rusqlite::Result<Option<Tag>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, user_id, name, description, date_created, date_updated
+             FROM mantis_tag_table WHERE name = ?1",
+            params![name.trim()],
+            |row| {
+                Ok(Tag {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    date_created: row.get(4)?,
+                    date_updated: row.get(5)?,
+                })
+            },
+        ) {
+            Ok(t) => Ok(Some(t)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn update_tag(&self, id: i64, name: &str, description: &str) -> Result<(), String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Tag name cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let updated = conn
+            .execute(
+                "UPDATE mantis_tag_table SET name = ?1, description = ?2, date_updated = ?3 WHERE id = ?4",
+                params![trimmed, description, now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err(format!("Tag {} not found", id));
+        }
+        Ok(())
+    }
+
+    pub fn delete_tag(&self, id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM mantis_tag_table WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn list_tags(&self) -> rusqlite::Result<Vec<Tag>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, name, description, date_created, date_updated
+             FROM mantis_tag_table
+             ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Tag {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                date_created: row.get(4)?,
+                date_updated: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn attach_tag_to_bug(
+        &self,
+        bug_id: i64,
+        tag_id: i64,
+        user_id: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn();
+        if Self::query_bug_by_id(&conn, bug_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("Bug {} not found", bug_id));
+        }
+        let tag_name: String = conn
+            .query_row(
+                "SELECT name FROM mantis_tag_table WHERE id = ?1",
+                params![tag_id],
+                |row| row.get(0),
+            )
+            .map_err(|_| format!("Tag {} not found", tag_id))?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO mantis_bug_tag_table (bug_id, tag_id, user_id, date_attached)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![bug_id, tag_id, user_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if inserted > 0 {
+            let _ = self.record_history(&conn, bug_id, user_id, "tag_attached", "", &tag_name, 0);
+        }
+        Ok(())
+    }
+
+    pub fn detach_tag_from_bug(
+        &self,
+        bug_id: i64,
+        tag_id: i64,
+        user_id: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        let tag_name: Option<String> = conn
+            .query_row(
+                "SELECT name FROM mantis_tag_table WHERE id = ?1",
+                params![tag_id],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let deleted = conn.execute(
+            "DELETE FROM mantis_bug_tag_table WHERE bug_id = ?1 AND tag_id = ?2",
+            params![bug_id, tag_id],
+        )?;
+
+        if deleted > 0 {
+            if let Some(tname) = tag_name {
+                let _ = self.record_history(&conn, bug_id, user_id, "tag_detached", &tname, "", 0);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn list_bug_tags(&self, bug_id: i64) -> rusqlite::Result<Vec<BugTag>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT bt.bug_id, bt.tag_id, bt.user_id, bt.date_attached, t.name
+             FROM mantis_bug_tag_table bt
+             JOIN mantis_tag_table t ON bt.tag_id = t.id
+             WHERE bt.bug_id = ?1
+             ORDER BY t.name ASC",
+        )?;
+        let rows = stmt.query_map(params![bug_id], |row| {
+            Ok(BugTag {
+                bug_id: row.get(0)?,
+                tag_id: row.get(1)?,
+                user_id: row.get(2)?,
+                date_attached: row.get(3)?,
+                tag_name: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    fn map_custom_field_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CustomField> {
+        Ok(CustomField {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            field_type: row.get(2)?,
+            possible_values: row.get(3)?,
+            default_value: row.get(4)?,
+            valid_regexp: row.get(5)?,
+            access_level_r: row.get(6)?,
+            access_level_rw: row.get(7)?,
+            length_min: row.get(8)?,
+            length_max: row.get(9)?,
+            require_report: row.get(10)?,
+            require_update: row.get(11)?,
+            display_report: row.get(12)?,
+            display_update: row.get(13)?,
+            require_resolved: row.get(14)?,
+            display_resolved: row.get(15)?,
+            display_closed: row.get(16)?,
+            require_closed: row.get(17)?,
+            filter_by: row.get(18)?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_custom_field(
+        &self,
+        name: &str,
+        field_type: i32,
+        possible_values: &str,
+        default_value: &str,
+        valid_regexp: &str,
+        length_min: i32,
+        length_max: i32,
+        require_report: bool,
+        require_update: bool,
+        display_report: bool,
+        display_update: bool,
+    ) -> Result<i64, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Custom field name cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_custom_field_table (
+                name, type, possible_values, default_value, valid_regexp,
+                length_min, length_max, require_report, require_update,
+                display_report, display_update
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                trimmed,
+                field_type,
+                possible_values,
+                default_value,
+                valid_regexp,
+                length_min,
+                length_max,
+                if require_report { 1 } else { 0 },
+                if require_update { 1 } else { 0 },
+                if display_report { 1 } else { 0 },
+                if display_update { 1 } else { 0 },
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_custom_field(
+        &self,
+        id: i64,
+        name: &str,
+        field_type: i32,
+        possible_values: &str,
+        default_value: &str,
+        valid_regexp: &str,
+        length_min: i32,
+        length_max: i32,
+        require_report: bool,
+        require_update: bool,
+        display_report: bool,
+        display_update: bool,
+    ) -> Result<(), String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Custom field name cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        let rows = conn
+            .execute(
+                "UPDATE mantis_custom_field_table
+                 SET name = ?1, type = ?2, possible_values = ?3, default_value = ?4,
+                     valid_regexp = ?5, length_min = ?6, length_max = ?7,
+                     require_report = ?8, require_update = ?9,
+                     display_report = ?10, display_update = ?11
+                 WHERE id = ?12",
+                params![
+                    trimmed,
+                    field_type,
+                    possible_values,
+                    default_value,
+                    valid_regexp,
+                    length_min,
+                    length_max,
+                    if require_report { 1 } else { 0 },
+                    if require_update { 1 } else { 0 },
+                    if display_report { 1 } else { 0 },
+                    if display_update { 1 } else { 0 },
+                    id,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if rows == 0 {
+            return Err(format!("Custom field {} not found", id));
+        }
+        Ok(())
+    }
+
+    pub fn delete_custom_field(&self, id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_custom_field_table WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_custom_field_by_id(&self, id: i64) -> rusqlite::Result<Option<CustomField>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, name, type, possible_values, default_value, valid_regexp,
+                    access_level_r, access_level_rw, length_min, length_max,
+                    require_report, require_update, display_report, display_update,
+                    require_resolved, display_resolved, display_closed, require_closed, filter_by
+             FROM mantis_custom_field_table WHERE id = ?1",
+            params![id],
+            Self::map_custom_field_row,
+        ) {
+            Ok(cf) => Ok(Some(cf)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn list_custom_fields(&self) -> rusqlite::Result<Vec<CustomField>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, type, possible_values, default_value, valid_regexp,
+                    access_level_r, access_level_rw, length_min, length_max,
+                    require_report, require_update, display_report, display_update,
+                    require_resolved, display_resolved, display_closed, require_closed, filter_by
+             FROM mantis_custom_field_table
+             ORDER BY name ASC",
+        )?;
+        let rows = stmt.query_map([], Self::map_custom_field_row)?;
+        rows.collect()
+    }
+
+    pub fn link_custom_field_to_project(
+        &self,
+        field_id: i64,
+        project_id: i64,
+        sequence: i32,
+    ) -> Result<(), String> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_custom_field_project_table (field_id, project_id, sequence)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT (field_id, project_id) DO UPDATE SET sequence = excluded.sequence",
+            params![field_id, project_id, sequence],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn unlink_custom_field_from_project(
+        &self,
+        field_id: i64,
+        project_id: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_custom_field_project_table WHERE field_id = ?1 AND project_id = ?2",
+            params![field_id, project_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_projects_for_custom_field(
+        &self,
+        field_id: i64,
+    ) -> rusqlite::Result<Vec<(Project, i32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT p.id, p.name, p.status, p.enabled, p.view_state, p.access_min,
+                    p.description, p.category_id, p.inherit_global, cfp.sequence
+             FROM mantis_custom_field_project_table cfp
+             JOIN mantis_project_table p ON cfp.project_id = p.id
+             WHERE cfp.field_id = ?1
+             ORDER BY cfp.sequence ASC, p.name ASC",
+        )?;
+        let rows = stmt.query_map(params![field_id], |row| {
+            Ok((
+                Project {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    status: row.get(2)?,
+                    enabled: row.get(3)?,
+                    view_state: row.get(4)?,
+                    access_min: row.get(5)?,
+                    description: row.get(6)?,
+                    category_id: row.get(7)?,
+                    inherit_global: row.get(8)?,
+                },
+                row.get(9)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    pub fn list_custom_fields_for_project(
+        &self,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<CustomField>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT cf.id, cf.name, cf.type, cf.possible_values, cf.default_value, cf.valid_regexp,
+                    cf.access_level_r, cf.access_level_rw, cf.length_min, cf.length_max,
+                    cf.require_report, cf.require_update, cf.display_report, cf.display_update,
+                    cf.require_resolved, cf.display_resolved, cf.display_closed, cf.require_closed, cf.filter_by
+             FROM mantis_custom_field_table cf
+             JOIN mantis_custom_field_project_table cfp ON cf.id = cfp.field_id
+             WHERE cfp.project_id = ?1
+             ORDER BY cfp.sequence ASC, cf.name ASC",
+        )?;
+        let rows = stmt.query_map(params![project_id], Self::map_custom_field_row)?;
+        rows.collect()
+    }
+
+    pub fn set_custom_field_value(
+        &self,
+        field_id: i64,
+        bug_id: i64,
+        user_id: i64,
+        value: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn();
+        let cf: CustomField = conn
+            .query_row(
+                "SELECT id, name, type, possible_values, default_value, valid_regexp,
+                        access_level_r, access_level_rw, length_min, length_max,
+                        require_report, require_update, display_report, display_update,
+                        require_resolved, display_resolved, display_closed, require_closed, filter_by
+                 FROM mantis_custom_field_table WHERE id = ?1",
+                params![field_id],
+                Self::map_custom_field_row,
+            )
+            .map_err(|_| format!("Custom field {} not found", field_id))?;
+
+        let len = value.chars().count() as i32;
+        if cf.length_min > 0 && len < cf.length_min {
+            return Err(format!(
+                "Custom field '{}' requires at least {} characters",
+                cf.name, cf.length_min
+            ));
+        }
+        if cf.length_max > 0 && len > cf.length_max {
+            return Err(format!(
+                "Custom field '{}' allows at most {} characters",
+                cf.name, cf.length_max
+            ));
+        }
+
+        let old_val: String = conn
+            .query_row(
+                "SELECT value FROM mantis_custom_field_string_table WHERE field_id = ?1 AND bug_id = ?2",
+                params![field_id, bug_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+
+        conn.execute(
+            "INSERT INTO mantis_custom_field_string_table (field_id, bug_id, value, text)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT (field_id, bug_id) DO UPDATE SET value = excluded.value, text = excluded.text",
+            params![field_id, bug_id, value],
+        )
+        .map_err(|e| e.to_string())?;
+
+        if old_val != value {
+            let _ = self.record_history(&conn, bug_id, user_id, &cf.name, &old_val, value, 0);
+        }
+
+        Ok(())
+    }
+
+    pub fn get_custom_field_values_for_bug(
+        &self,
+        bug_id: i64,
+    ) -> rusqlite::Result<Vec<CustomFieldValue>> {
+        let conn = self.conn();
+        let bug = match Self::query_bug_by_id(&conn, bug_id)? {
+            Some(b) => b,
+            None => return Ok(Vec::new()),
+        };
+
+        let mut stmt = conn.prepare(
+            "SELECT cf.id, cf.name, cf.type, COALESCE(cfs.value, cf.default_value)
+             FROM mantis_custom_field_table cf
+             JOIN mantis_custom_field_project_table cfp ON cf.id = cfp.field_id
+             LEFT JOIN mantis_custom_field_string_table cfs ON cf.id = cfs.field_id AND cfs.bug_id = ?1
+             WHERE cfp.project_id = ?2
+             ORDER BY cfp.sequence ASC, cf.name ASC",
+        )?;
+        let rows = stmt.query_map(params![bug_id, bug.project_id], |row| {
+            Ok(CustomFieldValue {
+                field_id: row.get(0)?,
+                field_name: row.get(1)?,
+                field_type: row.get(2)?,
+                bug_id,
+                value: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn save_filter(
+        &self,
+        user_id: i64,
+        project_id: i64,
+        is_public: bool,
+        name: &str,
+        filter: &BugFilter,
+    ) -> Result<i64, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Filter name cannot be empty".to_string());
+        }
+        let json = serde_json::to_string(filter).map_err(|e| e.to_string())?;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_filters_table (user_id, project_id, is_public, name, filter_string)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                user_id,
+                project_id,
+                if is_public { 1 } else { 0 },
+                trimmed,
+                json
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_filter(&self, id: i64) -> rusqlite::Result<Option<(SavedFilter, BugFilter)>> {
+        let conn = self.conn();
+        let sf_opt = match conn.query_row(
+            "SELECT id, user_id, project_id, is_public, name, filter_string
+             FROM mantis_filters_table WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(SavedFilter {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    project_id: row.get(2)?,
+                    is_public: row.get(3)?,
+                    name: row.get(4)?,
+                    filter_string: row.get(5)?,
+                })
+            },
+        ) {
+            Ok(sf) => Some(sf),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e),
+        };
+
+        let sf = match sf_opt {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let bf: BugFilter = serde_json::from_str(&sf.filter_string).unwrap_or_default();
+        Ok(Some((sf, bf)))
+    }
+
+    pub fn list_visible_filters(
+        &self,
+        user_id: i64,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<SavedFilter>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, project_id, is_public, name, filter_string
+             FROM mantis_filters_table
+             WHERE (user_id = ?1 OR is_public = 1)
+               AND (project_id = 0 OR project_id = ?2 OR ?2 = 0)
+             ORDER BY name ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![user_id, project_id], |row| {
+            Ok(SavedFilter {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                project_id: row.get(2)?,
+                is_public: row.get(3)?,
+                name: row.get(4)?,
+                filter_string: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn delete_filter(&self, id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM mantis_filters_table WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn add_bug_monitor(&self, bug_id: i64, user_id: i64) -> Result<(), String> {
+        let conn = self.conn();
+        if Self::query_bug_by_id(&conn, bug_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("Bug {} not found", bug_id));
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO mantis_bug_monitor_table (user_id, bug_id) VALUES (?1, ?2)",
+            params![user_id, bug_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn remove_bug_monitor(&self, bug_id: i64, user_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_bug_monitor_table WHERE user_id = ?1 AND bug_id = ?2",
+            params![user_id, bug_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_bug_monitors(&self, bug_id: i64) -> rusqlite::Result<Vec<User>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected,
+                    u.access_level, u.login_count, u.lost_password_request_count,
+                    u.failed_login_count, u.cookie_string, u.last_visit, u.date_created
+             FROM mantis_bug_monitor_table bm
+             JOIN mantis_user_table u ON bm.user_id = u.id
+             WHERE bm.bug_id = ?1
+             ORDER BY u.username ASC",
+        )?;
+        let rows = stmt.query_map(params![bug_id], |row| {
+            Ok(User {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                realname: row.get(2)?,
+                email: row.get(3)?,
+                password: row.get(4)?,
+                enabled: row.get(5)?,
+                protected: row.get(6)?,
+                access_level: row.get(7)?,
+                login_count: row.get(8)?,
+                lost_password_request_count: row.get(9)?,
+                failed_login_count: row.get(10)?,
+                cookie_string: row.get(11)?,
+                last_visit: row.get(12)?,
+                date_created: row.get(13)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn filter_bugs(&self, filter: &BugFilter, user: &User) -> rusqlite::Result<Vec<Bug>> {
+        let all_candidates = if let Some(pid) = filter.project_id {
+            if pid > 0 {
+                let eff = self.effective_access_level(user, pid)?;
+                if eff < 10 {
+                    return Ok(Vec::new());
+                }
+                self.list_bugs(pid, eff, 0, 50_000)?
+            } else {
+                self.list_bugs(0, 90, 0, 50_000)?
+            }
+        } else {
+            self.list_bugs(0, 90, 0, 50_000)?
+        };
+
+        let search_kw = filter
+            .search
+            .as_ref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
+
+        let mut results = Vec::new();
+        for b in all_candidates {
+            let eff = self.effective_access_level(user, b.project_id)?;
+            if eff < 10 || (b.view_state == 50 && eff < 55) {
+                continue;
+            }
+            if let Some(st) = filter.status {
+                if st > 0 && b.status != st {
+                    continue;
+                }
+            }
+            if let Some(hide_st) = filter.hide_status {
+                if hide_st > 0 && b.status >= hide_st {
+                    continue;
+                }
+            }
+            if let Some(pr) = filter.priority {
+                if pr > 0 && b.priority != pr {
+                    continue;
+                }
+            }
+            if let Some(sev) = filter.severity {
+                if sev > 0 && b.severity != sev {
+                    continue;
+                }
+            }
+            if let Some(cid) = filter.category_id {
+                if cid > 0 && b.category_id != cid {
+                    continue;
+                }
+            }
+            if let Some(rid) = filter.reporter_id {
+                if rid > 0 && b.reporter_id != rid {
+                    continue;
+                }
+            }
+            if let Some(hid) = filter.handler_id {
+                if hid > 0 && b.handler_id != hid {
+                    continue;
+                } else if hid == -1 && b.handler_id != 0 {
+                    // -1 = Unassigned
+                    continue;
+                }
+            }
+            if let Some(tid) = filter.tag_id {
+                if tid > 0 {
+                    let tags = self.list_bug_tags(b.id)?;
+                    if !tags.iter().any(|t| t.tag_id == tid) {
+                        continue;
+                    }
+                }
+            }
+            if let Some(mid) = filter.monitored_by {
+                if mid > 0 {
+                    let monitors = self.list_bug_monitors(b.id)?;
+                    if !monitors.iter().any(|u| u.id == mid) {
+                        continue;
+                    }
+                }
+            }
+            if let Some(ref kw) = search_kw {
+                let mut matched = b.summary.to_ascii_lowercase().contains(kw)
+                    || format!("{:07}", b.id).contains(kw);
+                if !matched {
+                    if let Some(full) = self.get_bug_full(b.id)? {
+                        if full.description.to_ascii_lowercase().contains(kw)
+                            || full.steps_to_reproduce.to_ascii_lowercase().contains(kw)
+                            || full
+                                .additional_information
+                                .to_ascii_lowercase()
+                                .contains(kw)
+                        {
+                            matched = true;
+                        }
+                    }
+                }
+                if !matched {
+                    let notes = self.list_bugnotes(b.id, eff)?;
+                    if notes
+                        .iter()
+                        .any(|n| n.note.to_ascii_lowercase().contains(kw))
+                    {
+                        matched = true;
+                    }
+                }
+                if !matched {
+                    continue;
+                }
+            }
+
+            results.push(b);
+        }
+
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -3299,5 +4164,162 @@ mod tests {
         db.delete_bug(bug_id).unwrap();
         assert!(db.get_bug_file(fid2, "").unwrap().is_none());
     }
+
+    #[test]
+    fn test_tags_custom_fields_filters_search_and_monitors() {
+        let db = Db::open_in_memory().unwrap();
+        let proj_id = db.create_project("Proj3", 10, 10, "", true).unwrap();
+        let uid = db
+            .create_user("dev3", "Dev 3", "d3@x.com", "pw", 55, true, false)
+            .unwrap();
+        let user = db.get_user_by_id(uid).unwrap().unwrap();
+
+        let b1 = db
+            .create_bug(
+                proj_id,
+                uid,
+                1,
+                "Memory leak in parser",
+                "Heap grows unbounded",
+                "",
+                "",
+                40,
+                60,
+                10,
+                "1.0",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+        let b2 = db
+            .create_bug(
+                proj_id,
+                uid,
+                1,
+                "UI button alignment",
+                "CSS flex issue",
+                "",
+                "",
+                20,
+                20,
+                10,
+                "1.0",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+
+        // 1. Tags
+        let tag_id = db.create_tag(uid, "memory", "Memory related issues").unwrap();
+        db.attach_tag_to_bug(b1, tag_id, uid).unwrap();
+        let b1_tags = db.list_bug_tags(b1).unwrap();
+        assert_eq!(b1_tags.len(), 1);
+        assert_eq!(b1_tags[0].tag_name, "memory");
+
+        // 2. Custom Fields
+        let cf_id = db
+            .create_custom_field(
+                "Environment URL",
+                0,
+                "",
+                "https://staging.local",
+                "",
+                3,
+                100,
+                false,
+                false,
+                true,
+                true,
+            )
+            .unwrap();
+        db.link_custom_field_to_project(cf_id, proj_id, 1).unwrap();
+
+        // Default value returned before explicit set
+        let cf_vals = db.get_custom_field_values_for_bug(b1).unwrap();
+        assert_eq!(cf_vals.len(), 1);
+        assert_eq!(cf_vals[0].value, "https://staging.local");
+
+        // Min length validation
+        assert!(db.set_custom_field_value(cf_id, b1, uid, "ab").is_err());
+        db.set_custom_field_value(cf_id, b1, uid, "https://prod.example.com")
+            .unwrap();
+        let cf_vals2 = db.get_custom_field_values_for_bug(b1).unwrap();
+        assert_eq!(cf_vals2[0].value, "https://prod.example.com");
+
+        // History recorded for custom field change
+        let hist = db.list_bug_history(b1).unwrap();
+        assert!(hist
+            .iter()
+            .any(|h| h.field_name == "Environment URL" && h.new_value == "https://prod.example.com"));
+
+        // 3. Monitors
+        db.add_bug_monitor(b2, uid).unwrap();
+        assert_eq!(db.list_bug_monitors(b2).unwrap().len(), 1);
+
+        // 4. Full-text Search & Filtering
+        let by_kw = db
+            .filter_bugs(
+                &BugFilter {
+                    project_id: Some(proj_id),
+                    search: Some("unbounded".to_string()),
+                    ..Default::default()
+                },
+                &user,
+            )
+            .unwrap();
+        assert_eq!(by_kw.len(), 1);
+        assert_eq!(by_kw[0].id, b1);
+
+        let by_tag = db
+            .filter_bugs(
+                &BugFilter {
+                    project_id: Some(proj_id),
+                    tag_id: Some(tag_id),
+                    ..Default::default()
+                },
+                &user,
+            )
+            .unwrap();
+        assert_eq!(by_tag.len(), 1);
+        assert_eq!(by_tag[0].id, b1);
+
+        let by_monitor = db
+            .filter_bugs(
+                &BugFilter {
+                    project_id: Some(proj_id),
+                    monitored_by: Some(uid),
+                    ..Default::default()
+                },
+                &user,
+            )
+            .unwrap();
+        assert_eq!(by_monitor.len(), 1);
+        assert_eq!(by_monitor[0].id, b2);
+
+        // 5. Saved Filters
+        let filter_id = db
+            .save_filter(
+                uid,
+                proj_id,
+                true,
+                "High Priority Memory",
+                &BugFilter {
+                    project_id: Some(proj_id),
+                    tag_id: Some(tag_id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let visible = db.list_visible_filters(uid, proj_id).unwrap();
+        assert_eq!(visible.len(), 1);
+        let (sf, bf) = db.get_filter(filter_id).unwrap().unwrap();
+        assert_eq!(sf.name, "High Priority Memory");
+        assert_eq!(bf.tag_id, Some(tag_id));
+    }
 }
+
 

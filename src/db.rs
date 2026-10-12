@@ -234,7 +234,7 @@ impl Db {
                     login_count, lost_password_request_count, failed_login_count, cookie_string,
                     last_visit, date_created
              FROM mantis_user_table
-             WHERE cookie_string = ?1",
+             WHERE cookie_string = ?1 AND enabled = 1",
         )?;
         let mut rows = stmt.query(params![cookie])?;
         if let Some(row) = rows.next()? {
@@ -257,6 +257,244 @@ impl Db {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn authenticate(&self, username: &str, password: &str) -> Result<Option<User>, String> {
+        let user = match self.get_user_by_username(username).map_err(|e| e.to_string())? {
+            Some(u) => u,
+            None => return Ok(None),
+        };
+
+        if user.enabled == 0 {
+            return Ok(None);
+        }
+
+        if !crate::auth::verify_password(password, &user.password) {
+            let conn = self.conn();
+            conn.execute(
+                "UPDATE mantis_user_table SET failed_login_count = failed_login_count + 1 WHERE id = ?1",
+                params![user.id],
+            ).map_err(|e| e.to_string())?;
+            return Ok(None);
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        {
+            let conn = self.conn();
+            conn.execute(
+                "UPDATE mantis_user_table
+                 SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1
+                 WHERE id = ?2",
+                params![now, user.id],
+            ).map_err(|e| e.to_string())?;
+        }
+
+        let mut updated = user;
+        updated.login_count += 1;
+        updated.failed_login_count = 0;
+        updated.last_visit = now;
+        Ok(Some(updated))
+    }
+
+    pub fn list_users(&self, search: Option<&str>, enabled_only: bool) -> rusqlite::Result<Vec<User>> {
+        let conn = self.conn();
+        let mut sql = "SELECT id, username, realname, email, password, enabled, protected, access_level,
+                              login_count, lost_password_request_count, failed_login_count, cookie_string,
+                              last_visit, date_created
+                       FROM mantis_user_table".to_string();
+
+        let mut conditions = Vec::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if enabled_only {
+            conditions.push("enabled = 1".to_string());
+        }
+
+        if let Some(s) = search {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                let pattern = format!("%{}%", trimmed);
+                conditions.push("(username LIKE ? OR realname LIKE ? OR email LIKE ?)".to_string());
+                params_vec.push(Box::new(pattern.clone()));
+                params_vec.push(Box::new(pattern.clone()));
+                params_vec.push(Box::new(pattern));
+            }
+        }
+
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+
+        sql.push_str(" ORDER BY username ASC");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            Ok(User {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                realname: row.get(2)?,
+                email: row.get(3)?,
+                password: row.get(4)?,
+                enabled: row.get(5)?,
+                protected: row.get(6)?,
+                access_level: row.get(7)?,
+                login_count: row.get(8)?,
+                lost_password_request_count: row.get(9)?,
+                failed_login_count: row.get(10)?,
+                cookie_string: row.get(11)?,
+                last_visit: row.get(12)?,
+                date_created: row.get(13)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_user(
+        &self,
+        username: &str,
+        realname: &str,
+        email: &str,
+        password: &str,
+        access_level: i32,
+        enabled: bool,
+        protected: bool,
+    ) -> Result<i64, String> {
+        let trimmed_username = username.trim();
+        if trimmed_username.is_empty() {
+            return Err("Username cannot be empty".to_string());
+        }
+
+        let cookie = crate::auth::generate_cookie_string();
+        let hashed_pw = crate::auth::hash_password(password);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let enabled_val = if enabled { 1 } else { 0 };
+        let protected_val = if protected { 1 } else { 0 };
+
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_user_table (
+                username, realname, email, password, enabled, protected,
+                access_level, login_count, lost_password_request_count, failed_login_count,
+                cookie_string, last_visit, date_created
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, 0, ?9)",
+            params![
+                trimmed_username,
+                realname,
+                email,
+                hashed_pw,
+                enabled_val,
+                protected_val,
+                access_level,
+                cookie,
+                now,
+            ],
+        ).map_err(|e| e.to_string())?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_user(
+        &self,
+        id: i64,
+        realname: &str,
+        email: &str,
+        new_password: Option<&str>,
+        access_level: i32,
+        enabled: bool,
+        protected: bool,
+    ) -> Result<(), String> {
+        let existing = match self.get_user_by_id(id).map_err(|e| e.to_string())? {
+            Some(u) => u,
+            None => return Err(format!("User {} not found", id)),
+        };
+
+        // Guard: Protected user cannot have password or access_level changed
+        if existing.protected == 1 && (new_password.is_some() || access_level != existing.access_level) {
+            return Err("Cannot modify password or access level of a protected user".to_string());
+        }
+
+        // Guard: Last enabled administrator cannot be demoted or disabled
+        let is_currently_enabled_admin = existing.access_level >= 90 && existing.enabled == 1;
+        let will_demote_or_disable = access_level < 90 || !enabled;
+        if is_currently_enabled_admin && will_demote_or_disable {
+            let conn = self.conn();
+            let other_admins: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM mantis_user_table WHERE access_level >= 90 AND enabled = 1 AND id != ?1",
+                params![id],
+                |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+
+            if other_admins == 0 {
+                return Err("Cannot demote or disable the last enabled administrator".to_string());
+            }
+        }
+
+        let enabled_val = if enabled { 1 } else { 0 };
+        let protected_val = if protected { 1 } else { 0 };
+        let conn = self.conn();
+
+        if let Some(pw) = new_password {
+            let hashed_pw = crate::auth::hash_password(pw);
+            conn.execute(
+                "UPDATE mantis_user_table
+                 SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6
+                 WHERE id = ?7",
+                params![realname, email, hashed_pw, access_level, enabled_val, protected_val, id],
+            ).map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "UPDATE mantis_user_table
+                 SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5
+                 WHERE id = ?6",
+                params![realname, email, access_level, enabled_val, protected_val, id],
+            ).map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+
+    pub fn delete_user(&self, id: i64) -> Result<(), String> {
+        let existing = match self.get_user_by_id(id).map_err(|e| e.to_string())? {
+            Some(u) => u,
+            None => return Err(format!("User {} not found", id)),
+        };
+
+        // Guard: Cannot delete a protected user
+        if existing.protected == 1 {
+            return Err("Cannot delete a protected user".to_string());
+        }
+
+        // Guard: Last enabled administrator cannot be deleted
+        if existing.access_level >= 90 && existing.enabled == 1 {
+            let conn = self.conn();
+            let other_admins: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM mantis_user_table WHERE access_level >= 90 AND enabled = 1 AND id != ?1",
+                params![id],
+                |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+
+            if other_admins == 0 {
+                return Err("Cannot delete the last enabled administrator".to_string());
+            }
+        }
+
+        let conn = self.conn();
+        conn.execute("DELETE FROM mantis_user_table WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
     }
 
     pub fn list_categories_for_project(&self, project_id: i64) -> rusqlite::Result<Vec<Category>> {

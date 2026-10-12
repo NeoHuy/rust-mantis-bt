@@ -1,9 +1,11 @@
 pub mod auth;
+pub mod bugs;
 pub mod projects;
 pub mod users;
 
 use crate::auth::AuthContext;
 use crate::db::Db;
+use axum::extract::DefaultBodyLimit;
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
@@ -59,5 +61,26 @@ pub fn build_router(db: Db) -> Router {
         .route("/manage_proj_ver_delete/:ver_id", post(projects::manage_proj_ver_delete))
         .route("/manage_proj_user_add/:id", post(projects::manage_proj_user_add))
         .route("/manage_proj_user_remove/:id/:user_id", post(projects::manage_proj_user_remove))
+        // Sub-project 2: Issue tracking & workflow routes
+        .route("/view_all_bug_page", get(bugs::view_all_bug_page))
+        .route("/view_bug_page/:id", get(bugs::view_bug_page))
+        .route("/bug_report_page", get(bugs::bug_report_page))
+        .route("/bug_report", post(bugs::bug_report))
+        .route("/update_bug_page/:id", get(bugs::update_bug_page))
+        .route("/update_bug/:id", post(bugs::update_bug))
+        .route("/bug_delete/:id", post(bugs::bug_delete))
+        .route("/bug_change_status/:id", post(bugs::bug_change_status))
+        .route("/bug_assign/:id", post(bugs::bug_assign))
+        .route("/bugnote_add/:bug_id", post(bugs::bugnote_add))
+        .route("/bugnote_delete/:id", post(bugs::bugnote_delete))
+        .route("/bug_relationship_add/:bug_id", post(bugs::bug_relationship_add))
+        .route("/bug_relationship_delete/:id", post(bugs::bug_relationship_delete))
+        .route(
+            "/bug_file_add/:bug_id",
+            post(bugs::bug_file_add).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/file/bug/:id/:filename", get(bugs::bug_file_download))
+        .route("/bug_file_delete/:id", post(bugs::bug_file_delete))
         .with_state(db)
 }
+

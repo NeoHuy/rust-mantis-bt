@@ -1,3 +1,4 @@
+pub mod api;
 pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
@@ -143,5 +144,28 @@ pub fn build_router(db: Db) -> Router {
             post(planning::manage_email_queue_flush),
         )
         .route("/manage_email_delete/:id", post(planning::manage_email_delete))
+        // Sub-project 5: API Tokens, Plugin Management & MantisBT REST API
+        .route("/api_tokens_page", get(api::api_tokens_page))
+        .route("/api_token_create", post(api::api_token_create))
+        .route("/api_token_revoke/:id", post(api::api_token_revoke))
+        .route("/manage_plugin_page", get(api::manage_plugin_page))
+        .route(
+            "/manage_plugin_toggle/:basename",
+            post(api::manage_plugin_toggle),
+        )
+        .route("/api/rest/users/me", get(api::rest_users_me))
+        .route("/api/rest/projects", get(api::rest_list_projects))
+        .route("/api/rest/projects/:id", get(api::rest_get_project))
+        .route(
+            "/api/rest/issues",
+            get(api::rest_list_issues).post(api::rest_create_issue),
+        )
+        .route(
+            "/api/rest/issues/:id",
+            get(api::rest_get_issue)
+                .patch(api::rest_update_issue)
+                .delete(api::rest_delete_issue),
+        )
+        .route("/api/rest/issues/:id/notes", post(api::rest_add_issue_note))
         .with_state(db)
 }

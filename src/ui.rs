@@ -133,12 +133,14 @@ pub fn render_layout(
     }
     nav_links.push(r#"<a href="/manage_tags_page">Tags</a>"#.to_string());
     nav_links.push(r#"<a href="/account_page">My Account</a>"#.to_string());
+    nav_links.push(r#"<a href="/api_tokens_page">API Tokens</a>"#.to_string());
     if ctx.user.access_level >= 70 {
         nav_links.push(r#"<a href="/manage_proj_page">Manage Projects</a>"#.to_string());
     }
     if ctx.user.access_level >= 90 {
         nav_links.push(r#"<a href="/manage_custom_field_page">Custom Fields</a>"#.to_string());
         nav_links.push(r#"<a href="/manage_user_page">Manage Users</a>"#.to_string());
+        nav_links.push(r#"<a href="/manage_plugin_page">Plugins</a>"#.to_string());
         nav_links.push(r#"<a href="/manage_email_queue_page">Email Queue</a>"#.to_string());
     }
 

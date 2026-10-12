@@ -124,6 +124,13 @@ pub fn render_layout(
     if ctx.user.access_level >= 25 {
         nav_links.push(r#"<a href="/bug_report_page">Report Issue</a>"#.to_string());
     }
+    nav_links.push(r#"<a href="/changelog_page">Changelog</a>"#.to_string());
+    nav_links.push(r#"<a href="/roadmap_page">Roadmap</a>"#.to_string());
+    nav_links.push(r#"<a href="/summary_page">Summary</a>"#.to_string());
+    nav_links.push(r#"<a href="/news_page">News</a>"#.to_string());
+    if ctx.user.access_level >= 55 {
+        nav_links.push(r#"<a href="/billing_page">Time Tracking</a>"#.to_string());
+    }
     nav_links.push(r#"<a href="/manage_tags_page">Tags</a>"#.to_string());
     nav_links.push(r#"<a href="/account_page">My Account</a>"#.to_string());
     if ctx.user.access_level >= 70 {
@@ -132,6 +139,7 @@ pub fn render_layout(
     if ctx.user.access_level >= 90 {
         nav_links.push(r#"<a href="/manage_custom_field_page">Custom Fields</a>"#.to_string());
         nav_links.push(r#"<a href="/manage_user_page">Manage Users</a>"#.to_string());
+        nav_links.push(r#"<a href="/manage_email_queue_page">Email Queue</a>"#.to_string());
     }
 
     let flash_html = match flash {

@@ -1304,11 +1304,23 @@ pub async fn view_bug_page(
     };
 
     // Bugnotes section
-    let mut notes_html = String::new();
+    let total_time_minutes: i32 = notes.iter().map(|n| n.time_tracking.max(0)).sum();
+    let total_time_html = if total_time_minutes > 0 {
+        format!(
+            r#"<p style="margin-bottom:8px;"><strong>Total Time Spent:</strong> {:02}:{:02} ({} mins)</p>"#,
+            total_time_minutes / 60,
+            total_time_minutes % 60,
+            total_time_minutes
+        )
+    } else {
+        String::new()
+    };
+
+    let mut notes_html = total_time_html;
     if notes.is_empty() {
         notes_html.push_str("<p>No notes attached to this issue.</p>");
     } else {
-        notes_html.push_str(r#"<table class="data-table"><thead><tr><th>Author</th><th>Note</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>"#);
+        notes_html.push_str(r#"<table class="data-table"><thead><tr><th>Author</th><th>Note</th><th>Time Spent</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>"#);
         for n in &notes {
             let author = users_map
                 .get(&n.reporter_id)
@@ -1318,6 +1330,11 @@ pub async fn view_bug_page(
                 "private"
             } else {
                 "public"
+            };
+            let time_str = if n.time_tracking > 0 {
+                format!("{:02}:{:02}", n.time_tracking / 60, n.time_tracking % 60)
+            } else {
+                "-".to_string()
             };
             let can_del_note = eff >= 70 || (eff >= 25 && n.reporter_id == ctx.user.id);
             let del_btn = if can_del_note {
@@ -1334,9 +1351,11 @@ pub async fn view_bug_page(
                     <td style="white-space:pre-wrap;">{}</td>
                     <td style="width:90px;">{}</td>
                     <td style="width:90px;">{}</td>
+                    <td style="width:90px;">{}</td>
                 </tr>"#,
                 html_escape(&author),
                 html_escape(&n.note),
+                time_str,
                 vis,
                 del_btn
             ));
@@ -1347,6 +1366,14 @@ pub async fn view_bug_page(
     let note_form_html = if eff >= 25 {
         let priv_opt = if eff >= 55 {
             r#"<option value="50">private</option>"#
+        } else {
+            ""
+        };
+        let time_row = if eff >= 55 {
+            r#"<tr>
+                <td class="label-col">Time Tracking (HH:MM or mins)</td>
+                <td class="input-col"><input type="text" name="time_tracking" placeholder="00:00 or minutes" style="width:160px;"></td>
+            </tr>"#
         } else {
             ""
         };
@@ -1366,10 +1393,11 @@ pub async fn view_bug_page(
                             </select>
                         </td>
                     </tr>
+                    {}
                 </table>
                 <button type="submit" class="btn btn-sm">Add Note</button>
             </form>"#,
-            bug.id, priv_opt
+            bug.id, priv_opt, time_row
         )
     } else {
         String::new()
@@ -1959,6 +1987,24 @@ pub async fn bug_assign(
 pub struct BugnoteAddForm {
     pub note: String,
     pub view_state: Option<i32>,
+    pub time_tracking: Option<String>,
+}
+
+fn parse_time_tracking_minutes(raw: Option<&str>) -> i32 {
+    let s = match raw {
+        Some(v) => v.trim(),
+        None => return 0,
+    };
+    if s.is_empty() {
+        return 0;
+    }
+    if let Some((hh, mm)) = s.split_once(':') {
+        let h = hh.trim().parse::<i32>().unwrap_or(0).max(0);
+        let m = mm.trim().parse::<i32>().unwrap_or(0).max(0);
+        h * 60 + m
+    } else {
+        s.parse::<i32>().unwrap_or(0).max(0)
+    }
 }
 
 pub async fn bugnote_add(
@@ -1984,7 +2030,13 @@ pub async fn bugnote_add(
         return forbidden(&ctx, "Developer access required to add private bugnotes.");
     }
 
-    match db.add_bugnote(bug_id, ctx.user.id, &form.note, vs) {
+    let time_mins = if eff >= 55 {
+        parse_time_tracking_minutes(form.time_tracking.as_deref())
+    } else {
+        0
+    };
+
+    match db.add_bugnote_with_time(bug_id, ctx.user.id, &form.note, vs, time_mins) {
         Ok(_) => Redirect::to(&format!("/view_bug_page/{}?msg=Note+added", bug_id)).into_response(),
         Err(_) => Redirect::to(&format!(
             "/view_bug_page/{}?err=Note+cannot+be+empty",

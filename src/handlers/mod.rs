@@ -2,6 +2,7 @@ pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
 pub mod filters;
+pub mod planning;
 pub mod projects;
 pub mod tags;
 pub mod users;
@@ -125,5 +126,22 @@ pub fn build_router(db: Db) -> Router {
         )
         .route("/filter_save", post(filters::filter_save))
         .route("/filter_delete/:id", post(filters::filter_delete))
+        // Sub-project 4: Roadmap, Changelog, Summary, Time Tracking, News & Email Queue
+        .route("/roadmap_page", get(planning::roadmap_page))
+        .route("/changelog_page", get(planning::changelog_page))
+        .route("/summary_page", get(planning::summary_page))
+        .route("/billing_page", get(planning::billing_page))
+        .route("/news_page", get(planning::news_page))
+        .route("/news_add", post(planning::news_add))
+        .route("/news_delete/:id", post(planning::news_delete))
+        .route(
+            "/manage_email_queue_page",
+            get(planning::manage_email_queue_page),
+        )
+        .route(
+            "/manage_email_queue_flush",
+            post(planning::manage_email_queue_flush),
+        )
+        .route("/manage_email_delete/:id", post(planning::manage_email_delete))
         .with_state(db)
 }

@@ -197,6 +197,10 @@ impl Db {
 
     pub fn get_user_by_id(&self, id: i64) -> rusqlite::Result<Option<User>> {
         let conn = self.conn();
+        Self::query_user_by_id(&conn, id)
+    }
+
+    fn query_user_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<User>> {
         let mut stmt = conn.prepare(
             "SELECT id, username, realname, email, password, enabled, protected, access_level,
                     login_count, lost_password_request_count, failed_login_count, cookie_string,
@@ -415,7 +419,8 @@ impl Db {
         enabled: bool,
         protected: bool,
     ) -> Result<(), String> {
-        let existing = match self.get_user_by_id(id).map_err(|e| e.to_string())? {
+        let conn = self.conn();
+        let existing = match Self::query_user_by_id(&conn, id).map_err(|e| e.to_string())? {
             Some(u) => u,
             None => return Err(format!("User {} not found", id)),
         };
@@ -429,7 +434,6 @@ impl Db {
         let is_currently_enabled_admin = existing.access_level >= 90 && existing.enabled == 1;
         let will_demote_or_disable = access_level < 90 || !enabled;
         if is_currently_enabled_admin && will_demote_or_disable {
-            let conn = self.conn();
             let other_admins: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM mantis_user_table WHERE access_level >= 90 AND enabled = 1 AND id != ?1",
                 params![id],
@@ -443,7 +447,6 @@ impl Db {
 
         let enabled_val = if enabled { 1 } else { 0 };
         let protected_val = if protected { 1 } else { 0 };
-        let conn = self.conn();
 
         if let Some(pw) = new_password {
             let hashed_pw = crate::auth::hash_password(pw);
@@ -466,7 +469,8 @@ impl Db {
     }
 
     pub fn delete_user(&self, id: i64) -> Result<(), String> {
-        let existing = match self.get_user_by_id(id).map_err(|e| e.to_string())? {
+        let conn = self.conn();
+        let existing = match Self::query_user_by_id(&conn, id).map_err(|e| e.to_string())? {
             Some(u) => u,
             None => return Err(format!("User {} not found", id)),
         };
@@ -478,7 +482,6 @@ impl Db {
 
         // Guard: Last enabled administrator cannot be deleted
         if existing.access_level >= 90 && existing.enabled == 1 {
-            let conn = self.conn();
             let other_admins: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM mantis_user_table WHERE access_level >= 90 AND enabled = 1 AND id != ?1",
                 params![id],
@@ -490,7 +493,6 @@ impl Db {
             }
         }
 
-        let conn = self.conn();
         conn.execute("DELETE FROM mantis_user_table WHERE id = ?1", params![id])
             .map_err(|e| e.to_string())?;
 

@@ -1,7 +1,7 @@
 use crate::models::{
-    Bug, BugFile, BugFilter, BugFull, BugHistory, BugRelationship, BugTag, BugUpdate, Bugnote,
-    Category, CustomField, CustomFieldValue, EmailMessage, NewsItem, Project, ProjectVersion,
-    SavedFilter, Tag, TimeTrackingEntry, User,
+    ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugRelationship, BugTag, BugUpdate,
+    Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, NewsItem, PluginItem, Project,
+    ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -287,6 +287,23 @@ impl Db {
                 announcement INTEGER NOT NULL DEFAULT 0,
                 headline TEXT NOT NULL DEFAULT '',
                 body TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_api_token_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                hash TEXT NOT NULL UNIQUE,
+                date_created INTEGER NOT NULL DEFAULT 0,
+                date_used INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (user_id, name)
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_plugin_table (
+                basename TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                protected INTEGER NOT NULL DEFAULT 0,
+                priority INTEGER NOT NULL DEFAULT 3
             );",
         )?;
 
@@ -338,6 +355,18 @@ impl Db {
                 params![0, 0, "General", 0],
             )?;
         }
+
+        // Default core plugins seed
+        conn.execute(
+            "INSERT OR IGNORE INTO mantis_plugin_table (basename, enabled, protected, priority)
+             VALUES ('MantisCoreFormatting', 1, 1, 3)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO mantis_plugin_table (basename, enabled, protected, priority)
+             VALUES ('EventAuditLog', 1, 0, 3)",
+            [],
+        )?;
 
         Ok(())
     }
@@ -3657,6 +3686,32 @@ impl Db {
         for addr in sorted {
             let _ = self.enqueue_email(conn, &addr, event_subject, event_body);
         }
+
+        // Plugin hook: if EventAuditLog plugin is enabled, increment plugin_event_audit_count
+        let audit_enabled: i32 = conn
+            .query_row(
+                "SELECT enabled FROM mantis_plugin_table WHERE basename = 'EventAuditLog'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if audit_enabled != 0 {
+            let prev_count: i64 = conn
+                .query_row(
+                    "SELECT value FROM mantis_config_table WHERE config_id = 'plugin_event_audit_count' AND project_id = 0 AND user_id = 0",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+            let _ = conn.execute(
+                "INSERT INTO mantis_config_table (config_id, project_id, user_id, access_reqd, type, value)
+                 VALUES ('plugin_event_audit_count', 0, 0, 0, 90, ?1)
+                 ON CONFLICT (config_id, project_id, user_id) DO UPDATE SET value = excluded.value",
+                params![(prev_count + 1).to_string()],
+            );
+        }
     }
 
     pub fn list_queued_emails(&self) -> rusqlite::Result<Vec<EmailMessage>> {
@@ -3816,6 +3871,147 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    // ─── Sub-project 5: API Tokens (`mantis_api_token_table`) & Plugins ──────
+
+    pub fn create_api_token(&self, user_id: i64, name: &str) -> Result<(i64, String), String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Token name cannot be empty".to_string());
+        }
+        let raw_token = crate::auth::generate_api_token();
+        let token_hash = crate::auth::hash_api_token(&raw_token);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_api_token_table (user_id, name, hash, date_created, date_used)
+             VALUES (?1, ?2, ?3, ?4, 0)",
+            params![user_id, trimmed, token_hash, now],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok((conn.last_insert_rowid(), raw_token))
+    }
+
+    pub fn list_api_tokens(&self, user_id: i64) -> rusqlite::Result<Vec<ApiToken>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, name, hash, date_created, date_used
+             FROM mantis_api_token_table
+             WHERE user_id = ?1
+             ORDER BY date_created DESC, id DESC",
+        )?;
+        let rows = stmt.query_map(params![user_id], |row| {
+            Ok(ApiToken {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                name: row.get(2)?,
+                hash: row.get(3)?,
+                date_created: row.get(4)?,
+                date_used: row.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn revoke_api_token(&self, id: i64, user_id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let rows = conn.execute(
+            "DELETE FROM mantis_api_token_table WHERE id = ?1 AND user_id = ?2",
+            params![id, user_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn authenticate_api_token(&self, raw_token: &str) -> rusqlite::Result<Option<User>> {
+        let trimmed = raw_token.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let token_hash = crate::auth::hash_api_token(trimmed);
+        let conn = self.conn();
+        let row_opt: Option<(i64, i64)> = match conn.query_row(
+            "SELECT id, user_id FROM mantis_api_token_table WHERE hash = ?1",
+            params![token_hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e),
+        };
+
+        let (token_id, user_id) = match row_opt {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+
+        let user = match Self::query_user_by_id(&conn, user_id)? {
+            Some(u) if u.enabled != 0 => u,
+            _ => return Ok(None),
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let _ = conn.execute(
+            "UPDATE mantis_api_token_table SET date_used = ?1 WHERE id = ?2",
+            params![now, token_id],
+        );
+
+        Ok(Some(user))
+    }
+
+    pub fn list_plugins(&self) -> rusqlite::Result<Vec<PluginItem>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT basename, enabled, protected, priority
+             FROM mantis_plugin_table
+             ORDER BY protected DESC, priority ASC, basename ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PluginItem {
+                basename: row.get(0)?,
+                enabled: row.get(1)?,
+                protected: row.get(2)?,
+                priority: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    pub fn set_plugin_enabled(&self, basename: &str, enabled: bool) -> Result<(), String> {
+        let conn = self.conn();
+        let protected: i32 = conn
+            .query_row(
+                "SELECT protected FROM mantis_plugin_table WHERE basename = ?1",
+                params![basename],
+                |row| row.get(0),
+            )
+            .map_err(|_| format!("Plugin '{}' not found", basename))?;
+        if protected != 0 && !enabled {
+            return Err(format!("Protected plugin '{}' cannot be disabled", basename));
+        }
+        conn.execute(
+            "UPDATE mantis_plugin_table SET enabled = ?1 WHERE basename = ?2",
+            params![if enabled { 1 } else { 0 }, basename],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn is_plugin_enabled(&self, basename: &str) -> bool {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT enabled FROM mantis_plugin_table WHERE basename = ?1",
+            params![basename],
+            |row| row.get::<_, i32>(0),
+        )
+        .unwrap_or(0)
+            != 0
     }
 }
 
@@ -4751,6 +4947,80 @@ mod tests {
         // Developer (55) sees both public and private news
         let dev_news = db.list_news(proj_id, 55).unwrap();
         assert_eq!(dev_news.len(), 2);
+    }
+
+    #[test]
+    fn test_api_tokens_and_plugin_system() {
+        let db = Db::open_in_memory().unwrap();
+        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+
+        // 1. Create and authenticate API token
+        let (tok_id, raw_tok) = db.create_api_token(admin.id, "CI Pipeline").unwrap();
+        assert_eq!(raw_tok.len(), 64);
+
+        let tokens = db.list_api_tokens(admin.id).unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].name, "CI Pipeline");
+        assert_eq!(tokens[0].date_used, 0);
+        // Raw token is never stored in DB
+        assert_ne!(tokens[0].hash, raw_tok);
+
+        let authed = db.authenticate_api_token(&raw_tok).unwrap().unwrap();
+        assert_eq!(authed.id, admin.id);
+        assert!(db.list_api_tokens(admin.id).unwrap()[0].date_used > 0);
+
+        // Revoke token -> subsequent auth fails
+        assert!(db.revoke_api_token(tok_id, admin.id).unwrap());
+        assert!(db.authenticate_api_token(&raw_tok).unwrap().is_none());
+
+        // 2. Plugin system & protected plugin guard
+        let plugins = db.list_plugins().unwrap();
+        assert_eq!(plugins.len(), 2);
+        assert!(db.is_plugin_enabled("MantisCoreFormatting"));
+        assert!(db.is_plugin_enabled("EventAuditLog"));
+
+        // Protected plugin cannot be disabled
+        assert!(db.set_plugin_enabled("MantisCoreFormatting", false).is_err());
+
+        // EventAuditLog increments plugin_event_audit_count when enabled
+        let proj_id = db.create_project("PluginProj", 10, 10, "", true).unwrap();
+        let bug_id = db
+            .create_bug(
+                proj_id,
+                admin.id,
+                1,
+                "Test plugin event",
+                "desc",
+                "",
+                "",
+                30,
+                50,
+                10,
+                "",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+        assert_eq!(
+            db.get_config("plugin_event_audit_count", 0, 0)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+
+        // Disable EventAuditLog -> subsequent events do not increment counter
+        db.set_plugin_enabled("EventAuditLog", false).unwrap();
+        assert!(!db.is_plugin_enabled("EventAuditLog"));
+        db.add_bugnote(bug_id, admin.id, "Note while plugin disabled", 10)
+            .unwrap();
+        assert_eq!(
+            db.get_config("plugin_event_audit_count", 0, 0)
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
     }
 }
 

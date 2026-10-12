@@ -275,6 +275,76 @@ where
     }
 }
 
+pub fn generate_api_token() -> String {
+    generate_cookie_string()
+}
+
+pub fn hash_api_token(raw: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw.trim().as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiAuth {
+    pub user: crate::models::User,
+}
+
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for ApiAuth
+where
+    crate::db::Db: axum::extract::FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use axum::extract::FromRef;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+
+        let db = crate::db::Db::from_ref(state);
+        let auth_header = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim())
+            .unwrap_or("");
+
+        let raw_token = if let Some(stripped) = auth_header.strip_prefix("Bearer ") {
+            stripped.trim()
+        } else if let Some(stripped) = auth_header.strip_prefix("bearer ") {
+            stripped.trim()
+        } else {
+            auth_header
+        };
+
+        if raw_token.is_empty() {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "message": "API token required" })),
+            )
+                .into_response());
+        }
+
+        match db.authenticate_api_token(raw_token) {
+            Ok(Some(user)) => Ok(ApiAuth { user }),
+            _ => Err((
+                StatusCode::UNAUTHORIZED,
+                axum::Json(serde_json::json!({ "message": "Invalid or revoked API token" })),
+            )
+                .into_response()),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -568,3 +568,112 @@ async fn test_set_project_cookie_and_access_resolution() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     assert_eq!(res.headers().get("location").unwrap(), "/manage_proj_page");
 }
+
+fn assert_no_nested_forms(html: &str) {
+    let mut depth: i32 = 0;
+    let mut rest = html;
+    while !rest.is_empty() {
+        let open_pos = rest.find("<form");
+        let close_pos = rest.find("</form");
+        match (open_pos, close_pos) {
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                assert!(depth <= 1, "Detected nested <form> tag in HTML");
+                rest = &rest[o + 5..];
+            }
+            (Some(_), Some(c)) => {
+                depth -= 1;
+                assert!(depth >= 0, "Mismatched </form> tag in HTML");
+                rest = &rest[c + 6..];
+            }
+            (Some(o), None) => {
+                depth += 1;
+                assert!(depth <= 1, "Detected nested <form> tag in HTML");
+                rest = &rest[o + 5..];
+            }
+            (None, Some(c)) => {
+                depth -= 1;
+                assert!(depth >= 0, "Mismatched </form> tag in HTML");
+                rest = &rest[c + 6..];
+            }
+            (None, None) => break,
+        }
+    }
+    assert_eq!(depth, 0, "Unclosed <form> tag in HTML");
+}
+
+#[tokio::test]
+async fn test_no_nested_forms_in_edit_pages() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let admin_cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
+
+    let uid = db.create_user("testuser", "Test User", "t@x.com", "pass", 25, true, false).unwrap();
+    let pid = db.create_project("TestProj", 10, 10, "Desc", true).unwrap();
+
+    // 1. Check /manage_user_edit_page/:id
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/manage_user_edit_page/{}", uid))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    assert_no_nested_forms(&html);
+
+    // 2. Check /manage_proj_edit_page/:id
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/manage_proj_edit_page/{}", pid))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    assert_no_nested_forms(&html);
+
+    // 3. Check /manage_proj_page
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/manage_proj_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    assert_no_nested_forms(&html);
+
+    // 4. Check /manage_user_page
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/manage_user_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    assert_no_nested_forms(&html);
+}

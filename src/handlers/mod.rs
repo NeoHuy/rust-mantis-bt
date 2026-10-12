@@ -8,6 +8,16 @@ use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::Router;
 
+pub fn parse_bool(opt: Option<&str>) -> bool {
+    match opt {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "on" || v == "yes"
+        }
+        None => false,
+    }
+}
+
 async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
     if ctx.user.access_level >= 70 {
         Redirect::to("/manage_proj_page")

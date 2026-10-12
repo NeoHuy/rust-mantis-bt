@@ -7,15 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-fn parse_bool(opt: Option<&str>) -> bool {
-    match opt {
-        Some(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "on" || v == "yes"
-        }
-        None => false,
-    }
-}
+use super::parse_bool;
 
 fn require_admin(ctx: &AuthContext) -> Option<Response> {
     if ctx.user.access_level < 90 {
@@ -325,9 +317,11 @@ pub async fn manage_user_edit_page(
     let delete_btn = if target_user.protected == 0 {
         format!(
             r#"
-            <form action="/manage_user_delete/{}" method="POST" style="display:inline; margin-left:10px;" onsubmit="return confirm('Are you sure you want to delete this user?');">
-                <button type="submit" class="btn btn-danger">Delete User</button>
-            </form>
+            <div style="margin-top: 12px; border-top: 1px solid #e0e6ed; padding-top: 12px;">
+                <form action="/manage_user_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this user?');">
+                    <button type="submit" class="btn btn-danger">Delete User</button>
+                </form>
+            </div>
             "#,
             target_user.id
         )
@@ -382,9 +376,9 @@ pub async fn manage_user_edit_page(
                     <div style="margin-top: 14px;">
                         <button type="submit" class="btn">Update User</button>
                         <a href="/manage_user_page" class="btn btn-secondary" style="margin-left:8px;">Cancel</a>
-                        {}
                     </div>
                 </form>
+                {}
             </div>
         </div>
         "#,

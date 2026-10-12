@@ -7,15 +7,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 
-fn parse_bool(opt: Option<&str>) -> bool {
-    match opt {
-        Some(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "on" || v == "yes"
-        }
-        None => false,
-    }
-}
+use super::parse_bool;
 
 fn require_manager(ctx: &AuthContext) -> Option<Response> {
     if ctx.user.access_level < 70 {
@@ -588,11 +580,13 @@ pub async fn manage_proj_edit_page(
                     <div style="margin-top: 14px;">
                         <button type="submit" class="btn">Update Project</button>
                         <a href="/manage_proj_page" class="btn btn-secondary" style="margin-left:8px;">Back to Projects</a>
-                        <form action="/manage_proj_delete/{}" method="POST" style="display:inline; margin-left:12px;" onsubmit="return confirm('Are you sure you want to delete this project? All associated data will be removed.');">
-                            <button type="submit" class="btn btn-danger">Delete Project</button>
-                        </form>
                     </div>
                 </form>
+                <div style="margin-top: 12px; border-top: 1px solid #e0e6ed; padding-top: 12px;">
+                    <form action="/manage_proj_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this project? All associated data will be removed.');">
+                        <button type="submit" class="btn btn-danger">Delete Project</button>
+                    </form>
+                </div>
             </div>
         </div>
 

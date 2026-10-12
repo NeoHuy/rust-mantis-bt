@@ -169,11 +169,13 @@ pub struct AuthContext {
 
 pub fn parse_cookies(headers: &axum::http::HeaderMap) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    if let Some(cookie_val) = headers.get(axum::http::header::COOKIE).and_then(|v| v.to_str().ok()) {
-        for piece in cookie_val.split(';') {
-            let piece = piece.trim();
-            if let Some((k, v)) = piece.split_once('=') {
-                map.insert(k.trim().to_string(), v.trim().to_string());
+    for header_val in headers.get_all(axum::http::header::COOKIE) {
+        if let Ok(cookie_val) = header_val.to_str() {
+            for piece in cookie_val.split(';') {
+                let piece = piece.trim();
+                if let Some((k, v)) = piece.split_once('=') {
+                    map.insert(k.trim().to_string(), v.trim().to_string());
+                }
             }
         }
     }

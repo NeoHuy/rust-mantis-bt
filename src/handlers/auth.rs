@@ -38,30 +38,29 @@ pub async fn login_page(headers: HeaderMap, State(db): State<Db>) -> Response {
     if let Some(cookie_str) = cookies.get("MANTIS_STRING_COOKIE") {
         if let Ok(Some(user)) = db.get_user_by_cookie(cookie_str) {
             if user.enabled == 1 {
-                if user.access_level >= 70 {
-                    return Redirect::to("/manage_proj_page").into_response();
-                } else {
-                    return Redirect::to("/account_page").into_response();
-                }
+                return Redirect::to("/my_view_page").into_response();
             }
         }
     }
 
     let form_html = r#"
     <div class="login-box">
-        <div class="login-header">MantisBT Login</div>
+        <div class="login-header">&#128274; Sign In</div>
         <div class="login-body">
             <form method="POST" action="/login">
                 <div style="margin-bottom: 12px;">
-                    <label for="username" style="display:block; margin-bottom:4px; font-weight:600;">Username:</label>
-                    <input type="text" name="username" id="username" autofocus required style="width:100%;" />
+                    <label for="username" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Username</label>
+                    <input type="text" name="username" id="username" placeholder="Username" autofocus required style="width:100%;" />
                 </div>
-                <div style="margin-bottom: 16px;">
-                    <label for="password" style="display:block; margin-bottom:4px; font-weight:600;">Password:</label>
-                    <input type="password" name="password" id="password" required style="width:100%;" />
+                <div style="margin-bottom: 14px;">
+                    <label for="password" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Password</label>
+                    <input type="password" name="password" id="password" placeholder="Password" required style="width:100%;" />
+                </div>
+                <div style="margin-bottom: 16px; display:flex; align-items:center; justify-content:space-between; font-size:12px; color:#555;">
+                    <label style="cursor:pointer;"><input type="checkbox" name="perm_login" value="1" checked /> Remember my login on this browser</label>
                 </div>
                 <div>
-                    <button type="submit" class="btn" style="width:100%; padding:8px; font-size:14px;">Login</button>
+                    <button type="submit" class="btn" style="width:100%; padding:8px; font-size:13px;">Login</button>
                 </div>
             </form>
         </div>
@@ -78,11 +77,7 @@ pub async fn login_submit(
     match db.authenticate(&form.username, &form.password) {
         Ok(Some(user)) => {
             let cookie_val = make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, None);
-            let target_url = if user.access_level >= 70 {
-                "/manage_proj_page"
-            } else {
-                "/account_page"
-            };
+            let target_url = "/my_view_page";
             let mut res = Redirect::to(target_url).into_response();
             if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
                 res.headers_mut().insert(SET_COOKIE, hv);
@@ -92,19 +87,22 @@ pub async fn login_submit(
         _ => {
             let form_html = r#"
             <div class="login-box">
-                <div class="login-header">MantisBT Login</div>
+                <div class="login-header">&#128274; Sign In</div>
                 <div class="login-body">
                     <form method="POST" action="/login">
                         <div style="margin-bottom: 12px;">
-                            <label for="username" style="display:block; margin-bottom:4px; font-weight:600;">Username:</label>
-                            <input type="text" name="username" id="username" autofocus required style="width:100%;" />
+                            <label for="username" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Username</label>
+                            <input type="text" name="username" id="username" placeholder="Username" autofocus required style="width:100%;" />
                         </div>
-                        <div style="margin-bottom: 16px;">
-                            <label for="password" style="display:block; margin-bottom:4px; font-weight:600;">Password:</label>
-                            <input type="password" name="password" id="password" required style="width:100%;" />
+                        <div style="margin-bottom: 14px;">
+                            <label for="password" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Password</label>
+                            <input type="password" name="password" id="password" placeholder="Password" required style="width:100%;" />
+                        </div>
+                        <div style="margin-bottom: 16px; display:flex; align-items:center; justify-content:space-between; font-size:12px; color:#555;">
+                            <label style="cursor:pointer;"><input type="checkbox" name="perm_login" value="1" checked /> Remember my login on this browser</label>
                         </div>
                         <div>
-                            <button type="submit" class="btn" style="width:100%; padding:8px; font-size:14px;">Login</button>
+                            <button type="submit" class="btn" style="width:100%; padding:8px; font-size:13px;">Login</button>
                         </div>
                     </form>
                 </div>

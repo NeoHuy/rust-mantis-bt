@@ -5,7 +5,7 @@ use crate::models::{
     AccessLevel, BugFilter, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus,
     BugUpdate, ViewState,
 };
-use crate::ui::{html_escape, render_layout};
+use crate::ui::{format_timestamp, html_escape, render_layout};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -61,7 +61,7 @@ pub async fn api_tokens_page(
     let mut rows_html = String::new();
     for t in &tokens {
         let used_str = if t.date_used > 0 {
-            format!("Used (ts: {})", t.date_used)
+            format!("Used ({})", format_timestamp(t.date_used))
         } else {
             "Never used".to_string()
         };
@@ -79,7 +79,7 @@ pub async fn api_tokens_page(
             </tr>"#,
             t.id,
             html_escape(&t.name),
-            t.date_created,
+            format_timestamp(t.date_created),
             used_str,
             t.id
         ));

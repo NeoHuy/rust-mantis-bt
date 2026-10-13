@@ -4,7 +4,10 @@ use crate::models::{
     Bug, BugFilter, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus,
     BugUpdate, RelationshipType, ViewState,
 };
-use crate::ui::{html_escape, render_layout};
+use crate::ui::{
+    format_timestamp, html_escape, render_layout, render_status_badge, render_status_legend,
+    status_color,
+};
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -143,32 +146,34 @@ fn render_my_view_box(title: &str, link: &str, bugs: &[Bug]) -> String {
     let mut rows = String::new();
     if bugs.is_empty() {
         rows.push_str(
-            r#"<tr><td colspan="3" style="text-align:center; padding:8px;">No issues.</td></tr>"#,
+            r#"<tr><td colspan="3" style="text-align:center; padding:10px; color:#777;">No issues found.</td></tr>"#,
         );
     } else {
         for b in bugs.iter().take(10) {
+            let color = status_color(b.status);
             rows.push_str(&format!(
                 r#"<tr>
-                    <td style="width:80px;"><a href="/view_bug_page/{}">{:07}</a></td>
-                    <td style="width:90px;">{}</td>
-                    <td><a href="/view_bug_page/{}">{}</a></td>
+                    <td style="width:95px; border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a><br><span style="font-size:11px; color:#555;">{}</span></td>
+                    <td><a href="/view_bug_page/{}" style="font-weight:bold;">{}</a><br><span style="font-size:11px; color:#777;">Updated: {}</span></td>
                 </tr>"#,
+                color,
                 b.id,
                 b.id,
                 html_escape(status_label(b.status)),
                 b.id,
-                html_escape(&b.summary)
+                html_escape(&b.summary),
+                format_timestamp(b.last_updated)
             ));
         }
     }
     format!(
         r#"<div class="panel">
-            <div class="panel-header" style="display:flex; justify-content:space-between;">
+            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
                 <span>{} ({})</span>
-                <a href="{}" style="font-size:12px;">View all</a>
+                <a class="btn btn-secondary btn-sm" href="{}">View Issues</a>
             </div>
-            <div class="panel-body" style="padding:8px;">
-                <table class="data-table" style="margin-bottom:0;">
+            <div class="panel-body" style="padding:0;">
+                <table class="data-table" style="margin-bottom:0; border:none;">
                     <tbody>{}</tbody>
                 </table>
             </div>
@@ -262,7 +267,8 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
             {}
             {}
             {}
-        </div>"#,
+        </div>
+        {}"#,
         render_my_view_box(
             "Assigned to Me (Unresolved)",
             &format!("/view_all_bug_page?handler_id={}&hide_status=80", ctx.user.id),
@@ -285,6 +291,7 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
             &format!("/view_all_bug_page?monitored_by={}", ctx.user.id),
             &monitored_by_me
         ),
+        render_status_legend()
     );
 
     render_layout("My View", &ctx, None, &content).into_response()
@@ -422,11 +429,10 @@ pub async fn view_all_bug_page(
         .take(per_page as usize)
         .collect();
 
-    let users_map: HashMap<i64, String> = db
-        .list_users(None, false)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| (u.id, u.username))
+    let all_users = db.list_users(None, false).unwrap_or_default();
+    let users_map: HashMap<i64, String> = all_users
+        .iter()
+        .map(|u| (u.id, u.username.clone()))
         .collect();
 
     let projects_map: HashMap<i64, String> = ctx
@@ -472,26 +478,28 @@ pub async fn view_all_bug_page(
             } else {
                 ""
             };
+            let status_badge = render_status_badge(b.status, status_label(b.status));
 
             rows_html.push_str(&format!(
                 r#"<tr class="{}">
-                    <td><a href="/view_bug_page/{}">{:07}</a></td>
+                    <td style="border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a></td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}{}{}</td>
                     <td><a href="/view_bug_page/{}">{}</a>{}</td>
-                    <td>{}</td>
+                    <td style="white-space:nowrap;">{}</td>
                 </tr>"#,
                 row_class,
+                status_color(b.status),
                 b.id,
                 b.id,
                 html_escape(&proj_name),
                 html_escape(&cat_name),
                 html_escape(severity_label(b.severity)),
                 html_escape(priority_label(b.priority)),
-                html_escape(status_label(b.status)),
+                status_badge,
                 if !handler_name.is_empty() { " (" } else { "" },
                 if !handler_name.is_empty() {
                     format!("{})", html_escape(&handler_name))
@@ -501,7 +509,7 @@ pub async fn view_all_bug_page(
                 b.id,
                 html_escape(&b.summary),
                 priv_badge,
-                b.last_updated
+                format_timestamp(b.last_updated)
             ));
         }
     }
@@ -529,8 +537,146 @@ pub async fn view_all_bug_page(
         String::new()
     };
 
+    // Multi-criteria filter dropdowns
+    let mut reporter_opts = String::from(r#"<option value="0">[any]</option>"#);
+    let mut handler_opts = format!(
+        r#"<option value="0">[any]</option><option value="-1" {}>[none]</option>"#,
+        if filter.handler_id == Some(-1) {
+            "selected"
+        } else {
+            ""
+        }
+    );
+    let mut monitored_opts = String::from(r#"<option value="0">[any]</option>"#);
+    for u in &all_users {
+        let rep_sel = if filter.reporter_id == Some(u.id) {
+            "selected"
+        } else {
+            ""
+        };
+        reporter_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            u.id,
+            rep_sel,
+            html_escape(&u.username)
+        ));
+        let h_sel = if filter.handler_id == Some(u.id) {
+            "selected"
+        } else {
+            ""
+        };
+        handler_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            u.id,
+            h_sel,
+            html_escape(&u.username)
+        ));
+        let m_sel = if filter.monitored_by == Some(u.id) {
+            "selected"
+        } else {
+            ""
+        };
+        monitored_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            u.id,
+            m_sel,
+            html_escape(&u.username)
+        ));
+    }
+
+    let cats = db
+        .list_effective_categories(ctx.active_project_id)
+        .unwrap_or_default();
+    let mut cat_opts = String::from(r#"<option value="0">[any]</option>"#);
+    for c in &cats {
+        let sel = if filter.category_id == Some(c.id) {
+            "selected"
+        } else {
+            ""
+        };
+        cat_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            c.id,
+            sel,
+            html_escape(&c.name)
+        ));
+    }
+
+    let mut status_opts = String::from(r#"<option value="0">[any]</option>"#);
+    let mut hide_status_opts = String::from(r#"<option value="0">[none]</option>"#);
+    for (code, name) in [
+        (10, "new"),
+        (20, "feedback"),
+        (30, "acknowledged"),
+        (40, "confirmed"),
+        (50, "assigned"),
+        (80, "resolved"),
+        (90, "closed"),
+    ] {
+        let s_sel = if filter.status == Some(code) {
+            "selected"
+        } else {
+            ""
+        };
+        status_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code, s_sel, name
+        ));
+        let hs_sel = if filter.hide_status == Some(code) {
+            "selected"
+        } else {
+            ""
+        };
+        hide_status_opts.push_str(&format!(
+            r#"<option value="{}" {}>{} (and above)</option>"#,
+            code, hs_sel, name
+        ));
+    }
+
+    let mut priority_opts = String::from(r#"<option value="0">[any]</option>"#);
+    for (code, name) in [
+        (10, "none"),
+        (20, "low"),
+        (30, "normal"),
+        (40, "high"),
+        (50, "urgent"),
+        (60, "immediate"),
+    ] {
+        let sel = if filter.priority == Some(code) {
+            "selected"
+        } else {
+            ""
+        };
+        priority_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code, sel, name
+        ));
+    }
+
+    let mut severity_opts = String::from(r#"<option value="0">[any]</option>"#);
+    for (code, name) in [
+        (10, "feature"),
+        (20, "trivial"),
+        (30, "text"),
+        (40, "tweak"),
+        (50, "minor"),
+        (60, "major"),
+        (70, "crash"),
+        (80, "block"),
+    ] {
+        let sel = if filter.severity == Some(code) {
+            "selected"
+        } else {
+            ""
+        };
+        severity_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code, sel, name
+        ));
+    }
+
     let all_tags = db.list_tags().unwrap_or_default();
-    let mut tag_opts = String::from(r#"<option value="0">All</option>"#);
+    let mut tag_opts = String::from(r#"<option value="0">[any]</option>"#);
     for t in &all_tags {
         let sel = if filter.tag_id == Some(t.id) {
             "selected"
@@ -568,7 +714,7 @@ pub async fn view_all_bug_page(
                 <input type="hidden" name="tag_id" value="{}">
                 <input type="text" name="name" placeholder="Saved filter name" style="max-width:180px;" required>
                 <label><input type="checkbox" name="is_public" value="1"> Public</label>
-                <button type="submit" class="btn btn-secondary btn-sm">Save Filter</button>
+                <button type="submit" class="btn btn-secondary btn-sm">Save Current Filter</button>
             </form>"#,
             html_escape(search_val),
             filter.status.unwrap_or(0),
@@ -584,6 +730,65 @@ pub async fn view_all_bug_page(
         r#"{}
         <div class="panel">
             <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Filters</span>
+                <a class="btn btn-secondary btn-sm" href="/view_all_bug_page">Reset Filter</a>
+            </div>
+            <div class="panel-body">
+                <form method="GET" action="/view_all_bug_page">
+                    <div class="filter-grid">
+                        <div class="filter-cell">
+                            <span class="filter-label">Reporter</span>
+                            <select name="reporter_id">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Assigned To</span>
+                            <select name="handler_id">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Monitored By</span>
+                            <select name="monitored_by">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Category</span>
+                            <select name="category_id">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Severity</span>
+                            <select name="severity">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Priority</span>
+                            <select name="priority">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Status</span>
+                            <select name="status">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Hide Status</span>
+                            <select name="hide_status">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Tag</span>
+                            <select name="tag_id">{}</select>
+                        </div>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                        <label style="display:inline-flex; align-items:center; gap:6px; font-weight:bold; font-size:12px;">Search:
+                            <input type="text" name="q" value="{}" placeholder="Search summary, description, id..." style="width:240px;">
+                        </label>
+                        <button type="submit" class="btn btn-sm">Apply Filter</button>
+                    </div>
+                </form>
+                <div style="margin-top:8px;">
+                    {}
+                    {}
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
                 <span>Viewing Issues ({})</span>
                 <div style="display:flex; gap:8px;">
                     <a class="btn btn-secondary btn-sm" href="/csv_export?q={}&status={}&priority={}&severity={}&tag_id={}">CSV Export</a>
@@ -591,55 +796,6 @@ pub async fn view_all_bug_page(
                 </div>
             </div>
             <div class="panel-body">
-                <form method="GET" action="/view_all_bug_page" style="display:flex; gap:10px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
-                    <label>Search:
-                        <input type="text" name="q" value="{}" placeholder="Keyword..." style="width:150px;">
-                    </label>
-                    <label>Status:
-                        <select name="status" style="width:auto;">
-                            <option value="0">All</option>
-                            <option value="10">new</option>
-                            <option value="20">feedback</option>
-                            <option value="30">acknowledged</option>
-                            <option value="40">confirmed</option>
-                            <option value="50">assigned</option>
-                            <option value="80">resolved</option>
-                            <option value="90">closed</option>
-                        </select>
-                    </label>
-                    <label>Priority:
-                        <select name="priority" style="width:auto;">
-                            <option value="0">All</option>
-                            <option value="10">none</option>
-                            <option value="20">low</option>
-                            <option value="30">normal</option>
-                            <option value="40">high</option>
-                            <option value="50">urgent</option>
-                            <option value="60">immediate</option>
-                        </select>
-                    </label>
-                    <label>Severity:
-                        <select name="severity" style="width:auto;">
-                            <option value="0">All</option>
-                            <option value="10">feature</option>
-                            <option value="20">trivial</option>
-                            <option value="30">text</option>
-                            <option value="40">tweak</option>
-                            <option value="50">minor</option>
-                            <option value="60">major</option>
-                            <option value="70">crash</option>
-                            <option value="80">block</option>
-                        </select>
-                    </label>
-                    <label>Tag:
-                        <select name="tag_id" style="width:auto;">{}</select>
-                    </label>
-                    <button type="submit" class="btn btn-secondary btn-sm">Apply Filter</button>
-                </form>
-                <div style="margin-bottom:10px;">
-                    {}
-                    {}
-                </div>
                 <table class="data-table">
                     <thead>
                         <tr>
@@ -661,21 +817,31 @@ pub async fn view_all_bug_page(
                     {} {}
                 </div>
             </div>
-        </div>"#,
+        </div>
+        {}"#,
         err_banner,
+        reporter_opts,
+        handler_opts,
+        monitored_opts,
+        cat_opts,
+        severity_opts,
+        priority_opts,
+        status_opts,
+        hide_status_opts,
+        tag_opts,
+        html_escape(search_val),
+        saved_filters_html,
+        save_filter_form,
         total,
         html_escape(search_val),
         filter.status.unwrap_or(0),
         filter.priority.unwrap_or(0),
         filter.severity.unwrap_or(0),
         filter.tag_id.unwrap_or(0),
-        html_escape(search_val),
-        tag_opts,
-        saved_filters_html,
-        save_filter_form,
         rows_html,
         prev_link,
-        next_link
+        next_link,
+        render_status_legend()
     );
 
     render_layout("View Issues", &ctx, q.msg.as_deref(), &content).into_response()
@@ -1167,7 +1333,7 @@ pub async fn view_bug_page(
         cf_rows_html.push_str(&format!(
             r#"<tr>
                 <td class="label-col">{}</td>
-                <td class="input-col" colspan="3">{}</td>
+                <td class="input-col" colspan="5">{}</td>
             </tr>"#,
             html_escape(&cfv.field_name),
             html_escape(&cfv.value)
@@ -1347,13 +1513,17 @@ pub async fn view_bug_page(
             };
             notes_html.push_str(&format!(
                 r#"<tr>
-                    <td style="width:160px;"><strong>{}</strong></td>
+                    <td style="width:180px; background:#f2f5f8;">
+                        <strong>{}</strong><br>
+                        <span style="font-size:11px; color:#666;">{}</span>
+                    </td>
                     <td style="white-space:pre-wrap;">{}</td>
                     <td style="width:90px;">{}</td>
                     <td style="width:90px;">{}</td>
                     <td style="width:90px;">{}</td>
                 </tr>"#,
                 html_escape(&author),
+                format_timestamp(n.date_submitted),
                 html_escape(&n.note),
                 time_str,
                 vis,
@@ -1408,7 +1578,7 @@ pub async fn view_bug_page(
     if history.is_empty() {
         history_html.push_str("<p>No history entries.</p>");
     } else {
-        history_html.push_str(r#"<table class="data-table"><thead><tr><th>User</th><th>Field</th><th>Change</th></tr></thead><tbody>"#);
+        history_html.push_str(r#"<table class="data-table"><thead><tr><th>Date Modified</th><th>Username</th><th>Field</th><th>Change</th></tr></thead><tbody>"#);
         for h in &history {
             let uname = users_map
                 .get(&h.user_id)
@@ -1425,10 +1595,12 @@ pub async fn view_bug_page(
             };
             history_html.push_str(&format!(
                 r#"<tr>
-                    <td>{}</td>
-                    <td>{}</td>
+                    <td style="width:150px; white-space:nowrap;">{}</td>
+                    <td style="width:150px;">{}</td>
+                    <td style="width:180px;">{}</td>
                     <td>{}</td>
                 </tr>"#,
+                format_timestamp(h.date_modified),
                 html_escape(&uname),
                 html_escape(&h.field_name),
                 change_desc
@@ -1441,69 +1613,91 @@ pub async fn view_bug_page(
         .map(|v| v.as_str())
         .unwrap_or("public");
 
+    let status_badge = render_status_badge(bug.status, status_label(bug.status));
+
     let content = format!(
         r#"{}
         <div class="panel">
             <div class="panel-header">View Issue Details [#{:07}]</div>
             <div class="panel-body">
-                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid #e0e6ed;">
+                <table class="form-table" style="margin-bottom:12px;">
+                    <thead>
+                        <tr style="background:#edf3f7; font-weight:bold; color:#334e68;">
+                            <td style="width:12%;">ID</td>
+                            <td style="width:18%;">Project</td>
+                            <td style="width:18%;">Category</td>
+                            <td style="width:14%;">View Status</td>
+                            <td style="width:19%;">Date Submitted</td>
+                            <td style="width:19%;">Last Update</td>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>{:07}</td>
+                            <td>{}</td>
+                            <td>{}</td>
+                            <td>{}</td>
+                            <td>{}</td>
+                            <td>{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Reporter</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Assigned To</td>
+                            <td class="input-col" colspan="3">{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Priority</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Severity</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Reproducibility</td>
+                            <td class="input-col">{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Status</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Resolution</td>
+                            <td class="input-col" colspan="3">{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Platform</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">OS</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">OS Version</td>
+                            <td class="input-col">{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Product Version</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Target Version</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Fixed in Version</td>
+                            <td class="input-col">{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Summary</td>
+                            <td class="input-col" colspan="5"><strong>{:07}: {}</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Description</td>
+                            <td class="input-col" colspan="5" style="white-space:pre-wrap;">{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Steps To Reproduce</td>
+                            <td class="input-col" colspan="5" style="white-space:pre-wrap;">{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Additional Information</td>
+                            <td class="input-col" colspan="5" style="white-space:pre-wrap;">{}</td>
+                        </tr>
+                        {}
+                    </tbody>
+                </table>
+                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top:1px solid #e0e6ed;">
                     {}
                 </div>
-                <table class="form-table">
-                    <tr>
-                        <td class="label-col">ID</td>
-                        <td class="input-col">{:07}</td>
-                        <td class="label-col">Project</td>
-                        <td class="input-col">{}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Category</td>
-                        <td class="input-col">{}</td>
-                        <td class="label-col">View Status</td>
-                        <td class="input-col">{}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Reporter</td>
-                        <td class="input-col">{}</td>
-                        <td class="label-col">Assigned To</td>
-                        <td class="input-col">{}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Priority</td>
-                        <td class="input-col">{}</td>
-                        <td class="label-col">Severity</td>
-                        <td class="input-col">{}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Reproducibility</td>
-                        <td class="input-col">{}</td>
-                        <td class="label-col">Status / Resolution</td>
-                        <td class="input-col">{} / {}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Product Version</td>
-                        <td class="input-col">{}</td>
-                        <td class="label-col">Fixed in Version / Target</td>
-                        <td class="input-col">{} / {}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Summary</td>
-                        <td class="input-col" colspan="3"><strong>{:07}: {}</strong></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Description</td>
-                        <td class="input-col" colspan="3" style="white-space:pre-wrap;">{}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Steps To Reproduce</td>
-                        <td class="input-col" colspan="3" style="white-space:pre-wrap;">{}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Additional Information</td>
-                        <td class="input-col" colspan="3" style="white-space:pre-wrap;">{}</td>
-                    </tr>
-                    {}
-                </table>
             </div>
         </div>
 
@@ -1546,27 +1740,32 @@ pub async fn view_bug_page(
         </div>"#,
         err_banner,
         bug.id,
-        actions_html,
         bug.id,
         html_escape(&proj_name),
         html_escape(&cat_name),
         html_escape(view_state_str),
+        format_timestamp(bug.date_submitted),
+        format_timestamp(bug.last_updated),
         html_escape(&reporter_name),
         html_escape(&handler_name),
         html_escape(priority_label(bug.priority)),
         html_escape(severity_label(bug.severity)),
         html_escape(reproducibility_label(bug.reproducibility)),
-        html_escape(status_label(bug.status)),
+        status_badge,
         html_escape(resolution_label(bug.resolution)),
+        html_escape(&bug.platform),
+        html_escape(&bug.os),
+        html_escape(&bug.os_build),
         html_escape(&bug.version),
-        html_escape(&bug.fixed_in_version),
         html_escape(&bug.target_version),
+        html_escape(&bug.fixed_in_version),
         bug.id,
         html_escape(&bug.summary),
         html_escape(&full.description),
         html_escape(&full.steps_to_reproduce),
         html_escape(&full.additional_information),
         cf_rows_html,
+        actions_html,
         tags_html,
         rels_html,
         rel_form_html,

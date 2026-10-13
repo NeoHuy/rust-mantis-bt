@@ -2,7 +2,7 @@ use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::handlers::parse_bool;
 use crate::models::{BugFilter, BugPriority, BugResolution, BugSeverity, BugStatus, ViewState};
-use crate::ui::{html_escape, render_layout};
+use crate::ui::{format_timestamp, html_escape, render_layout, render_status_badge};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
@@ -288,7 +288,7 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     for (st, cnt) in by_status {
         status_rows.push_str(&format!(
             r#"<tr><td>{}</td><td>{}</td></tr>"#,
-            html_escape(status_label(st)),
+            render_status_badge(st, status_label(st)),
             cnt
         ));
     }
@@ -513,7 +513,7 @@ pub async fn news_page(
             list_html.push_str(&format!(
                 r#"<div class="panel">
                     <div class="panel-header">
-                        {}{} <span style="font-weight:normal; font-size:12px;">— posted by {} [{}]</span>
+                        {}{} <span style="font-weight:normal; font-size:12px;">— posted by {} on {} [{}]</span>
                         {}
                     </div>
                     <div class="panel-body" style="white-space:pre-wrap;">{}</div>
@@ -521,6 +521,7 @@ pub async fn news_page(
                 html_escape(&n.headline),
                 ann_badge,
                 html_escape(&poster),
+                format_timestamp(n.date_posted),
                 vs_str,
                 del_form,
                 html_escape(&n.body)
@@ -647,6 +648,7 @@ pub async fn manage_email_queue_page(
                 <td>{}</td>
                 <td><strong>{}</strong></td>
                 <td style="white-space:pre-wrap;">{}</td>
+                <td style="white-space:nowrap;">{}</td>
                 <td>
                     <form method="POST" action="/manage_email_delete/{}" style="display:inline;">
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
@@ -657,11 +659,12 @@ pub async fn manage_email_queue_page(
             html_escape(&e.email),
             html_escape(&e.subject),
             html_escape(&e.body),
+            format_timestamp(e.submitted),
             e.email_id
         ));
     }
     if rows_html.is_empty() {
-        rows_html.push_str(r#"<tr><td colspan="5">Email queue is empty.</td></tr>"#);
+        rows_html.push_str(r#"<tr><td colspan="6">Email queue is empty.</td></tr>"#);
     }
 
     let content = format!(
@@ -680,6 +683,7 @@ pub async fn manage_email_queue_page(
                             <th>Recipient</th>
                             <th>Subject</th>
                             <th>Body</th>
+                            <th>Submitted</th>
                             <th>Actions</th>
                         </tr>
                     </thead>

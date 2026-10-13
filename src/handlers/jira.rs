@@ -217,7 +217,7 @@ pub async fn manage_jira_config(
         default_issue_type,
         default_project_key,
     ) {
-        return Redirect::to(&format!("/manage_jira_page?err=Failed+to+save+config:+{}", urlencoding(e.to_string()))).into_response();
+        return Redirect::to(&format!("/manage_jira_page?err=Failed+to+save+config:+{}", url_encode(&sanitize_error_message(&e.to_string())))).into_response();
     }
 
     // Process project mappings
@@ -242,18 +242,18 @@ pub async fn manage_jira_test(
 
     let config = match db.get_jira_config(0) {
         Ok(c) => c,
-        Err(e) => return Redirect::to(&format!("/manage_jira_page?err=Config+error:+{}", urlencoding(e.to_string()))).into_response(),
+        Err(e) => return Redirect::to(&format!("/manage_jira_page?err=Config+error:+{}", url_encode(&sanitize_error_message(&e.to_string())))).into_response(),
     };
 
     let client = JiraClient::new();
     match client.test_connection(&config.base_url, &config.email, &config.api_token).await {
         Ok(user) => {
             let msg = format!("Connection successful! Logged in as: {}", user.display_name);
-            Redirect::to(&format!("/manage_jira_page?msg={}", urlencoding(msg))).into_response()
+            Redirect::to(&format!("/manage_jira_page?msg={}", url_encode(&sanitize_error_message(&msg)))).into_response()
         }
         Err(e) => {
             let err = format!("Connection failed: {}", e);
-            Redirect::to(&format!("/manage_jira_page?err={}", urlencoding(err))).into_response()
+            Redirect::to(&format!("/manage_jira_page?err={}", url_encode(&sanitize_error_message(&err)))).into_response()
         }
     }
 }
@@ -265,15 +265,19 @@ pub async fn push_bug_to_jira(
     form: Result<Form<HashMap<String, String>>, axum::extract::rejection::FormRejection>,
 ) -> Response {
     let form_data = form.map(|Form(f)| f).unwrap_or_default();
-    if ctx.user.access_level < 55 {
-        return forbidden_html(&ctx, "Developer access required to push issues to Jira.");
-    }
 
     let bug_full = match db.get_bug_full(bug_id) {
         Ok(Some(bf)) => bf,
         _ => return Redirect::to("/view_all_bug_page?err=Issue+not+found").into_response(),
     };
     let bug = bug_full.bug;
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if eff < 55 || (bug.view_state == 50 && eff < 55) {
+        return forbidden_html(&ctx, "Developer access required on this project to push issues to Jira.");
+    }
 
     // Check if already linked
     if let Ok(Some(existing)) = db.get_jira_link_by_bug_id(bug_id) {
@@ -292,7 +296,7 @@ pub async fn push_bug_to_jira(
             return Redirect::to(&format!(
                 "/view_bug_page/{}?err=Config+error:+{}",
                 bug_id,
-                urlencoding(e.to_string())
+                url_encode(&sanitize_error_message(&e.to_string()))
             ))
             .into_response()
         }
@@ -330,38 +334,27 @@ pub async fn push_bug_to_jira(
             return Redirect::to(&format!(
                 "/view_bug_page/{}?err=Jira+creation+failed:+{}",
                 bug_id,
-                urlencoding(e.to_string())
+                url_encode(&sanitize_error_message(&e.to_string()))
             ))
             .into_response();
         }
     };
 
-    // Save link in DB
-    if let Err(e) = db.create_jira_link(
+    // Save link, bugnote, and status update atomically in DB transaction
+    if let Err(e) = db.record_jira_push_success(
         bug_id,
         &jira_resp.key,
         &jira_resp.browse_url,
         issue_type,
         ctx.user.id,
+        &ctx.user.username,
     ) {
         return Redirect::to(&format!(
             "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
             bug_id,
-            urlencoding(e.to_string())
+            url_encode(&sanitize_error_message(&e))
         ))
         .into_response();
-    }
-
-    // Add Bugnote in Mantis
-    let note_text = format!(
-        "Created Jira issue [{}]({}) by {}.",
-        jira_resp.key, jira_resp.browse_url, ctx.user.username
-    );
-    let _ = db.add_bugnote(bug_id, ctx.user.id, &note_text, 10);
-
-    // Update status to acknowledged (30) if currently new (10)
-    if bug.status == 10 {
-        let _ = db.change_bug_status(bug_id, ctx.user.id, 30, bug.resolution, None);
     }
 
     Redirect::to(&format!(
@@ -372,6 +365,28 @@ pub async fn push_bug_to_jira(
     .into_response()
 }
 
-fn urlencoding(s: String) -> String {
-    s.replace(' ', "+")
+fn sanitize_error_message(s: &str) -> String {
+    let single_line = s.replace(['\r', '\n', '\t'], " ");
+    let trimmed = single_line.trim();
+    if trimmed.chars().count() > 120 {
+        format!("{}...", trimmed.chars().take(117).collect::<String>())
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
 }

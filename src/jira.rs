@@ -153,6 +153,9 @@ impl JiraClient {
         if config.project_key.trim().is_empty() {
             return Err(JiraError::ConfigError("Jira Project Key is not configured for this project".to_string()));
         }
+        if config.email.trim().is_empty() || config.api_token.trim().is_empty() {
+            return Err(JiraError::ConfigError("Email and API token must be configured".to_string()));
+        }
 
         let payload = build_create_issue_payload(
             &config.project_key,
@@ -295,5 +298,23 @@ mod tests {
         assert_eq!(resp.id, "10024");
         assert_eq!(resp.key, "DEV-42");
         assert_eq!(resp.browse_url, "https://jira.example.com/browse/DEV-42");
+    }
+
+    #[tokio::test]
+    async fn test_create_issue_missing_credentials_fails_fast() {
+        let client = JiraClient::new();
+        let conf = JiraResolvedConfig {
+            enabled: true,
+            base_url: "https://test.jira.com".to_string(),
+            email: "".to_string(),
+            api_token: "".to_string(),
+            default_issue_type: "Bug".to_string(),
+            project_key: "PROJ".to_string(),
+        };
+        let err = client.create_issue(&conf, "Summary", "Desc", "Bug").await.unwrap_err();
+        match err {
+            JiraError::ConfigError(msg) => assert!(msg.contains("Email and API token")),
+            other => panic!("Expected ConfigError, got {:?}", other),
+        }
     }
 }

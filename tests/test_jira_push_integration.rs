@@ -264,3 +264,145 @@ async fn test_jira_push_jira_error_keeps_bug_state() {
     // No link added
     assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
 }
+
+#[tokio::test]
+async fn test_jira_push_effective_access_level() {
+    let db = Db::open_in_memory().unwrap();
+    // Private project
+    let priv_proj_id = db.create_project("Private Proj", 10, 50, "Desc", true).unwrap();
+
+    // Alice has global Reporter (25), but is Developer (55) in this project
+    let alice_id = db.create_user("alice", "Alice", "alice@x.com", "pass", 25, true, false).unwrap();
+    db.set_project_user(priv_proj_id, alice_id, 55).unwrap();
+
+    // Bob has global Developer (55), but no access to this private project
+    let _bob_id = db.create_user("bob", "Bob", "bob@x.com", "pass", 55, true, false).unwrap();
+
+    let bug_id = db
+        .create_bug(
+            priv_proj_id, alice_id, 1, "Issue in private proj", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    let (mock_url, _shutdown) = spawn_mock_jira(
+        StatusCode::CREATED,
+        json!({
+            "id": "10099",
+            "key": "PRIV-1",
+            "self": "http://jira/rest/api/2/issue/10099"
+        }),
+    )
+    .await;
+    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "PRIV").unwrap();
+
+    let app = build_router(db.clone());
+
+    // 1. Bob (global dev, but no access on private project) MUST be forbidden (403)
+    let bob_cookie = login(&app, "bob", "pass").await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .header("cookie", &bob_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 2. Alice (global reporter, but project developer) CAN push
+    let alice_cookie = login(&app, "alice", "pass").await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .header("cookie", &alice_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn test_jira_push_handles_multiline_error_without_panic() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
+    let dev_id = db.create_user("dev4", "Dev 4", "d4@x.com", "pass", 55, true, false).unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id, dev_id, 1, "Issue", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    // Mock returns multi-line HTML error with special characters and newlines
+    let multiline_html = "<html>\r\n<body>\n<h1>502 Bad Gateway</h1>\n<p>Jira backend is down & unreachable: [error code #999]</p>\r\n</body>\n</html>";
+    let app_mock = axum::Router::new().route(
+        "/rest/api/2/issue",
+        axum::routing::post(move || async move {
+            (
+                StatusCode::BAD_GATEWAY,
+                [(axum::http::header::CONTENT_TYPE, "text/html")],
+                multiline_html,
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app_mock).await.unwrap();
+    });
+    let mock_url = format!("http://{}", addr);
+
+    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "KEY").unwrap();
+
+    let app = build_router(db.clone());
+    let cookie = login(&app, "dev4", "pass").await;
+
+    // Must return 303 Redirect without panicking on newline in header
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("err="));
+}
+
+#[tokio::test]
+async fn test_jira_link_cascade_on_bug_delete() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
+    let dev_id = db.create_user("dev5", "Dev 5", "d5@x.com", "pass", 55, true, false).unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id, dev_id, 1, "Issue to delete", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    db.create_jira_link(bug_id, "DEL-1", "http://jira/browse/DEL-1", "Bug", dev_id).unwrap();
+    assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_some());
+
+    // Delete bug
+    db.delete_bug(bug_id).unwrap();
+
+    // Link must be cleanly deleted by cascade foreign key
+    assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
+}
+

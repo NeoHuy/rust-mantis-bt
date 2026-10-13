@@ -172,5 +172,6 @@ pub fn build_router(db: Db) -> Router {
         .route("/manage_jira_page", get(jira::manage_jira_page))
         .route("/manage_jira_config", post(jira::manage_jira_config))
         .route("/manage_jira_test", post(jira::manage_jira_test))
+        .route("/view_bug_page/:id/jira_push", post(jira::push_bug_to_jira))
         .with_state(db)
 }

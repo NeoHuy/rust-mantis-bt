@@ -3,6 +3,7 @@ pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
 pub mod filters;
+pub mod jira;
 pub mod planning;
 pub mod projects;
 pub mod tags;
@@ -167,5 +168,9 @@ pub fn build_router(db: Db) -> Router {
                 .delete(api::rest_delete_issue),
         )
         .route("/api/rest/issues/:id/notes", post(api::rest_add_issue_note))
+        // Jira Integration
+        .route("/manage_jira_page", get(jira::manage_jira_page))
+        .route("/manage_jira_config", post(jira::manage_jira_config))
+        .route("/manage_jira_test", post(jira::manage_jira_test))
         .with_state(db)
 }

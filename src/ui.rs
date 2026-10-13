@@ -734,6 +734,11 @@ pub fn render_layout(
                 title.contains("Plugin"),
             ));
             tabs.push((
+                "Manage Jira",
+                "/manage_jira_page",
+                title.contains("Jira"),
+            ));
+            tabs.push((
                 "Email Queue",
                 "/manage_email_queue_page",
                 title.contains("Email Queue"),

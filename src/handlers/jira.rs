@@ -2,7 +2,7 @@ use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::jira::JiraClient;
 use crate::ui::{html_escape, render_layout};
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
@@ -256,6 +256,120 @@ pub async fn manage_jira_test(
             Redirect::to(&format!("/manage_jira_page?err={}", urlencoding(err))).into_response()
         }
     }
+}
+
+pub async fn push_bug_to_jira(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(bug_id): Path<i64>,
+    form: Result<Form<HashMap<String, String>>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let form_data = form.map(|Form(f)| f).unwrap_or_default();
+    if ctx.user.access_level < 55 {
+        return forbidden_html(&ctx, "Developer access required to push issues to Jira.");
+    }
+
+    let bug_full = match db.get_bug_full(bug_id) {
+        Ok(Some(bf)) => bf,
+        _ => return Redirect::to("/view_all_bug_page?err=Issue+not+found").into_response(),
+    };
+    let bug = bug_full.bug;
+
+    // Check if already linked
+    if let Ok(Some(existing)) = db.get_jira_link_by_bug_id(bug_id) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err=Issue+is+already+linked+to+Jira+({})",
+            bug_id,
+            existing.jira_key
+        ))
+        .into_response();
+    }
+
+    // Resolve Jira config for this bug's project
+    let config = match db.get_jira_config(bug.project_id) {
+        Ok(c) => c,
+        Err(e) => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Config+error:+{}",
+                bug_id,
+                urlencoding(e.to_string())
+            ))
+            .into_response()
+        }
+    };
+
+    if !config.enabled {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err=Jira+integration+is+currently+disabled",
+            bug_id
+        ))
+        .into_response();
+    }
+
+    let summary = form_data
+        .get("summary")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&bug.summary);
+
+    let issue_type = form_data
+        .get("issue_type")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&config.default_issue_type);
+
+    let description = format!(
+        "{}\n\n---\nReported in MantisBT: Issue #{:07}\nSummary: {}\nReporter ID: {}\nPriority: {}",
+        bug_full.description, bug.id, bug.summary, bug.reporter_id, bug.priority
+    );
+
+    let client = JiraClient::new();
+    let jira_resp = match client.create_issue(&config, summary, &description, issue_type).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Jira+creation+failed:+{}",
+                bug_id,
+                urlencoding(e.to_string())
+            ))
+            .into_response();
+        }
+    };
+
+    // Save link in DB
+    if let Err(e) = db.create_jira_link(
+        bug_id,
+        &jira_resp.key,
+        &jira_resp.browse_url,
+        issue_type,
+        ctx.user.id,
+    ) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
+            bug_id,
+            urlencoding(e.to_string())
+        ))
+        .into_response();
+    }
+
+    // Add Bugnote in Mantis
+    let note_text = format!(
+        "Created Jira issue [{}]({}) by {}.",
+        jira_resp.key, jira_resp.browse_url, ctx.user.username
+    );
+    let _ = db.add_bugnote(bug_id, ctx.user.id, &note_text, 10);
+
+    // Update status to acknowledged (30) if currently new (10)
+    if bug.status == 10 {
+        let _ = db.change_bug_status(bug_id, ctx.user.id, 30, bug.resolution, None);
+    }
+
+    Redirect::to(&format!(
+        "/view_bug_page/{}?msg=Created+Jira+issue+{}",
+        bug_id,
+        jira_resp.key
+    ))
+    .into_response()
 }
 
 fn urlencoding(s: String) -> String {

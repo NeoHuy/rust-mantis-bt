@@ -2,6 +2,7 @@ pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
 pub mod filters;
+pub mod planning;
 pub mod projects;
 pub mod tags;
 pub mod users;
@@ -40,4 +41,5 @@ pub fn router() -> Router<Db> {
         .merge(tags::router())
         .merge(custom_fields::router())
         .merge(filters::router())
+        .merge(planning::router())
 }

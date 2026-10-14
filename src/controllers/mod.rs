@@ -45,3 +45,8 @@ pub fn router() -> Router<Db> {
         .merge(planning::router())
         .merge(api::router())
 }
+
+pub fn build_router(db: Db) -> Router {
+    router().with_state(db)
+}
+

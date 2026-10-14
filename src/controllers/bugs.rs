@@ -253,71 +253,83 @@ pub async fn csv_export(
     ctx: AuthContext,
     Query(q): Query<ListBugsQuery>,
 ) -> Response {
+    if ctx.active_project_id > 0 {
+        let eff = db
+            .effective_access_level(&ctx.user, ctx.active_project_id)
+            .unwrap_or(0);
+        if eff < 10 {
+            return forbidden(&ctx, "You do not have access to this project.");
+        }
+    }
+
     let filter = resolve_bug_filter(&db, &ctx, &q);
     let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
 
-    let all_users = db.list_users(None, false).unwrap_or_default();
-    let users_map: HashMap<i64, String> = all_users
+    let users_map: HashMap<i64, String> = db
+        .list_users(None, false)
+        .unwrap_or_default()
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
 
-    let projects_map: HashMap<i64, String> = ctx
-        .visible_projects
-        .iter()
-        .map(|(p, _)| (p.id, p.name.clone()))
-        .collect();
+    let mut out = String::from(
+        "Id,Project,Reporter,Assigned To,Priority,Severity,Reproducibility,Status,Resolution,Category,Summary,Updated\r\n",
+    );
 
-    let mut csv = String::from("id,project,category,severity,priority,status,reporter,handler,summary,last_updated\n");
-    for b in bugs {
-        let proj = projects_map
-            .get(&b.project_id)
+    for b in &bugs {
+        let proj = db
+            .get_project_by_id(b.project_id)
+            .ok()
+            .flatten()
+            .map(|p| p.name)
+            .unwrap_or_else(|| format!("#{}", b.project_id));
+        let rep = users_map
+            .get(&b.reporter_id)
             .cloned()
-            .unwrap_or_else(|| b.project_id.to_string());
+            .unwrap_or_else(|| format!("user#{}", b.reporter_id));
+        let handler = if b.handler_id > 0 {
+            users_map
+                .get(&b.handler_id)
+                .cloned()
+                .unwrap_or_else(|| format!("user#{}", b.handler_id))
+        } else {
+            String::new()
+        };
         let cat = db
             .get_category_by_id(b.category_id)
             .ok()
             .flatten()
             .map(|c| c.name)
             .unwrap_or_else(|| "General".to_string());
-        let rep = users_map
-            .get(&b.reporter_id)
-            .cloned()
-            .unwrap_or_else(|| b.reporter_id.to_string());
-        let han = if b.handler_id > 0 {
-            users_map
-                .get(&b.handler_id)
-                .cloned()
-                .unwrap_or_else(|| b.handler_id.to_string())
-        } else {
-            String::new()
-        };
 
-        csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{}\n",
-            b.id,
+        let row = [
+            format!("{:07}", b.id),
             sanitize_csv_cell(&proj),
-            sanitize_csv_cell(&cat),
-            sanitize_csv_cell(views::bugs::severity_label(b.severity)),
-            sanitize_csv_cell(views::bugs::priority_label(b.priority)),
-            sanitize_csv_cell(views::bugs::status_label(b.status)),
             sanitize_csv_cell(&rep),
-            sanitize_csv_cell(&han),
+            sanitize_csv_cell(&handler),
+            sanitize_csv_cell(views::bugs::priority_label(b.priority)),
+            sanitize_csv_cell(views::bugs::severity_label(b.severity)),
+            sanitize_csv_cell(views::bugs::reproducibility_label(b.reproducibility)),
+            sanitize_csv_cell(views::bugs::status_label(b.status)),
+            sanitize_csv_cell(views::bugs::resolution_label(b.resolution)),
+            sanitize_csv_cell(&cat),
             sanitize_csv_cell(&b.summary),
-            views::format_timestamp(b.last_updated)
-        ));
+            b.last_updated.to_string(),
+        ];
+        out.push_str(&row.join(","));
+        out.push_str("\r\n");
     }
 
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=\"mantis_issues.csv\"",
+                "attachment; filename=\"issues.csv\"".to_string(),
             ),
         ],
-        csv,
+        out,
     )
         .into_response()
 }

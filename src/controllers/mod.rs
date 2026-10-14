@@ -1,3 +1,4 @@
+pub mod api;
 pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
@@ -42,4 +43,5 @@ pub fn router() -> Router<Db> {
         .merge(custom_fields::router())
         .merge(filters::router())
         .merge(planning::router())
+        .merge(api::router())
 }

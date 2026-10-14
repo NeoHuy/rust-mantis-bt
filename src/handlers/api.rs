@@ -144,8 +144,9 @@ pub async fn api_token_create(
             raw_token
         ))
         .into_response(),
-        Err(_) => Redirect::to("/api_tokens_page?err=Invalid+or+duplicate+token+name")
-            .into_response(),
+        Err(_) => {
+            Redirect::to("/api_tokens_page?err=Invalid+or+duplicate+token+name").into_response()
+        }
     }
 }
 
@@ -267,8 +268,9 @@ pub async fn manage_plugin_toggle(
     let enabled = parse_bool(form.enabled.as_deref());
     match db.set_plugin_enabled(&basename, enabled) {
         Ok(()) => Redirect::to("/manage_plugin_page?msg=Plugin+updated").into_response(),
-        Err(_) => Redirect::to("/manage_plugin_page?err=Cannot+modify+protected+plugin")
-            .into_response(),
+        Err(_) => {
+            Redirect::to("/manage_plugin_page?err=Cannot+modify+protected+plugin").into_response()
+        }
     }
 }
 
@@ -570,11 +572,7 @@ pub async fn rest_list_issues(
     Json(json!({ "issues": issues_json })).into_response()
 }
 
-pub async fn rest_get_issue(
-    State(db): State<Db>,
-    auth: ApiAuth,
-    Path(id): Path<i64>,
-) -> Response {
+pub async fn rest_get_issue(State(db): State<Db>, auth: ApiAuth, Path(id): Path<i64>) -> Response {
     let bug = match db.get_bug(id) {
         Ok(Some(b)) => b,
         _ => {
@@ -653,31 +651,15 @@ pub async fn rest_create_issue(
             .into_response();
     }
 
-    let category_id = payload
-        .category
-        .as_ref()
-        .and_then(|c| c.id)
-        .unwrap_or(1);
-    let priority = payload
-        .priority
-        .as_ref()
-        .and_then(|p| p.id)
-        .unwrap_or(30) as i32;
-    let severity = payload
-        .severity
-        .as_ref()
-        .and_then(|s| s.id)
-        .unwrap_or(50) as i32;
+    let category_id = payload.category.as_ref().and_then(|c| c.id).unwrap_or(1);
+    let priority = payload.priority.as_ref().and_then(|p| p.id).unwrap_or(30) as i32;
+    let severity = payload.severity.as_ref().and_then(|s| s.id).unwrap_or(50) as i32;
     let reproducibility = payload
         .reproducibility
         .as_ref()
         .and_then(|r| r.id)
         .unwrap_or(70) as i32;
-    let view_state = payload
-        .view_state
-        .as_ref()
-        .and_then(|v| v.id)
-        .unwrap_or(10) as i32;
+    let view_state = payload.view_state.as_ref().and_then(|v| v.id).unwrap_or(10) as i32;
 
     match db.create_bug(
         project_id,
@@ -707,7 +689,8 @@ pub async fn rest_create_issue(
                     },
                 );
             }
-            let issue_json = serialize_issue_json(&db, bug_id, eff).unwrap_or(json!({ "id": bug_id }));
+            let issue_json =
+                serialize_issue_json(&db, bug_id, eff).unwrap_or(json!({ "id": bug_id }));
             (StatusCode::CREATED, Json(json!({ "issue": issue_json }))).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response(),
@@ -858,10 +841,7 @@ pub async fn rest_add_issue_note(
             .into_response();
     }
 
-    let vs = payload
-        .view_state
-        .and_then(|v| v.id)
-        .unwrap_or(10) as i32;
+    let vs = payload.view_state.and_then(|v| v.id).unwrap_or(10) as i32;
     let mins = if eff >= 55 {
         payload.time_tracking.unwrap_or(0).max(0)
     } else {

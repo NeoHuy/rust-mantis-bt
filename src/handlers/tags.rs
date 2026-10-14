@@ -158,11 +158,7 @@ pub async fn tag_update(
     }
 }
 
-pub async fn tag_delete(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-) -> Response {
+pub async fn tag_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {
     if ctx.user.access_level < 70 {
         return forbidden(&ctx, "Manager access required to delete tags.");
     }

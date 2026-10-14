@@ -1,4 +1,6 @@
+pub mod auth;
 pub mod layout;
+pub mod users;
 
 use crate::auth::AuthContext;
 use axum::http::StatusCode;

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod db;
+pub mod controllers;
 pub mod handlers;
 pub mod models;
 pub mod ui;

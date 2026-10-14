@@ -1,6 +1,9 @@
 pub mod auth;
 pub mod bugs;
+pub mod custom_fields;
+pub mod filters;
 pub mod projects;
+pub mod tags;
 pub mod users;
 
 use crate::auth::AuthContext;
@@ -34,4 +37,7 @@ pub fn router() -> Router<Db> {
         .merge(users::router())
         .merge(projects::router())
         .merge(bugs::router())
+        .merge(tags::router())
+        .merge(custom_fields::router())
+        .merge(filters::router())
 }

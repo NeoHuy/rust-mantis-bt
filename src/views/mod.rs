@@ -1,7 +1,9 @@
 pub mod auth;
 pub mod bugs;
+pub mod custom_fields;
 pub mod layout;
 pub mod projects;
+pub mod tags;
 pub mod users;
 
 use crate::auth::AuthContext;

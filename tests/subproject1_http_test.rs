@@ -30,7 +30,13 @@ async fn test_login_project_creation_and_private_project_cookie_guard() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let cookie_hdr = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    let cookie_hdr = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(cookie_hdr.contains("MANTIS_STRING_COOKIE="));
 
     // 3. Create a private project via POST /manage_proj_create
@@ -52,9 +58,22 @@ async fn test_login_project_creation_and_private_project_cookie_guard() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
     // 4. Create a Reporter user and verify they cannot switch active project to SecretCore (id=1)
-    let uid = db.create_user("rep1", "Reporter One", "r@x.com", "pass123", 25, true, false).unwrap();
+    let uid = db
+        .create_user(
+            "rep1",
+            "Reporter One",
+            "r@x.com",
+            "pass123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
     let rep = db.get_user_by_id(uid).unwrap().unwrap();
-    let rep_cookie = format!("MANTIS_STRING_COOKIE={}; MANTIS_PROJECT_COOKIE=1", rep.cookie_string);
+    let rep_cookie = format!(
+        "MANTIS_STRING_COOKIE={}; MANTIS_PROJECT_COOKIE=1",
+        rep.cookie_string
+    );
 
     let res = app
         .oneshot(
@@ -68,7 +87,9 @@ async fn test_login_project_creation_and_private_project_cookie_guard() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     // SecretCore must not appear in Reporter's HTML response
-    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let html = String::from_utf8(body_bytes.to_vec()).unwrap();
     assert!(!html.contains("SecretCore"));
 }
@@ -107,7 +128,13 @@ async fn test_auth_flow_login_failure_logout_and_account_update() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let cookie_hdr = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    let cookie_hdr = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
 
     // 3. GET /account_page with valid cookie returns 200 OK
     let res = app
@@ -173,7 +200,13 @@ async fn test_auth_flow_login_failure_logout_and_account_update() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let logout_cookies = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    let logout_cookies = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(logout_cookies.contains("Max-Age=0"));
 
     // 7. Requesting /account_page with empty cookie redirects to /login
@@ -198,7 +231,17 @@ async fn test_admin_user_crud_and_access_control() {
     let app = build_router(db.clone());
 
     // Create a regular developer user
-    let dev_id = db.create_user("dev_user", "Developer One", "d@x.com", "pass1", 55, true, false).unwrap();
+    let dev_id = db
+        .create_user(
+            "dev_user",
+            "Developer One",
+            "d@x.com",
+            "pass1",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
     let dev_user = db.get_user_by_id(dev_id).unwrap().unwrap();
     let dev_cookie = format!("MANTIS_STRING_COOKIE={}", dev_user.cookie_string);
 
@@ -277,7 +320,9 @@ async fn test_admin_user_crud_and_access_control() {
                 .uri(format!("/manage_user_update/{}", created.id))
                 .header("cookie", &admin_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("realname=Updated+Dev&email=updated@x.com&access_level=70&enabled=1"))
+                .body(Body::from(
+                    "realname=Updated+Dev&email=updated@x.com&access_level=70&enabled=1",
+                ))
                 .unwrap(),
         )
         .await
@@ -328,7 +373,9 @@ async fn test_project_management_subprojects_categories_versions_users() {
     let admin = db.get_user_by_username("administrator").unwrap().unwrap();
     let admin_cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
 
-    let rep_id = db.create_user("rep_user", "Reporter", "r@x.com", "pass", 25, true, false).unwrap();
+    let rep_id = db
+        .create_user("rep_user", "Reporter", "r@x.com", "pass", 25, true, false)
+        .unwrap();
     let rep_user = db.get_user_by_id(rep_id).unwrap().unwrap();
     let rep_cookie = format!("MANTIS_STRING_COOKIE={}", rep_user.cookie_string);
 
@@ -378,8 +425,18 @@ async fn test_project_management_subprojects_categories_versions_users() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
-    let proj_a = db.list_all_projects().unwrap().into_iter().find(|p| p.name == "ProjectAlpha").unwrap();
-    let proj_b = db.list_all_projects().unwrap().into_iter().find(|p| p.name == "ProjectBeta").unwrap();
+    let proj_a = db
+        .list_all_projects()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.name == "ProjectAlpha")
+        .unwrap();
+    let proj_b = db
+        .list_all_projects()
+        .unwrap()
+        .into_iter()
+        .find(|p| p.name == "ProjectBeta")
+        .unwrap();
 
     // 4. Link ProjB as subproject of ProjA
     let res = app
@@ -390,7 +447,10 @@ async fn test_project_management_subprojects_categories_versions_users() {
                 .uri(format!("/manage_proj_subproj_add/{}", proj_a.id))
                 .header("cookie", &admin_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("child_id={}&inherit_parent=1", proj_b.id)))
+                .body(Body::from(format!(
+                    "child_id={}&inherit_parent=1",
+                    proj_b.id
+                )))
                 .unwrap(),
         )
         .await
@@ -406,7 +466,10 @@ async fn test_project_management_subprojects_categories_versions_users() {
                 .uri(format!("/manage_proj_subproj_add/{}", proj_b.id))
                 .header("cookie", &admin_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("child_id={}&inherit_parent=1", proj_a.id)))
+                .body(Body::from(format!(
+                    "child_id={}&inherit_parent=1",
+                    proj_a.id
+                )))
                 .unwrap(),
         )
         .await
@@ -441,7 +504,9 @@ async fn test_project_management_subprojects_categories_versions_users() {
                 .uri(format!("/manage_proj_ver_add/{}", proj_a.id))
                 .header("cookie", &admin_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("version=v1.0.0&description=First+release&released=1"))
+                .body(Body::from(
+                    "version=v1.0.0&description=First+release&released=1",
+                ))
                 .unwrap(),
         )
         .await
@@ -494,10 +559,16 @@ async fn test_set_project_cookie_and_access_resolution() {
     let db = Db::open_in_memory().unwrap();
     let app = build_router(db.clone());
 
-    let p_pub_id = db.create_project("PublicProj", 10, 10, "Public", true).unwrap();
-    let p_priv_id = db.create_project("PrivateProj", 10, 50, "Private", true).unwrap();
+    let p_pub_id = db
+        .create_project("PublicProj", 10, 10, "Public", true)
+        .unwrap();
+    let p_priv_id = db
+        .create_project("PrivateProj", 10, 50, "Private", true)
+        .unwrap();
 
-    let rep_id = db.create_user("rep_tester", "Rep", "r@t.com", "pass", 25, true, false).unwrap();
+    let rep_id = db
+        .create_user("rep_tester", "Rep", "r@t.com", "pass", 25, true, false)
+        .unwrap();
     let rep_user = db.get_user_by_id(rep_id).unwrap().unwrap();
     let rep_cookie = format!("MANTIS_STRING_COOKIE={}", rep_user.cookie_string);
 
@@ -516,7 +587,13 @@ async fn test_set_project_cookie_and_access_resolution() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let cookie_hdr = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    let cookie_hdr = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(cookie_hdr.contains(&format!("MANTIS_PROJECT_COOKIE={}", p_pub_id)));
 
     // 2. Reporter switches to PrivateProj (id = p_priv_id) without explicit access -> cookie falls back to 0
@@ -534,7 +611,13 @@ async fn test_set_project_cookie_and_access_resolution() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let cookie_hdr = res.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
+    let cookie_hdr = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(cookie_hdr.contains("MANTIS_PROJECT_COOKIE=0"));
 
     // 3. GET / as Reporter redirects to /account_page
@@ -610,7 +693,9 @@ async fn test_no_nested_forms_in_edit_pages() {
     let admin = db.get_user_by_username("administrator").unwrap().unwrap();
     let admin_cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
 
-    let uid = db.create_user("testuser", "Test User", "t@x.com", "pass", 25, true, false).unwrap();
+    let uid = db
+        .create_user("testuser", "Test User", "t@x.com", "pass", 25, true, false)
+        .unwrap();
     let pid = db.create_project("TestProj", 10, 10, "Desc", true).unwrap();
 
     // 1. Check /manage_user_edit_page/:id
@@ -626,7 +711,13 @@ async fn test_no_nested_forms_in_edit_pages() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
     assert_no_nested_forms(&html);
 
     // 2. Check /manage_proj_edit_page/:id
@@ -642,7 +733,13 @@ async fn test_no_nested_forms_in_edit_pages() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
     assert_no_nested_forms(&html);
 
     // 3. Check /manage_proj_page
@@ -658,7 +755,13 @@ async fn test_no_nested_forms_in_edit_pages() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
     assert_no_nested_forms(&html);
 
     // 4. Check /manage_user_page
@@ -674,6 +777,12 @@ async fn test_no_nested_forms_in_edit_pages() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let html = String::from_utf8(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
     assert_no_nested_forms(&html);
 }

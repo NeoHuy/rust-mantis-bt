@@ -70,13 +70,11 @@ pub async fn login_page(headers: HeaderMap, State(db): State<Db>) -> Response {
     render_unauthenticated_layout("Login", None, form_html).into_response()
 }
 
-pub async fn login_submit(
-    State(db): State<Db>,
-    Form(form): Form<LoginForm>,
-) -> Response {
+pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> Response {
     match db.authenticate(&form.username, &form.password) {
         Ok(Some(user)) => {
-            let cookie_val = make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, None);
+            let cookie_val =
+                make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, None);
             let target_url = "/my_view_page";
             let mut res = Redirect::to(target_url).into_response();
             if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
@@ -110,7 +108,11 @@ pub async fn login_submit(
             "#;
             (
                 StatusCode::UNAUTHORIZED,
-                render_unauthenticated_layout("Login Failed", Some("Invalid username or password."), form_html),
+                render_unauthenticated_layout(
+                    "Login Failed",
+                    Some("Invalid username or password."),
+                    form_html,
+                ),
             )
                 .into_response()
         }
@@ -165,10 +167,7 @@ pub async fn set_project(
     res
 }
 
-pub async fn account_page(
-    Query(query): Query<AccountQuery>,
-    ctx: AuthContext,
-) -> Html<String> {
+pub async fn account_page(Query(query): Query<AccountQuery>, ctx: AuthContext) -> Html<String> {
     let access_level_name = AccessLevel::from_i32(ctx.user.access_level)
         .map(|a| a.as_str())
         .unwrap_or("unknown");

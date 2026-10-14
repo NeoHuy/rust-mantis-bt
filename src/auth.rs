@@ -36,7 +36,10 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 pub fn constant_time_eq_ignore_ascii_case(a: &str, b: &str) -> bool {
@@ -50,7 +53,8 @@ pub fn constant_time_eq_ignore_ascii_case(a: &str, b: &str) -> bool {
         .zip(b_bytes.iter())
         .fold(0u8, |acc, (&x, &y)| {
             acc | (x.to_ascii_lowercase() ^ y.to_ascii_lowercase())
-        }) == 0
+        })
+        == 0
 }
 
 fn verify_sha256_salted(plain: &str, salt: &str, expected_hash: &str) -> bool {
@@ -82,32 +86,25 @@ pub fn md5_hex(input: &str) -> String {
     let mut d0: u32 = 0x10325476;
 
     let s = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-        5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
-        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
 
     let k: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee,
-        0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
-        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
-        0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
-        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa,
-        0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
-        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
-        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
-        0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
-        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05,
-        0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
-        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039,
-        0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
-        0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
+        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
+        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
+        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
+        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
+        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
+        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
+        0xeb86d391,
     ];
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
         for i in 0..16 {
             m[i] = u32::from_le_bytes(chunk[i * 4..(i + 1) * 4].try_into().unwrap());
@@ -206,7 +203,12 @@ pub fn parse_cookies(headers: &axum::http::HeaderMap) -> std::collections::HashM
     map
 }
 
-pub fn make_cookie_header(name: &str, value: &str, http_only: bool, max_age: Option<i64>) -> String {
+pub fn make_cookie_header(
+    name: &str,
+    value: &str,
+    http_only: bool,
+    max_age: Option<i64>,
+) -> String {
     let mut parts = vec![
         format!("{}={}", name, value),
         "Path=/".to_string(),
@@ -393,7 +395,10 @@ mod tests {
         let logged_in = db.authenticate("administrator", "root").unwrap().unwrap();
         assert_eq!(logged_in.failed_login_count, 0);
         assert_eq!(logged_in.login_count, 1);
-        assert!(db.get_user_by_cookie(&logged_in.cookie_string).unwrap().is_some());
+        assert!(db
+            .get_user_by_cookie(&logged_in.cookie_string)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -402,12 +407,18 @@ mod tests {
         let admin = db.get_user_by_username("administrator").unwrap().unwrap();
         // Cannot delete or demote the only administrator
         assert!(db.delete_user(admin.id).is_err());
-        assert!(db.update_user(admin.id, "Admin", "a@b.c", None, 25, true, false).is_err());
+        assert!(db
+            .update_user(admin.id, "Admin", "a@b.c", None, 25, true, false)
+            .is_err());
 
         // Create a protected reporter
-        let uid = db.create_user("prot_user", "Prot", "p@b.c", "secret", 25, true, true).unwrap();
+        let uid = db
+            .create_user("prot_user", "Prot", "p@b.c", "secret", 25, true, true)
+            .unwrap();
         // Protected user cannot have password or access_level changed while protected=true
-        assert!(db.update_user(uid, "Prot", "p@b.c", Some("newpass"), 55, true, true).is_err());
+        assert!(db
+            .update_user(uid, "Prot", "p@b.c", Some("newpass"), 55, true, true)
+            .is_err());
         assert!(db.delete_user(uid).is_err());
     }
 
@@ -417,10 +428,22 @@ mod tests {
         let admin = db.get_user_by_username("administrator").unwrap().unwrap();
 
         // Cannot disable the only administrator
-        assert!(db.update_user(admin.id, "Admin", "a@b.c", None, 90, false, false).is_err());
+        assert!(db
+            .update_user(admin.id, "Admin", "a@b.c", None, 90, false, false)
+            .is_err());
 
         // Create a disabled user
-        let uid = db.create_user("disabled_user", "Disabled", "d@b.c", "pass", 25, false, false).unwrap();
+        let uid = db
+            .create_user(
+                "disabled_user",
+                "Disabled",
+                "d@b.c",
+                "pass",
+                25,
+                false,
+                false,
+            )
+            .unwrap();
         let user = db.get_user_by_id(uid).unwrap().unwrap();
         assert_eq!(user.enabled, 0);
 
@@ -430,7 +453,10 @@ mod tests {
         assert_eq!(user_after.login_count, 0);
 
         // Disabled user cookie lookup returns None
-        assert!(db.get_user_by_cookie(&user.cookie_string).unwrap().is_none());
+        assert!(db
+            .get_user_by_cookie(&user.cookie_string)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -438,11 +464,31 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         // Create user
-        let dev_id = db.create_user("developer1", "Dev One", "dev1@example.com", "pass123", 55, true, false).unwrap();
+        let dev_id = db
+            .create_user(
+                "developer1",
+                "Dev One",
+                "dev1@example.com",
+                "pass123",
+                55,
+                true,
+                false,
+            )
+            .unwrap();
         assert!(dev_id > 0);
 
         // Duplicate username should fail
-        assert!(db.create_user("developer1", "Dev Two", "dev2@example.com", "pass456", 55, true, false).is_err());
+        assert!(db
+            .create_user(
+                "developer1",
+                "Dev Two",
+                "dev2@example.com",
+                "pass456",
+                55,
+                true,
+                false
+            )
+            .is_err());
 
         // List users
         let all = db.list_users(None, false).unwrap();
@@ -453,7 +499,17 @@ mod tests {
         assert_eq!(search_dev[0].username, "developer1");
 
         // Non-protected user update password and access level
-        assert!(db.update_user(dev_id, "Dev Updated", "dev_new@example.com", Some("newpass"), 70, true, false).is_ok());
+        assert!(db
+            .update_user(
+                dev_id,
+                "Dev Updated",
+                "dev_new@example.com",
+                Some("newpass"),
+                70,
+                true,
+                false
+            )
+            .is_ok());
         let updated = db.get_user_by_id(dev_id).unwrap().unwrap();
         assert_eq!(updated.realname, "Dev Updated");
         assert_eq!(updated.email, "dev_new@example.com");
@@ -461,7 +517,17 @@ mod tests {
         assert!(verify_password("newpass", &updated.password));
 
         // Create another administrator
-        let admin2_id = db.create_user("admin2", "Admin Two", "admin2@example.com", "root2", 90, true, false).unwrap();
+        let admin2_id = db
+            .create_user(
+                "admin2",
+                "Admin Two",
+                "admin2@example.com",
+                "root2",
+                90,
+                true,
+                false,
+            )
+            .unwrap();
 
         // Now we can demote or delete the original admin because another admin exists
         let admin1 = db.get_user_by_username("administrator").unwrap().unwrap();
@@ -479,29 +545,60 @@ mod tests {
         assert!(db.authenticate("nonexistent", "secret").unwrap().is_none());
 
         // Empty username creation fails
-        assert!(db.create_user("   ", "Real", "e@x.com", "pass", 25, true, false).is_err());
+        assert!(db
+            .create_user("   ", "Real", "e@x.com", "pass", 25, true, false)
+            .is_err());
 
         // Update/delete nonexistent user fails
-        assert!(db.update_user(9999, "Real", "e@x.com", None, 25, true, false).is_err());
+        assert!(db
+            .update_user(9999, "Real", "e@x.com", None, 25, true, false)
+            .is_err());
         assert!(db.delete_user(9999).is_err());
 
         // Protected user can update realname and email when password is None and access level is unchanged
-        let prot_id = db.create_user("protected_dev", "Prot Dev", "p@x.com", "pass", 55, true, true).unwrap();
-        assert!(db.update_user(prot_id, "Prot Dev New", "pnew@x.com", None, 55, true, true).is_ok());
+        let prot_id = db
+            .create_user(
+                "protected_dev",
+                "Prot Dev",
+                "p@x.com",
+                "pass",
+                55,
+                true,
+                true,
+            )
+            .unwrap();
+        assert!(db
+            .update_user(prot_id, "Prot Dev New", "pnew@x.com", None, 55, true, true)
+            .is_ok());
         let prot_user = db.get_user_by_id(prot_id).unwrap().unwrap();
         assert_eq!(prot_user.realname, "Prot Dev New");
         assert_eq!(prot_user.email, "pnew@x.com");
 
         // Malformed stored passwords
-        assert!(!verify_password("pass", "sha256$malformed_no_second_dollar"));
+        assert!(!verify_password(
+            "pass",
+            "sha256$malformed_no_second_dollar"
+        ));
         assert!(!verify_password("pass", "sha256$"));
 
         // list_users with search AND enabled_only
-        let _disabled_dev = db.create_user("dev_disabled", "Dev Inactive", "in@x.com", "pass", 55, false, false).unwrap();
+        let _disabled_dev = db
+            .create_user(
+                "dev_disabled",
+                "Dev Inactive",
+                "in@x.com",
+                "pass",
+                55,
+                false,
+                false,
+            )
+            .unwrap();
         let active_devs = db.list_users(Some("dev"), true).unwrap();
         for u in &active_devs {
             assert_eq!(u.enabled, 1);
-            assert!(u.username.contains("dev") || u.realname.contains("dev") || u.email.contains("dev"));
+            assert!(
+                u.username.contains("dev") || u.realname.contains("dev") || u.email.contains("dev")
+            );
         }
         assert!(!active_devs.iter().any(|u| u.username == "dev_disabled"));
     }
@@ -512,7 +609,10 @@ mod tests {
         assert_eq!(md5_hex(""), "d41d8cd98f00b204e9800998ecf8427e");
         assert!(verify_password("root", "63a9f0ea7bb98050796b649e85481845"));
         assert!(verify_password("root", "63A9F0EA7BB98050796B649E85481845"));
-        assert!(!verify_password("wrong", "63a9f0ea7bb98050796b649e85481845"));
+        assert!(!verify_password(
+            "wrong",
+            "63a9f0ea7bb98050796b649e85481845"
+        ));
     }
 
     #[test]

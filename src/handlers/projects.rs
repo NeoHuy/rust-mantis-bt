@@ -102,10 +102,7 @@ pub struct AddUserProjForm {
     pub access_level: i32,
 }
 
-pub async fn manage_proj_page(
-    State(db): State<Db>,
-    ctx: AuthContext,
-) -> Response {
+pub async fn manage_proj_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     if let Some(res) = require_manager(&ctx) {
         return res;
     }
@@ -115,7 +112,12 @@ pub async fn manage_proj_page(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                render_layout("Error", &ctx, Some(&e.to_string()), "<p>Error loading projects.</p>"),
+                render_layout(
+                    "Error",
+                    &ctx,
+                    Some(&e.to_string()),
+                    "<p>Error loading projects.</p>",
+                ),
             )
                 .into_response();
         }
@@ -259,9 +261,7 @@ pub async fn manage_proj_page(
             </div>
         </div>
         "#,
-        proj_rows,
-        cat_rows,
-        user_opts
+        proj_rows, cat_rows, user_opts
     );
 
     render_layout("Manage Projects", &ctx, None, &content).into_response()
@@ -370,14 +370,24 @@ pub async fn manage_proj_edit_page(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                render_layout("Project Not Found", &ctx, Some("Project not found"), "<p>Project not found.</p>"),
+                render_layout(
+                    "Project Not Found",
+                    &ctx,
+                    Some("Project not found"),
+                    "<p>Project not found.</p>",
+                ),
             )
                 .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                render_layout("Error", &ctx, Some(&e.to_string()), "<p>Error loading project.</p>"),
+                render_layout(
+                    "Error",
+                    &ctx,
+                    Some(&e.to_string()),
+                    "<p>Error loading project.</p>",
+                ),
             )
                 .into_response();
         }
@@ -527,7 +537,11 @@ pub async fn manage_proj_edit_page(
     }
 
     let enabled_checked = if project.enabled == 1 { "checked" } else { "" };
-    let inherit_global_checked = if project.inherit_global == 1 { "checked" } else { "" };
+    let inherit_global_checked = if project.inherit_global == 1 {
+        "checked"
+    } else {
+        ""
+    };
 
     let content = format!(
         r#"
@@ -717,8 +731,16 @@ pub async fn manage_proj_edit_page(
         if project.status == 50 { "selected" } else { "" },
         if project.status == 70 { "selected" } else { "" },
         enabled_checked,
-        if project.view_state == 10 { "selected" } else { "" },
-        if project.view_state == 50 { "selected" } else { "" },
+        if project.view_state == 10 {
+            "selected"
+        } else {
+            ""
+        },
+        if project.view_state == 50 {
+            "selected"
+        } else {
+            ""
+        },
         inherit_global_checked,
         html_escape(&project.description),
         project.id,
@@ -730,7 +752,11 @@ pub async fn manage_proj_edit_page(
         {
             let mut opts = String::new();
             for u in &all_users {
-                opts.push_str(&format!(r#"<option value="{}">{}</option>"#, u.id, html_escape(&u.username)));
+                opts.push_str(&format!(
+                    r#"<option value="{}">{}</option>"#,
+                    u.id,
+                    html_escape(&u.username)
+                ));
             }
             opts
         },
@@ -1015,7 +1041,9 @@ pub async fn manage_proj_ver_update(
     let desc = form.description.as_deref().unwrap_or("");
 
     match db.update_version(ver_id, &form.version, desc, released, obsolete) {
-        Ok(_) => Redirect::to(&format!("/manage_proj_edit_page/{}", form.project_id)).into_response(),
+        Ok(_) => {
+            Redirect::to(&format!("/manage_proj_edit_page/{}", form.project_id)).into_response()
+        }
         Err(e) => {
             let content = format!(
                 r#"<p>Failed to update version: {}</p>
@@ -1043,7 +1071,9 @@ pub async fn manage_proj_ver_delete(
     }
 
     match db.delete_version(ver_id) {
-        Ok(_) => Redirect::to(&format!("/manage_proj_edit_page/{}", form.project_id)).into_response(),
+        Ok(_) => {
+            Redirect::to(&format!("/manage_proj_edit_page/{}", form.project_id)).into_response()
+        }
         Err(e) => {
             let content = format!(
                 r#"<p>Failed to delete version: {}</p>

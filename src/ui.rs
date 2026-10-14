@@ -658,7 +658,9 @@ pub fn render_layout(
             "View Issues",
             "/view_all_bug_page",
             "&#9776;",
-            title == "View Issues" || title.starts_with("Issue #") || title.starts_with("Update Issue"),
+            title == "View Issues"
+                || title.starts_with("Issue #")
+                || title.starts_with("Update Issue"),
         ),
     ];
     if ctx.user.access_level >= 25 {
@@ -708,11 +710,7 @@ pub fn render_layout(
     if is_manage_page {
         let mut tabs: Vec<(&str, &str, bool)> = Vec::new();
         if ctx.user.access_level >= 90 {
-            tabs.push((
-                "Manage Users",
-                "/manage_user_page",
-                title.contains("User"),
-            ));
+            tabs.push(("Manage Users", "/manage_user_page", title.contains("User")));
         }
         if ctx.user.access_level >= 70 {
             tabs.push((
@@ -746,8 +744,16 @@ pub fn render_layout(
         }
         sub_tabs_html.push_str("</div>");
     } else if is_account_page {
-        let acc_act = if title == "My Account" { r#" class="active""# } else { "" };
-        let tok_act = if title == "API Tokens" { r#" class="active""# } else { "" };
+        let acc_act = if title == "My Account" {
+            r#" class="active""#
+        } else {
+            ""
+        };
+        let tok_act = if title == "API Tokens" {
+            r#" class="active""#
+        } else {
+            ""
+        };
         sub_tabs_html.push_str(&format!(
             r#"<div class="sub-nav-tabs">
                 <a href="/account_page"{}>My Account</a>

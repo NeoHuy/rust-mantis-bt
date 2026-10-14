@@ -201,7 +201,7 @@ async fn test_roadmap_changelog_summary_billing_news_and_email_queue() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bugnote_add/{}", b1))
+                .uri(format!("/bugnote_add/{}", b1))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
@@ -218,7 +218,7 @@ async fn test_roadmap_changelog_summary_billing_news_and_email_queue() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(&format!("/view_bug_page/{}", b1))
+                .uri(format!("/view_bug_page/{}", b1))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),

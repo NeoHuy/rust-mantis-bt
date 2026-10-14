@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod bugs;
 pub mod layout;
 pub mod projects;
 pub mod users;

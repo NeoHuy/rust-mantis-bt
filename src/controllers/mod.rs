@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod bugs;
 pub mod projects;
 pub mod users;
 
@@ -32,4 +33,5 @@ pub fn router() -> Router<Db> {
         .merge(auth::router())
         .merge(users::router())
         .merge(projects::router())
+        .merge(bugs::router())
 }

@@ -66,7 +66,9 @@ impl std::fmt::Display for JiraError {
             Self::ConfigError(msg) => write!(f, "Jira config error: {}", msg),
             Self::NetworkError(msg) => write!(f, "Jira network error: {}", msg),
             Self::AuthError(msg) => write!(f, "Jira authentication failed: {}", msg),
-            Self::ApiError { status, message } => write!(f, "Jira API error (HTTP {}): {}", status, message),
+            Self::ApiError { status, message } => {
+                write!(f, "Jira API error (HTTP {}): {}", status, message)
+            }
             Self::ParseError(msg) => write!(f, "Jira response parse error: {}", msg),
         }
     }
@@ -106,10 +108,14 @@ impl JiraClient {
     ) -> Result<JiraMyselfResponse, JiraError> {
         let trimmed_url = base_url.trim().trim_end_matches('/');
         if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError("Jira Base URL cannot be empty".to_string()));
+            return Err(JiraError::ConfigError(
+                "Jira Base URL cannot be empty".to_string(),
+            ));
         }
         if email.trim().is_empty() || api_token.trim().is_empty() {
-            return Err(JiraError::ConfigError("Email and API token must be configured".to_string()));
+            return Err(JiraError::ConfigError(
+                "Email and API token must be configured".to_string(),
+            ));
         }
 
         let url = format!("{}/rest/api/3/myself", trimmed_url);
@@ -124,7 +130,9 @@ impl JiraClient {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(JiraError::AuthError("Invalid credentials or insufficient permissions".to_string()));
+            return Err(JiraError::AuthError(
+                "Invalid credentials or insufficient permissions".to_string(),
+            ));
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -148,13 +156,19 @@ impl JiraClient {
     ) -> Result<JiraCreateIssueResponse, JiraError> {
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
         if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError("Jira Base URL is not configured".to_string()));
+            return Err(JiraError::ConfigError(
+                "Jira Base URL is not configured".to_string(),
+            ));
         }
         if config.project_key.trim().is_empty() {
-            return Err(JiraError::ConfigError("Jira Project Key is not configured for this project".to_string()));
+            return Err(JiraError::ConfigError(
+                "Jira Project Key is not configured for this project".to_string(),
+            ));
         }
         if config.email.trim().is_empty() || config.api_token.trim().is_empty() {
-            return Err(JiraError::ConfigError("Email and API token must be configured".to_string()));
+            return Err(JiraError::ConfigError(
+                "Email and API token must be configured".to_string(),
+            ));
         }
 
         let payload = build_create_issue_payload(
@@ -182,7 +196,9 @@ impl JiraClient {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(JiraError::AuthError("Invalid credentials or insufficient permissions on Jira project".to_string()));
+            return Err(JiraError::AuthError(
+                "Invalid credentials or insufficient permissions on Jira project".to_string(),
+            ));
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -228,7 +244,10 @@ pub fn base64_encode(input: &[u8]) -> String {
 }
 
 pub fn build_basic_auth_header(email: &str, token: &str) -> String {
-    format!("Basic {}", base64_encode(format!("{}:{}", email, token).as_bytes()))
+    format!(
+        "Basic {}",
+        base64_encode(format!("{}:{}", email, token).as_bytes())
+    )
 }
 
 pub fn build_create_issue_payload(
@@ -279,7 +298,8 @@ mod tests {
 
     #[test]
     fn test_issue_payload_serialization() {
-        let payload = build_create_issue_payload("PROJ", "Issue Summary", "Detailed description", "Bug");
+        let payload =
+            build_create_issue_payload("PROJ", "Issue Summary", "Detailed description", "Bug");
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains(r#""project":{"key":"PROJ"}"#));
         assert!(json.contains(r#""summary":"Issue Summary""#));
@@ -311,7 +331,10 @@ mod tests {
             default_issue_type: "Bug".to_string(),
             project_key: "PROJ".to_string(),
         };
-        let err = client.create_issue(&conf, "Summary", "Desc", "Bug").await.unwrap_err();
+        let err = client
+            .create_issue(&conf, "Summary", "Desc", "Bug")
+            .await
+            .unwrap_err();
         match err {
             JiraError::ConfigError(msg) => assert!(msg.contains("Email and API token")),
             other => panic!("Expected ConfigError, got {:?}", other),

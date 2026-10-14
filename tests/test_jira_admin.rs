@@ -11,7 +11,10 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
                 .method("POST")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("username={}&password={}", username, password)))
+                .body(Body::from(format!(
+                    "username={}&password={}",
+                    username, password
+                )))
                 .unwrap(),
         )
         .await
@@ -31,7 +34,17 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
 #[tokio::test]
 async fn test_admin_jira_access_denied_for_developer() {
     let db = Db::open_in_memory().unwrap();
-    let _ = db.create_user("devuser", "Developer", "dev@example.com", "devpass", 55, true, false).unwrap();
+    let _ = db
+        .create_user(
+            "devuser",
+            "Developer",
+            "dev@example.com",
+            "devpass",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
     let app = build_router(db.clone());
 
     let cookie = login(&app, "devuser", "devpass").await;
@@ -55,7 +68,9 @@ async fn test_admin_jira_access_denied_for_developer() {
 #[tokio::test]
 async fn test_admin_jira_save_config() {
     let db = Db::open_in_memory().unwrap();
-    let proj_id = db.create_project("Alpha Project", 10, 10, "Description", true).unwrap();
+    let proj_id = db
+        .create_project("Alpha Project", 10, 10, "Description", true)
+        .unwrap();
     let app = build_router(db.clone());
 
     let cookie = login(&app, "administrator", "root").await;

@@ -4199,7 +4199,10 @@ impl Db {
         .map_err(|e| e.to_string())?;
 
         // 2. Insert bugnote text & bugnote
-        let note_text = format!("Created Jira issue [{}]({}) by {}.", jira_key, jira_url, username);
+        let note_text = format!(
+            "Created Jira issue [{}]({}) by {}.",
+            jira_key, jira_url, username
+        );
         tx.execute(
             "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
             params![note_text],
@@ -4243,13 +4246,19 @@ impl Db {
     }
 
     pub fn get_jira_config(&self, project_id: i64) -> rusqlite::Result<JiraResolvedConfig> {
-        let enabled_val = self.get_config("jira_enabled", 0, 0)?.unwrap_or_else(|| "0".to_string());
+        let enabled_val = self
+            .get_config("jira_enabled", 0, 0)?
+            .unwrap_or_else(|| "0".to_string());
         let enabled = enabled_val == "1" || enabled_val.eq_ignore_ascii_case("true");
         let base_url = self.get_config("jira_base_url", 0, 0)?.unwrap_or_default();
         let email = self.get_config("jira_email", 0, 0)?.unwrap_or_default();
         let api_token = self.get_config("jira_api_token", 0, 0)?.unwrap_or_default();
-        let default_issue_type = self.get_config("jira_default_issue_type", 0, 0)?.unwrap_or_else(|| "Bug".to_string());
-        let default_project_key = self.get_config("jira_default_project_key", 0, 0)?.unwrap_or_default();
+        let default_issue_type = self
+            .get_config("jira_default_issue_type", 0, 0)?
+            .unwrap_or_else(|| "Bug".to_string());
+        let default_project_key = self
+            .get_config("jira_default_project_key", 0, 0)?
+            .unwrap_or_default();
 
         let mut project_key = String::new();
         if project_id > 0 {
@@ -4293,7 +4302,11 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_jira_project_mapping(&self, project_id: i64, jira_project_key: &str) -> rusqlite::Result<()> {
+    pub fn set_jira_project_mapping(
+        &self,
+        project_id: i64,
+        jira_project_key: &str,
+    ) -> rusqlite::Result<()> {
         self.set_config("jira_project_key", project_id, 0, jira_project_key)
     }
 }
@@ -5360,24 +5373,12 @@ mod tests {
     fn test_jira_links_crud() {
         let db = Db::open_in_memory().unwrap();
         let admin = db.get_user_by_username("administrator").unwrap().unwrap();
-        let project_id = db.create_project("Jira Project", 10, 10, "Desc", false).unwrap();
+        let project_id = db
+            .create_project("Jira Project", 10, 10, "Desc", false)
+            .unwrap();
         let bug_id = db
             .create_bug(
-                project_id,
-                admin.id,
-                1,
-                "Summary",
-                "Desc",
-                "",
-                "",
-                30,
-                50,
-                70,
-                "",
-                "",
-                "",
-                "",
-                10,
+                project_id, admin.id, 1, "Summary", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
             )
             .unwrap();
 
@@ -5386,12 +5387,21 @@ mod tests {
 
         // Create link
         let link_id = db
-            .create_jira_link(bug_id, "PROJ-101", "https://jira.example.com/browse/PROJ-101", "Bug", admin.id)
+            .create_jira_link(
+                bug_id,
+                "PROJ-101",
+                "https://jira.example.com/browse/PROJ-101",
+                "Bug",
+                admin.id,
+            )
             .unwrap();
         assert!(link_id > 0);
 
         // Fetch link
-        let link = db.get_jira_link_by_bug_id(bug_id).unwrap().expect("link should exist");
+        let link = db
+            .get_jira_link_by_bug_id(bug_id)
+            .unwrap()
+            .expect("link should exist");
         assert_eq!(link.bug_id, bug_id);
         assert_eq!(link.jira_key, "PROJ-101");
         assert_eq!(link.jira_url, "https://jira.example.com/browse/PROJ-101");
@@ -5399,7 +5409,15 @@ mod tests {
         assert_eq!(link.created_by, admin.id);
 
         // Duplicate create fails
-        assert!(db.create_jira_link(bug_id, "PROJ-102", "https://jira.example.com/browse/PROJ-102", "Task", admin.id).is_err());
+        assert!(db
+            .create_jira_link(
+                bug_id,
+                "PROJ-102",
+                "https://jira.example.com/browse/PROJ-102",
+                "Task",
+                admin.id
+            )
+            .is_err());
 
         // Delete link
         let deleted = db.delete_jira_link_by_bug_id(bug_id).unwrap();
@@ -5410,7 +5428,9 @@ mod tests {
     #[test]
     fn test_jira_config_resolution() {
         let db = Db::open_in_memory().unwrap();
-        let project_id = db.create_project("Test Project", 10, 10, "Desc", false).unwrap();
+        let project_id = db
+            .create_project("Test Project", 10, 10, "Desc", false)
+            .unwrap();
 
         // Initially disabled with defaults
         let conf = db.get_jira_config(project_id).unwrap();
@@ -5437,7 +5457,8 @@ mod tests {
         assert_eq!(conf2.project_key, "DEFAULT_PROJ");
 
         // Override project key for specific project
-        db.set_jira_project_mapping(project_id, "SPECIFIC_PROJ").unwrap();
+        db.set_jira_project_mapping(project_id, "SPECIFIC_PROJ")
+            .unwrap();
         let conf3 = db.get_jira_config(project_id).unwrap();
         assert_eq!(conf3.project_key, "SPECIFIC_PROJ");
 

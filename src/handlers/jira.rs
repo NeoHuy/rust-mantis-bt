@@ -34,17 +34,22 @@ pub async fn manage_jira_page(
     Query(q): Query<FlashQuery>,
 ) -> Response {
     if ctx.user.access_level < 90 {
-        return forbidden_html(&ctx, "Administrator access required to manage Jira integration.");
+        return forbidden_html(
+            &ctx,
+            "Administrator access required to manage Jira integration.",
+        );
     }
 
-    let config = db.get_jira_config(0).unwrap_or_else(|_| crate::models::JiraResolvedConfig {
-        enabled: false,
-        base_url: String::new(),
-        email: String::new(),
-        api_token: String::new(),
-        default_issue_type: "Bug".to_string(),
-        project_key: String::new(),
-    });
+    let config = db
+        .get_jira_config(0)
+        .unwrap_or_else(|_| crate::models::JiraResolvedConfig {
+            enabled: false,
+            base_url: String::new(),
+            email: String::new(),
+            api_token: String::new(),
+            default_issue_type: "Bug".to_string(),
+            project_key: String::new(),
+        });
 
     let projects = db.list_all_projects().unwrap_or_default();
 
@@ -57,8 +62,16 @@ pub async fn manage_jira_page(
     };
 
     let checked = if config.enabled { "checked" } else { "" };
-    let is_bug_selected = if config.default_issue_type == "Bug" { "selected" } else { "" };
-    let is_task_selected = if config.default_issue_type == "Task" { "selected" } else { "" };
+    let is_bug_selected = if config.default_issue_type == "Bug" {
+        "selected"
+    } else {
+        ""
+    };
+    let is_task_selected = if config.default_issue_type == "Task" {
+        "selected"
+    } else {
+        ""
+    };
 
     let mut project_mapping_rows = String::new();
     for p in &projects {
@@ -176,7 +189,11 @@ pub async fn manage_jira_page(
         checked,
         html_escape(&config.base_url),
         html_escape(&config.email),
-        if config.api_token.is_empty() { "Enter API token" } else { "••••••••" },
+        if config.api_token.is_empty() {
+            "Enter API token"
+        } else {
+            "••••••••"
+        },
         token_hint,
         is_bug_selected,
         is_task_selected,
@@ -193,15 +210,27 @@ pub async fn manage_jira_config(
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     if ctx.user.access_level < 90 {
-        return forbidden_html(&ctx, "Administrator access required to update Jira configuration.");
+        return forbidden_html(
+            &ctx,
+            "Administrator access required to update Jira configuration.",
+        );
     }
 
-    let enabled = form.get("jira_enabled").map(|v| v == "1" || v == "on").unwrap_or(false);
+    let enabled = form
+        .get("jira_enabled")
+        .map(|v| v == "1" || v == "on")
+        .unwrap_or(false);
     let base_url = form.get("jira_base_url").map(|s| s.trim()).unwrap_or("");
     let email = form.get("jira_email").map(|s| s.trim()).unwrap_or("");
     let raw_token = form.get("jira_api_token").map(|s| s.trim()).unwrap_or("");
-    let default_issue_type = form.get("jira_default_issue_type").map(|s| s.trim()).unwrap_or("Bug");
-    let default_project_key = form.get("jira_default_project_key").map(|s| s.trim()).unwrap_or("");
+    let default_issue_type = form
+        .get("jira_default_issue_type")
+        .map(|s| s.trim())
+        .unwrap_or("Bug");
+    let default_project_key = form
+        .get("jira_default_project_key")
+        .map(|s| s.trim())
+        .unwrap_or("");
 
     let token_opt = if !raw_token.is_empty() {
         Some(raw_token)
@@ -217,7 +246,11 @@ pub async fn manage_jira_config(
         default_issue_type,
         default_project_key,
     ) {
-        return Redirect::to(&format!("/manage_jira_page?err=Failed+to+save+config:+{}", url_encode(&sanitize_error_message(&e.to_string())))).into_response();
+        return Redirect::to(&format!(
+            "/manage_jira_page?err=Failed+to+save+config:+{}",
+            url_encode(&sanitize_error_message(&e.to_string()))
+        ))
+        .into_response();
     }
 
     // Process project mappings
@@ -232,28 +265,42 @@ pub async fn manage_jira_config(
     Redirect::to("/manage_jira_page?msg=Jira+configuration+saved+successfully").into_response()
 }
 
-pub async fn manage_jira_test(
-    State(db): State<Db>,
-    ctx: AuthContext,
-) -> Response {
+pub async fn manage_jira_test(State(db): State<Db>, ctx: AuthContext) -> Response {
     if ctx.user.access_level < 90 {
         return forbidden_html(&ctx, "Administrator access required.");
     }
 
     let config = match db.get_jira_config(0) {
         Ok(c) => c,
-        Err(e) => return Redirect::to(&format!("/manage_jira_page?err=Config+error:+{}", url_encode(&sanitize_error_message(&e.to_string())))).into_response(),
+        Err(e) => {
+            return Redirect::to(&format!(
+                "/manage_jira_page?err=Config+error:+{}",
+                url_encode(&sanitize_error_message(&e.to_string()))
+            ))
+            .into_response()
+        }
     };
 
     let client = JiraClient::new();
-    match client.test_connection(&config.base_url, &config.email, &config.api_token).await {
+    match client
+        .test_connection(&config.base_url, &config.email, &config.api_token)
+        .await
+    {
         Ok(user) => {
             let msg = format!("Connection successful! Logged in as: {}", user.display_name);
-            Redirect::to(&format!("/manage_jira_page?msg={}", url_encode(&sanitize_error_message(&msg)))).into_response()
+            Redirect::to(&format!(
+                "/manage_jira_page?msg={}",
+                url_encode(&sanitize_error_message(&msg))
+            ))
+            .into_response()
         }
         Err(e) => {
             let err = format!("Connection failed: {}", e);
-            Redirect::to(&format!("/manage_jira_page?err={}", url_encode(&sanitize_error_message(&err)))).into_response()
+            Redirect::to(&format!(
+                "/manage_jira_page?err={}",
+                url_encode(&sanitize_error_message(&err))
+            ))
+            .into_response()
         }
     }
 }
@@ -276,15 +323,17 @@ pub async fn push_bug_to_jira(
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
     if eff < 55 || (bug.view_state == 50 && eff < 55) {
-        return forbidden_html(&ctx, "Developer access required on this project to push issues to Jira.");
+        return forbidden_html(
+            &ctx,
+            "Developer access required on this project to push issues to Jira.",
+        );
     }
 
     // Check if already linked
     if let Ok(Some(existing)) = db.get_jira_link_by_bug_id(bug_id) {
         return Redirect::to(&format!(
             "/view_bug_page/{}?err=Issue+is+already+linked+to+Jira+({})",
-            bug_id,
-            existing.jira_key
+            bug_id, existing.jira_key
         ))
         .into_response();
     }
@@ -328,7 +377,10 @@ pub async fn push_bug_to_jira(
     );
 
     let client = JiraClient::new();
-    let jira_resp = match client.create_issue(&config, summary, &description, issue_type).await {
+    let jira_resp = match client
+        .create_issue(&config, summary, &description, issue_type)
+        .await
+    {
         Ok(resp) => resp,
         Err(e) => {
             return Redirect::to(&format!(
@@ -359,8 +411,7 @@ pub async fn push_bug_to_jira(
 
     Redirect::to(&format!(
         "/view_bug_page/{}?msg=Created+Jira+issue+{}",
-        bug_id,
-        jira_resp.key
+        bug_id, jira_resp.key
     ))
     .into_response()
 }

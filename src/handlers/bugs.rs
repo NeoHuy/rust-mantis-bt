@@ -1222,14 +1222,16 @@ pub async fn view_bug_page(
     let is_monitoring = monitors.iter().any(|u| u.id == ctx.user.id);
 
     let jira_link = db.get_jira_link_by_bug_id(id).unwrap_or(None);
-    let jira_conf = db.get_jira_config(bug.project_id).unwrap_or_else(|_| crate::models::JiraResolvedConfig {
-        enabled: false,
-        base_url: String::new(),
-        email: String::new(),
-        api_token: String::new(),
-        default_issue_type: "Bug".to_string(),
-        project_key: String::new(),
-    });
+    let jira_conf =
+        db.get_jira_config(bug.project_id)
+            .unwrap_or_else(|_| crate::models::JiraResolvedConfig {
+                enabled: false,
+                base_url: String::new(),
+                email: String::new(),
+                api_token: String::new(),
+                default_issue_type: "Bug".to_string(),
+                project_key: String::new(),
+            });
 
     let jira_badge = if let Some(jl) = &jira_link {
         format!(

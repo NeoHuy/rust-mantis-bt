@@ -4,7 +4,10 @@ use rust_mantis_bt::{build_router, db::Db};
 use serde_json::json;
 use tower::ServiceExt;
 
-async fn spawn_mock_jira(status_code: StatusCode, body_json: serde_json::Value) -> (String, tokio::sync::oneshot::Sender<()>) {
+async fn spawn_mock_jira(
+    status_code: StatusCode,
+    body_json: serde_json::Value,
+) -> (String, tokio::sync::oneshot::Sender<()>) {
     let app = axum::Router::new().route(
         "/rest/api/2/issue",
         axum::routing::post(move || async move {
@@ -37,7 +40,10 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
                 .method("POST")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("username={}&password={}", username, password)))
+                .body(Body::from(format!(
+                    "username={}&password={}",
+                    username, password
+                )))
                 .unwrap(),
         )
         .await
@@ -57,8 +63,12 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
 #[tokio::test]
 async fn test_jira_push_success() {
     let db = Db::open_in_memory().unwrap();
-    let proj_id = db.create_project("Core Project", 10, 10, "Desc", true).unwrap();
-    let dev_id = db.create_user("dev1", "Developer 1", "d1@x.com", "pass", 55, true, false).unwrap();
+    let proj_id = db
+        .create_project("Core Project", 10, 10, "Desc", true)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev1", "Developer 1", "d1@x.com", "pass", 55, true, false)
+        .unwrap();
     let bug_id = db
         .create_bug(
             proj_id,
@@ -109,7 +119,7 @@ async fn test_jira_push_success() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .uri(format!("/view_bug_page/{}/jira_push", bug_id))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("issue_type=Bug&summary=Custom+Summary"))
@@ -121,7 +131,10 @@ async fn test_jira_push_success() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
 
     // 1. Verify link in DB
-    let link = db.get_jira_link_by_bug_id(bug_id).unwrap().expect("Jira link must exist");
+    let link = db
+        .get_jira_link_by_bug_id(bug_id)
+        .unwrap()
+        .expect("Jira link must exist");
     assert_eq!(link.jira_key, "PROJ-789");
     assert_eq!(link.jira_url, format!("{}/browse/PROJ-789", mock_url));
     assert_eq!(link.created_by, dev_id);
@@ -140,7 +153,9 @@ async fn test_jira_push_success() {
 async fn test_jira_push_already_linked() {
     let db = Db::open_in_memory().unwrap();
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
-    let dev_id = db.create_user("dev2", "Dev 2", "d2@x.com", "pass", 55, true, false).unwrap();
+    let dev_id = db
+        .create_user("dev2", "Dev 2", "d2@x.com", "pass", 55, true, false)
+        .unwrap();
     let bug_id = db
         .create_bug(
             proj_id, dev_id, 1, "Issue", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
@@ -148,7 +163,14 @@ async fn test_jira_push_already_linked() {
         .unwrap();
 
     // Already linked
-    db.create_jira_link(bug_id, "ALREADY-1", "http://jira/browse/ALREADY-1", "Bug", dev_id).unwrap();
+    db.create_jira_link(
+        bug_id,
+        "ALREADY-1",
+        "http://jira/browse/ALREADY-1",
+        "Bug",
+        dev_id,
+    )
+    .unwrap();
 
     let app = build_router(db.clone());
     let cookie = login(&app, "dev2", "pass").await;
@@ -158,7 +180,7 @@ async fn test_jira_push_already_linked() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .uri(format!("/view_bug_page/{}/jira_push", bug_id))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -176,7 +198,17 @@ async fn test_jira_push_already_linked() {
 async fn test_jira_push_permission_denied() {
     let db = Db::open_in_memory().unwrap();
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
-    let rep_id = db.create_user("reporter1", "Reporter 1", "r1@x.com", "pass", 25, true, false).unwrap();
+    let rep_id = db
+        .create_user(
+            "reporter1",
+            "Reporter 1",
+            "r1@x.com",
+            "pass",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
     let bug_id = db
         .create_bug(
             proj_id, rep_id, 1, "Issue", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
@@ -191,7 +223,7 @@ async fn test_jira_push_permission_denied() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .uri(format!("/view_bug_page/{}/jira_push", bug_id))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -206,7 +238,9 @@ async fn test_jira_push_permission_denied() {
 async fn test_jira_push_jira_error_keeps_bug_state() {
     let db = Db::open_in_memory().unwrap();
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
-    let dev_id = db.create_user("dev3", "Dev 3", "d3@x.com", "pass", 55, true, false).unwrap();
+    let dev_id = db
+        .create_user("dev3", "Dev 3", "d3@x.com", "pass", 55, true, false)
+        .unwrap();
     let bug_id = db
         .create_bug(
             proj_id, dev_id, 1, "Issue", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
@@ -240,7 +274,7 @@ async fn test_jira_push_jira_error_keeps_bug_state() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .uri(format!("/view_bug_page/{}/jira_push", bug_id))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("issue_type=Bug"))
@@ -269,18 +303,38 @@ async fn test_jira_push_jira_error_keeps_bug_state() {
 async fn test_jira_push_effective_access_level() {
     let db = Db::open_in_memory().unwrap();
     // Private project
-    let priv_proj_id = db.create_project("Private Proj", 10, 50, "Desc", true).unwrap();
+    let priv_proj_id = db
+        .create_project("Private Proj", 10, 50, "Desc", true)
+        .unwrap();
 
     // Alice has global Reporter (25), but is Developer (55) in this project
-    let alice_id = db.create_user("alice", "Alice", "alice@x.com", "pass", 25, true, false).unwrap();
+    let alice_id = db
+        .create_user("alice", "Alice", "alice@x.com", "pass", 25, true, false)
+        .unwrap();
     db.set_project_user(priv_proj_id, alice_id, 55).unwrap();
 
     // Bob has global Developer (55), but no access to this private project
-    let _bob_id = db.create_user("bob", "Bob", "bob@x.com", "pass", 55, true, false).unwrap();
+    let _bob_id = db
+        .create_user("bob", "Bob", "bob@x.com", "pass", 55, true, false)
+        .unwrap();
 
     let bug_id = db
         .create_bug(
-            priv_proj_id, alice_id, 1, "Issue in private proj", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
+            priv_proj_id,
+            alice_id,
+            1,
+            "Issue in private proj",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
         )
         .unwrap();
 
@@ -293,7 +347,8 @@ async fn test_jira_push_effective_access_level() {
         }),
     )
     .await;
-    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "PRIV").unwrap();
+    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "PRIV")
+        .unwrap();
 
     let app = build_router(db.clone());
 
@@ -304,7 +359,7 @@ async fn test_jira_push_effective_access_level() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .uri(format!("/view_bug_page/{}/jira_push", bug_id))
                 .header("cookie", &bob_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -320,7 +375,7 @@ async fn test_jira_push_effective_access_level() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .uri(format!("/view_bug_page/{}/jira_push", bug_id))
                 .header("cookie", &alice_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -335,7 +390,9 @@ async fn test_jira_push_effective_access_level() {
 async fn test_jira_push_handles_multiline_error_without_panic() {
     let db = Db::open_in_memory().unwrap();
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
-    let dev_id = db.create_user("dev4", "Dev 4", "d4@x.com", "pass", 55, true, false).unwrap();
+    let dev_id = db
+        .create_user("dev4", "Dev 4", "d4@x.com", "pass", 55, true, false)
+        .unwrap();
     let bug_id = db
         .create_bug(
             proj_id, dev_id, 1, "Issue", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
@@ -361,7 +418,8 @@ async fn test_jira_push_handles_multiline_error_without_panic() {
     });
     let mock_url = format!("http://{}", addr);
 
-    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "KEY").unwrap();
+    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "KEY")
+        .unwrap();
 
     let app = build_router(db.clone());
     let cookie = login(&app, "dev4", "pass").await;
@@ -372,7 +430,7 @@ async fn test_jira_push_handles_multiline_error_without_panic() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/view_bug_page/{}/jira_push", bug_id))
+                .uri(format!("/view_bug_page/{}/jira_push", bug_id))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -389,14 +447,31 @@ async fn test_jira_push_handles_multiline_error_without_panic() {
 async fn test_jira_link_cascade_on_bug_delete() {
     let db = Db::open_in_memory().unwrap();
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
-    let dev_id = db.create_user("dev5", "Dev 5", "d5@x.com", "pass", 55, true, false).unwrap();
+    let dev_id = db
+        .create_user("dev5", "Dev 5", "d5@x.com", "pass", 55, true, false)
+        .unwrap();
     let bug_id = db
         .create_bug(
-            proj_id, dev_id, 1, "Issue to delete", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
+            proj_id,
+            dev_id,
+            1,
+            "Issue to delete",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
         )
         .unwrap();
 
-    db.create_jira_link(bug_id, "DEL-1", "http://jira/browse/DEL-1", "Bug", dev_id).unwrap();
+    db.create_jira_link(bug_id, "DEL-1", "http://jira/browse/DEL-1", "Bug", dev_id)
+        .unwrap();
     assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_some());
 
     // Delete bug
@@ -405,4 +480,3 @@ async fn test_jira_link_cascade_on_bug_delete() {
     // Link must be cleanly deleted by cascade foreign key
     assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
 }
-

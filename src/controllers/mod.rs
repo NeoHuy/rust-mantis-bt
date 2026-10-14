@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod projects;
 pub mod users;
 
 use crate::auth::AuthContext;
@@ -30,4 +31,5 @@ pub fn router() -> Router<Db> {
         .route("/", get(root_handler))
         .merge(auth::router())
         .merge(users::router())
+        .merge(projects::router())
 }

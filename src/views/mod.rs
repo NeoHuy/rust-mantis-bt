@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod layout;
+pub mod projects;
 pub mod users;
 
 use crate::auth::AuthContext;

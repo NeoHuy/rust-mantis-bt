@@ -490,6 +490,15 @@ pub async fn view_all_bug_page(
             } else {
                 ""
             };
+            let jira_badge = if let Ok(Some(jl)) = db.get_jira_link_by_bug_id(b.id) {
+                format!(
+                    r#" <a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; font-size:10px; text-decoration:none;">Jira: {}</a>"#,
+                    html_escape(&jl.jira_url),
+                    html_escape(&jl.jira_key)
+                )
+            } else {
+                String::new()
+            };
             let status_badge = render_status_badge(b.status, status_label(b.status));
 
             rows_html.push_str(&format!(
@@ -500,7 +509,7 @@ pub async fn view_all_bug_page(
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}{}{}</td>
-                    <td><a href="/view_bug_page/{}">{}</a>{}</td>
+                    <td><a href="/view_bug_page/{}">{}</a>{}{}</td>
                     <td style="white-space:nowrap;">{}</td>
                 </tr>"#,
                 row_class,
@@ -521,6 +530,7 @@ pub async fn view_all_bug_page(
                 b.id,
                 html_escape(&b.summary),
                 priv_badge,
+                jira_badge,
                 format_timestamp(b.last_updated)
             ));
         }
@@ -1211,11 +1221,35 @@ pub async fn view_bug_page(
     let monitors = db.list_bug_monitors(id).unwrap_or_default();
     let is_monitoring = monitors.iter().any(|u| u.id == ctx.user.id);
 
-    let err_banner = q
-        .err
-        .as_deref()
-        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
-        .unwrap_or_default();
+    let jira_link = db.get_jira_link_by_bug_id(id).unwrap_or(None);
+    let jira_conf =
+        db.get_jira_config(bug.project_id)
+            .unwrap_or_else(|_| crate::models::JiraResolvedConfig {
+                enabled: false,
+                base_url: String::new(),
+                email: String::new(),
+                api_token: String::new(),
+                default_issue_type: "Bug".to_string(),
+                project_key: String::new(),
+            });
+
+    let jira_badge = if let Some(jl) = &jira_link {
+        format!(
+            r#"<a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; text-decoration:none; margin-left:8px; font-size:11px; font-weight:bold;">Jira: {} &nearr;</a>"#,
+            html_escape(&jl.jira_url),
+            html_escape(&jl.jira_key)
+        )
+    } else {
+        String::new()
+    };
+
+    let banner = if let Some(m) = &q.msg {
+        format!(r#"<div class="flash-success">{}</div>"#, html_escape(m))
+    } else if let Some(e) = &q.err {
+        format!(r#"<div class="flash-error">{}</div>"#, html_escape(e))
+    } else {
+        String::new()
+    };
 
     // Quick Action Toolbar (separate forms, no nesting!)
     let mut actions_html = String::new();
@@ -1329,6 +1363,19 @@ pub async fn view_bug_page(
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_delete/{}" style="display:inline;">
                 <button type="submit" class="btn btn-danger btn-sm">Delete Issue</button>
+            </form>"#,
+            bug.id
+        ));
+    }
+
+    if jira_link.is_none() && jira_conf.enabled && eff >= 55 {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/view_bug_page/{}/jira_push" style="display:inline-flex; gap:4px; align-items:center;">
+                <select name="issue_type" style="width:auto;">
+                    <option value="Bug">Jira Bug</option>
+                    <option value="Task">Jira Task</option>
+                </select>
+                <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6;">Push to Jira</button>
             </form>"#,
             bug.id
         ));
@@ -1640,7 +1687,7 @@ pub async fn view_bug_page(
                     </thead>
                     <tbody>
                         <tr>
-                            <td>{:07}</td>
+                            <td>{:07}{}</td>
                             <td>{}</td>
                             <td>{}</td>
                             <td>{}</td>
@@ -1745,9 +1792,10 @@ pub async fn view_bug_page(
                 {}
             </div>
         </div>"#,
-        err_banner,
+        banner,
         bug.id,
         bug.id,
+        jira_badge,
         html_escape(&proj_name),
         html_escape(&cat_name),
         html_escape(view_state_str),

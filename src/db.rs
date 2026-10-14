@@ -1,7 +1,7 @@
 use crate::models::{
     ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugRelationship, BugTag, BugUpdate,
-    Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, NewsItem, PluginItem, Project,
-    ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
+    Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig,
+    NewsItem, PluginItem, Project, ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -304,7 +304,21 @@ impl Db {
                 enabled INTEGER NOT NULL DEFAULT 1,
                 protected INTEGER NOT NULL DEFAULT 0,
                 priority INTEGER NOT NULL DEFAULT 3
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_links_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bug_id INTEGER NOT NULL UNIQUE,
+                jira_key TEXT NOT NULL,
+                jira_url TEXT NOT NULL,
+                issue_type TEXT NOT NULL DEFAULT 'Bug',
+                created_by INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(bug_id) REFERENCES mantis_bug_table(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_jira_links_bug_id ON mantis_jira_links_table(bug_id);
+            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);",
         )?;
 
         // Default administrator seed if user table is empty
@@ -4104,6 +4118,197 @@ impl Db {
         .unwrap_or(0)
             != 0
     }
+
+    // ─── Jira Integration (`mantis_jira_links_table`) ────────────────────────
+
+    pub fn create_jira_link(
+        &self,
+        bug_id: i64,
+        jira_key: &str,
+        jira_url: &str,
+        issue_type: &str,
+        user_id: i64,
+    ) -> rusqlite::Result<i64> {
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<Option<JiraLink>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, bug_id, jira_key, jira_url, issue_type, created_by, created_at
+             FROM mantis_jira_links_table WHERE bug_id = ?1",
+        )?;
+        let mut rows = stmt.query(params![bug_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(JiraLink {
+                id: row.get(0)?,
+                bug_id: row.get(1)?,
+                jira_key: row.get(2)?,
+                jira_url: row.get(3)?,
+                issue_type: row.get(4)?,
+                created_by: row.get(5)?,
+                created_at: row.get(6)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let affected = conn.execute(
+            "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1",
+            params![bug_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn record_jira_push_success(
+        &self,
+        bug_id: i64,
+        jira_key: &str,
+        jira_url: &str,
+        issue_type: &str,
+        user_id: i64,
+        username: &str,
+    ) -> Result<(), String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // 1. Insert jira link
+        tx.execute(
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 2. Insert bugnote text & bugnote
+        let note_text = format!(
+            "Created Jira issue [{}]({}) by {}.",
+            jira_key, jira_url, username
+        );
+        tx.execute(
+            "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
+            params![note_text],
+        )
+        .map_err(|e| e.to_string())?;
+        let text_id = tx.last_insert_rowid();
+
+        tx.execute(
+            "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+             VALUES (?1, ?2, ?3, 10, ?4, ?4, 0, '', 0)",
+            params![bug_id, user_id, text_id, now],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 3. Update bug status to 30 (acknowledged) if currently 10
+        let current_status: i32 = tx
+            .query_row(
+                "SELECT status FROM mantis_bug_table WHERE id = ?1",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        if current_status == 10 {
+            tx.execute(
+                "UPDATE mantis_bug_table SET status = 30, last_updated = ?1 WHERE id = ?2",
+                params![now, bug_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+            tx.execute(
+                "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
+                 VALUES (?1, ?2, ?3, 'status', '10', '30', 0)",
+                params![user_id, bug_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_jira_config(&self, project_id: i64) -> rusqlite::Result<JiraResolvedConfig> {
+        let enabled_val = self
+            .get_config("jira_enabled", 0, 0)?
+            .unwrap_or_else(|| "0".to_string());
+        let enabled = enabled_val == "1" || enabled_val.eq_ignore_ascii_case("true");
+        let base_url = self.get_config("jira_base_url", 0, 0)?.unwrap_or_default();
+        let email = self.get_config("jira_email", 0, 0)?.unwrap_or_default();
+        let api_token = self.get_config("jira_api_token", 0, 0)?.unwrap_or_default();
+        let default_issue_type = self
+            .get_config("jira_default_issue_type", 0, 0)?
+            .unwrap_or_else(|| "Bug".to_string());
+        let default_project_key = self
+            .get_config("jira_default_project_key", 0, 0)?
+            .unwrap_or_default();
+
+        let mut project_key = String::new();
+        if project_id > 0 {
+            if let Some(pk) = self.get_config("jira_project_key", project_id, 0)? {
+                project_key = pk;
+            }
+        }
+        if project_key.is_empty() {
+            project_key = default_project_key;
+        }
+
+        Ok(JiraResolvedConfig {
+            enabled,
+            base_url,
+            email,
+            api_token,
+            default_issue_type,
+            project_key,
+        })
+    }
+
+    pub fn save_jira_global_config(
+        &self,
+        enabled: bool,
+        base_url: &str,
+        email: &str,
+        api_token: Option<&str>,
+        default_issue_type: &str,
+        default_project_key: &str,
+    ) -> rusqlite::Result<()> {
+        self.set_config("jira_enabled", 0, 0, if enabled { "1" } else { "0" })?;
+        self.set_config("jira_base_url", 0, 0, base_url)?;
+        self.set_config("jira_email", 0, 0, email)?;
+        if let Some(tok) = api_token {
+            if !tok.is_empty() {
+                self.set_config("jira_api_token", 0, 0, tok)?;
+            }
+        }
+        self.set_config("jira_default_issue_type", 0, 0, default_issue_type)?;
+        self.set_config("jira_default_project_key", 0, 0, default_project_key)?;
+        Ok(())
+    }
+
+    pub fn set_jira_project_mapping(
+        &self,
+        project_id: i64,
+        jira_project_key: &str,
+    ) -> rusqlite::Result<()> {
+        self.set_config("jira_project_key", project_id, 0, jira_project_key)
+    }
 }
 
 #[cfg(test)]
@@ -5162,5 +5367,103 @@ mod tests {
                 .as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn test_jira_links_crud() {
+        let db = Db::open_in_memory().unwrap();
+        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+        let project_id = db
+            .create_project("Jira Project", 10, 10, "Desc", false)
+            .unwrap();
+        let bug_id = db
+            .create_bug(
+                project_id, admin.id, 1, "Summary", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
+            )
+            .unwrap();
+
+        // Check initially none
+        assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
+
+        // Create link
+        let link_id = db
+            .create_jira_link(
+                bug_id,
+                "PROJ-101",
+                "https://jira.example.com/browse/PROJ-101",
+                "Bug",
+                admin.id,
+            )
+            .unwrap();
+        assert!(link_id > 0);
+
+        // Fetch link
+        let link = db
+            .get_jira_link_by_bug_id(bug_id)
+            .unwrap()
+            .expect("link should exist");
+        assert_eq!(link.bug_id, bug_id);
+        assert_eq!(link.jira_key, "PROJ-101");
+        assert_eq!(link.jira_url, "https://jira.example.com/browse/PROJ-101");
+        assert_eq!(link.issue_type, "Bug");
+        assert_eq!(link.created_by, admin.id);
+
+        // Duplicate create fails
+        assert!(db
+            .create_jira_link(
+                bug_id,
+                "PROJ-102",
+                "https://jira.example.com/browse/PROJ-102",
+                "Task",
+                admin.id
+            )
+            .is_err());
+
+        // Delete link
+        let deleted = db.delete_jira_link_by_bug_id(bug_id).unwrap();
+        assert!(deleted);
+        assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_jira_config_resolution() {
+        let db = Db::open_in_memory().unwrap();
+        let project_id = db
+            .create_project("Test Project", 10, 10, "Desc", false)
+            .unwrap();
+
+        // Initially disabled with defaults
+        let conf = db.get_jira_config(project_id).unwrap();
+        assert!(!conf.enabled);
+        assert_eq!(conf.default_issue_type, "Bug");
+
+        // Save global config
+        db.save_jira_global_config(
+            true,
+            "https://test.atlassian.net",
+            "bot@test.com",
+            Some("secret-token"),
+            "Task",
+            "DEFAULT_PROJ",
+        )
+        .unwrap();
+
+        let conf2 = db.get_jira_config(project_id).unwrap();
+        assert!(conf2.enabled);
+        assert_eq!(conf2.base_url, "https://test.atlassian.net");
+        assert_eq!(conf2.email, "bot@test.com");
+        assert_eq!(conf2.api_token, "secret-token");
+        assert_eq!(conf2.default_issue_type, "Task");
+        assert_eq!(conf2.project_key, "DEFAULT_PROJ");
+
+        // Override project key for specific project
+        db.set_jira_project_mapping(project_id, "SPECIFIC_PROJ")
+            .unwrap();
+        let conf3 = db.get_jira_config(project_id).unwrap();
+        assert_eq!(conf3.project_key, "SPECIFIC_PROJ");
+
+        // Another project falls back to default
+        let conf_other = db.get_jira_config(9999).unwrap();
+        assert_eq!(conf_other.project_key, "DEFAULT_PROJ");
     }
 }

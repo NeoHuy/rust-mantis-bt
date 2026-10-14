@@ -90,7 +90,7 @@ async fn test_custom_fields_tags_monitors_and_my_view() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/manage_custom_field_proj_add/{}", cf_id))
+                .uri(format!("/manage_custom_field_proj_add/{}", cf_id))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!("project_id={}&sequence=1", proj_id)))
@@ -127,7 +127,7 @@ async fn test_custom_fields_tags_monitors_and_my_view() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_tag_attach/{}", bug_id))
+                .uri(format!("/bug_tag_attach/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("tag_string=safari,+frontend"))
@@ -143,7 +143,7 @@ async fn test_custom_fields_tags_monitors_and_my_view() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_monitor_add/{}", bug_id))
+                .uri(format!("/bug_monitor_add/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -157,7 +157,7 @@ async fn test_custom_fields_tags_monitors_and_my_view() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/view_bug_page/{}", bug_id))
+                .uri(format!("/view_bug_page/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -280,7 +280,9 @@ async fn test_search_saved_filters_and_csv_export_sanitization() {
                 .uri("/filter_save")
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("name=Deadlock+Filter&search=deadlock&is_public=1"))
+                .body(Body::from(
+                    "name=Deadlock+Filter&search=deadlock&is_public=1",
+                ))
                 .unwrap(),
         )
         .await
@@ -292,7 +294,7 @@ async fn test_search_saved_filters_and_csv_export_sanitization() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/view_all_bug_page?filter_id={}", fid))
+                .uri(format!("/view_all_bug_page?filter_id={}", fid))
                 .header("cookie", &full_cookie)
                 .body(Body::empty())
                 .unwrap(),

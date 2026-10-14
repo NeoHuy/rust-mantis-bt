@@ -166,13 +166,40 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
 
     let bug_id = db
         .create_bug(
-            proj_id, 1, 1, "Initial Summary", "Initial Desc", "", "", 30, 50, 70, "", "", "", "",
+            proj_id,
+            1,
+            1,
+            "Initial Summary",
+            "Initial Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
             10,
         )
         .unwrap();
     let bug2_id = db
         .create_bug(
-            proj_id, 1, 1, "Second Bug", "Desc 2", "", "", 30, 50, 70, "", "", "", "", 10,
+            proj_id,
+            1,
+            1,
+            "Second Bug",
+            "Desc 2",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
         )
         .unwrap();
 
@@ -182,7 +209,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/update_bug/{}", bug_id))
+                .uri(format!("/update_bug/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
@@ -200,7 +227,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_change_status/{}", bug_id))
+                .uri(format!("/bug_change_status/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("new_status=80&resolution=20&note=Fixed"))
@@ -216,7 +243,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bugnote_add/{}", bug_id))
+                .uri(format!("/bugnote_add/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("note=Test+note&view_state=10"))
@@ -232,7 +259,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_relationship_add/{}", bug2_id))
+                .uri(format!("/bug_relationship_add/{}", bug2_id))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -256,7 +283,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_file_add/{}", bug_id))
+                .uri(format!("/bug_file_add/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .header(
                     "content-type",
@@ -274,7 +301,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/view_bug_page/{}", bug_id))
+                .uri(format!("/view_bug_page/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -300,7 +327,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/file/bug/{}/test.txt", files[0].id))
+                .uri(format!("/file/bug/{}/test.txt", files[0].id))
                 .header("cookie", &full_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -319,7 +346,7 @@ async fn test_bug_workflow_actions_notes_relationships_attachments() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_delete/{}", bug_id))
+                .uri(format!("/bug_delete/{}", bug_id))
                 .header("cookie", &full_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -346,18 +373,48 @@ async fn test_private_bug_visibility_and_access_control() {
 
     let pub_bug = db
         .create_bug(
-            proj_id, rep_id, 1, "Public Issue", "Pub", "", "", 30, 50, 70, "", "", "", "", 10,
+            proj_id,
+            rep_id,
+            1,
+            "Public Issue",
+            "Pub",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
         )
         .unwrap();
     let priv_bug = db
         .create_bug(
-            proj_id, dev_id, 1, "Classified Issue", "Priv", "", "", 30, 50, 70, "", "", "", "", 50,
+            proj_id,
+            dev_id,
+            1,
+            "Classified Issue",
+            "Priv",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            50,
         )
         .unwrap();
 
     let app = build_router(db.clone());
-    let viewer_cookie = set_project_cookie(&app, &login_as(&app, "viewer", "pw").await, proj_id).await;
-    let rep_cookie = set_project_cookie(&app, &login_as(&app, "reporter", "pw").await, proj_id).await;
+    let viewer_cookie =
+        set_project_cookie(&app, &login_as(&app, "viewer", "pw").await, proj_id).await;
+    let rep_cookie =
+        set_project_cookie(&app, &login_as(&app, "reporter", "pw").await, proj_id).await;
     let dev_cookie = set_project_cookie(&app, &login_as(&app, "dev", "pw").await, proj_id).await;
 
     // Viewer sees public bug in list, NOT private bug
@@ -387,7 +444,7 @@ async fn test_private_bug_visibility_and_access_control() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/view_bug_page/{}", priv_bug))
+                .uri(format!("/view_bug_page/{}", priv_bug))
                 .header("cookie", &viewer_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -401,7 +458,7 @@ async fn test_private_bug_visibility_and_access_control() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/view_bug_page/{}", priv_bug))
+                .uri(format!("/view_bug_page/{}", priv_bug))
                 .header("cookie", &dev_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -416,7 +473,7 @@ async fn test_private_bug_visibility_and_access_control() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_change_status/{}", pub_bug))
+                .uri(format!("/bug_change_status/{}", pub_bug))
                 .header("cookie", &rep_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("new_status=90&resolution=20"))
@@ -431,7 +488,7 @@ async fn test_private_bug_visibility_and_access_control() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_delete/{}", pub_bug))
+                .uri(format!("/bug_delete/{}", pub_bug))
                 .header("cookie", &rep_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -466,7 +523,7 @@ async fn test_file_size_limit_and_remaining_actions() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_assign/{}", bug1))
+                .uri(format!("/bug_assign/{}", bug1))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("handler_id=1"))
@@ -484,7 +541,7 @@ async fn test_file_size_limit_and_remaining_actions() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_change_status/{}", bug1))
+                .uri(format!("/bug_change_status/{}", bug1))
                 .header("cookie", &full_cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from("new_status=80&resolution=20"))
@@ -509,7 +566,7 @@ async fn test_file_size_limit_and_remaining_actions() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_relationship_delete/{}", rel_id))
+                .uri(format!("/bug_relationship_delete/{}", rel_id))
                 .header("cookie", &full_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -536,7 +593,7 @@ async fn test_file_size_limit_and_remaining_actions() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/bug_file_add/{}", bug1))
+                .uri(format!("/bug_file_add/{}", bug1))
                 .header("cookie", &full_cookie)
                 .header(
                     "content-type",
@@ -550,4 +607,3 @@ async fn test_file_size_limit_and_remaining_actions() {
     assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(db.list_bug_files(bug1).unwrap().is_empty());
 }
-

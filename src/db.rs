@@ -486,7 +486,10 @@ impl Db {
     }
 
     pub fn authenticate(&self, username: &str, password: &str) -> Result<Option<User>, String> {
-        let user = match self.get_user_by_username(username).map_err(|e| e.to_string())? {
+        let user = match self
+            .get_user_by_username(username)
+            .map_err(|e| e.to_string())?
+        {
             Some(u) => u,
             None => return Ok(None),
         };
@@ -516,7 +519,8 @@ impl Db {
                  SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1
                  WHERE id = ?2",
                 params![now, user.id],
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         let mut updated = user;
@@ -526,7 +530,11 @@ impl Db {
         Ok(Some(updated))
     }
 
-    pub fn list_users(&self, search: Option<&str>, enabled_only: bool) -> rusqlite::Result<Vec<User>> {
+    pub fn list_users(
+        &self,
+        search: Option<&str>,
+        enabled_only: bool,
+    ) -> rusqlite::Result<Vec<User>> {
         let conn = self.conn();
         let mut sql = "SELECT id, username, realname, email, password, enabled, protected, access_level,
                               login_count, lost_password_request_count, failed_login_count, cookie_string,
@@ -559,7 +567,8 @@ impl Db {
         sql.push_str(" ORDER BY username ASC");
 
         let mut stmt = conn.prepare(&sql)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             Ok(User {
                 id: row.get(0)?,
@@ -625,7 +634,8 @@ impl Db {
                 cookie,
                 now,
             ],
-        ).map_err(|e| e.to_string())?;
+        )
+        .map_err(|e| e.to_string())?;
 
         Ok(conn.last_insert_rowid())
     }
@@ -648,7 +658,9 @@ impl Db {
         };
 
         // Guard: Protected user cannot have password or access_level changed
-        if existing.protected == 1 && (new_password.is_some() || access_level != existing.access_level) {
+        if existing.protected == 1
+            && (new_password.is_some() || access_level != existing.access_level)
+        {
             return Err("Cannot modify password or access level of a protected user".to_string());
         }
 
@@ -683,8 +695,16 @@ impl Db {
                 "UPDATE mantis_user_table
                  SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5
                  WHERE id = ?6",
-                params![realname, email, access_level, enabled_val, protected_val, id],
-            ).map_err(|e| e.to_string())?;
+                params![
+                    realname,
+                    email,
+                    access_level,
+                    enabled_val,
+                    protected_val,
+                    id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         Ok(())
@@ -744,12 +764,7 @@ impl Db {
             }
         };
 
-        let candidates = [
-            (project_id, user_id),
-            (0, user_id),
-            (project_id, 0),
-            (0, 0),
-        ];
+        let candidates = [(project_id, user_id), (0, user_id), (project_id, 0), (0, 0)];
 
         let mut seen = HashSet::new();
         for (p, u) in candidates {
@@ -894,26 +909,43 @@ impl Db {
         };
         let _ = existing;
 
-        conn.execute("DELETE FROM mantis_category_table WHERE project_id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM mantis_category_table WHERE project_id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
 
-        conn.execute("DELETE FROM mantis_project_table WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM mantis_project_table WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
 
         Ok(())
     }
 
-    pub fn add_subproject(&self, parent_id: i64, child_id: i64, inherit_parent: bool) -> Result<(), String> {
+    pub fn add_subproject(
+        &self,
+        parent_id: i64,
+        child_id: i64,
+        inherit_parent: bool,
+    ) -> Result<(), String> {
         let conn = self.conn();
 
         if parent_id == child_id {
             return Err("Cyclic project hierarchy detected".to_string());
         }
 
-        if Self::query_project_by_id(&conn, parent_id).map_err(|e| e.to_string())?.is_none() {
+        if Self::query_project_by_id(&conn, parent_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err(format!("Project {} not found", parent_id));
         }
-        if Self::query_project_by_id(&conn, child_id).map_err(|e| e.to_string())?.is_none() {
+        if Self::query_project_by_id(&conn, child_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err(format!("Project {} not found", child_id));
         }
 
@@ -962,12 +994,23 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_project_user(&self, project_id: i64, user_id: i64, access_level: i32) -> Result<(), String> {
+    pub fn set_project_user(
+        &self,
+        project_id: i64,
+        user_id: i64,
+        access_level: i32,
+    ) -> Result<(), String> {
         let conn = self.conn();
-        if Self::query_project_by_id(&conn, project_id).map_err(|e| e.to_string())?.is_none() {
+        if Self::query_project_by_id(&conn, project_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err(format!("Project {} not found", project_id));
         }
-        if Self::query_user_by_id(&conn, user_id).map_err(|e| e.to_string())?.is_none() {
+        if Self::query_user_by_id(&conn, user_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err(format!("User {} not found", user_id));
         }
 
@@ -1090,9 +1133,8 @@ impl Db {
         let conn = self.conn();
 
         // 3. Project status & enabled check
-        let mut stmt = conn.prepare(
-            "SELECT enabled, view_state FROM mantis_project_table WHERE id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT enabled, view_state FROM mantis_project_table WHERE id = ?1")?;
         let mut rows = stmt.query(params![project_id])?;
         let (enabled, view_state) = match rows.next()? {
             Some(row) => (row.get::<_, i32>(0)?, row.get::<_, i32>(1)?),
@@ -1165,10 +1207,10 @@ impl Db {
         // Query hierarchy links between visible projects
         let hierarchy_links: Vec<(i64, i64)> = {
             let conn = self.conn();
-            let mut stmt = conn.prepare("SELECT child_id, parent_id FROM mantis_project_hierarchy_table")?;
-            let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
+            let mut stmt =
+                conn.prepare("SELECT child_id, parent_id FROM mantis_project_hierarchy_table")?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
             let mut links = Vec::new();
             for r in rows {
                 let (child, parent) = r?;
@@ -1223,7 +1265,14 @@ impl Db {
             }
             if let Some(children) = children_map.get(&curr_id) {
                 for &child_id in children {
-                    dfs(child_id, depth + 1, visible_map, children_map, visited, result);
+                    dfs(
+                        child_id,
+                        depth + 1,
+                        visible_map,
+                        children_map,
+                        visited,
+                        result,
+                    );
                 }
             }
         }
@@ -1232,7 +1281,14 @@ impl Db {
         let mut result = Vec::new();
 
         for root_id in roots {
-            dfs(root_id, 0, &visible_map, &children_map, &mut visited, &mut result);
+            dfs(
+                root_id,
+                0,
+                &visible_map,
+                &children_map,
+                &mut visited,
+                &mut result,
+            );
         }
 
         // Cycle fallback: any remaining unvisited visible projects
@@ -1247,7 +1303,14 @@ impl Db {
             name_a.cmp(name_b)
         });
         for id in remaining {
-            dfs(id, 0, &visible_map, &children_map, &mut visited, &mut result);
+            dfs(
+                id,
+                0,
+                &visible_map,
+                &children_map,
+                &mut visited,
+                &mut result,
+            );
         }
 
         Ok(result)
@@ -1260,7 +1323,11 @@ impl Db {
         }
 
         let conn = self.conn();
-        if project_id != 0 && Self::query_project_by_id(&conn, project_id).map_err(|e| e.to_string())?.is_none() {
+        if project_id != 0
+            && Self::query_project_by_id(&conn, project_id)
+                .map_err(|e| e.to_string())?
+                .is_none()
+        {
             return Err(format!("Project {} not found", project_id));
         }
 
@@ -1318,8 +1385,11 @@ impl Db {
             return Err(format!("Category {} not found", id));
         }
 
-        conn.execute("DELETE FROM mantis_category_table WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM mantis_category_table WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -1482,7 +1552,10 @@ impl Db {
         }
 
         let conn = self.conn();
-        if Self::query_project_by_id(&conn, project_id).map_err(|e| e.to_string())?.is_none() {
+        if Self::query_project_by_id(&conn, project_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
             return Err(format!("Project {} not found", project_id));
         }
 
@@ -1567,8 +1640,11 @@ impl Db {
             return Err(format!("Version {} not found", id));
         }
 
-        conn.execute("DELETE FROM mantis_project_version_table WHERE id = ?1", params![id])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM mantis_project_version_table WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -1753,7 +1829,12 @@ impl Db {
             "INSERT INTO mantis_bug_text_table (
                 id, description, steps_to_reproduce, additional_information
             ) VALUES (?1, ?2, ?3, ?4)",
-            params![bug_id, description, steps_to_reproduce, additional_information],
+            params![
+                bug_id,
+                description,
+                steps_to_reproduce,
+                additional_information
+            ],
         )
         .map_err(|e| e.to_string())?;
 
@@ -1764,7 +1845,10 @@ impl Db {
             bug_id,
             reporter_id,
             &format!("[Issue #{:07}] New: {}", bug_id, trimmed_summary),
-            &format!("Issue #{:07} reported: {}\n\n{}", bug_id, trimmed_summary, description),
+            &format!(
+                "Issue #{:07} reported: {}\n\n{}",
+                bug_id, trimmed_summary, description
+            ),
         );
 
         Ok(bug_id)
@@ -2098,9 +2182,7 @@ impl Db {
 
         // Closed bug (status == 90) can only transition to feedback (20) to reopen
         if bug.status == 90 && new_status != 20 && new_status != 90 {
-            return Err(
-                "Closed bug can only be reopened to feedback (status 20)".to_string(),
-            );
+            return Err("Closed bug can only be reopened to feedback (status 20)".to_string());
         }
 
         let now = std::time::SystemTime::now()
@@ -2672,8 +2754,16 @@ impl Db {
 
         let file_id = conn.last_insert_rowid();
 
-        self.record_history(&conn, bug_id, user_id, "file_added", "", trimmed_filename, 2)
-            .map_err(|e| e.to_string())?;
+        self.record_history(
+            &conn,
+            bug_id,
+            user_id,
+            "file_added",
+            "",
+            trimmed_filename,
+            2,
+        )
+        .map_err(|e| e.to_string())?;
 
         Ok(file_id)
     }
@@ -2946,12 +3036,7 @@ impl Db {
         rows.collect()
     }
 
-    pub fn attach_tag_to_bug(
-        &self,
-        bug_id: i64,
-        tag_id: i64,
-        user_id: i64,
-    ) -> Result<(), String> {
+    pub fn attach_tag_to_bug(&self, bug_id: i64, tag_id: i64, user_id: i64) -> Result<(), String> {
         let conn = self.conn();
         if Self::query_bug_by_id(&conn, bug_id)
             .map_err(|e| e.to_string())?
@@ -3449,7 +3534,10 @@ impl Db {
 
     pub fn delete_filter(&self, id: i64) -> rusqlite::Result<()> {
         let conn = self.conn();
-        conn.execute("DELETE FROM mantis_filters_table WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM mantis_filters_table WHERE id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -4007,7 +4095,10 @@ impl Db {
             )
             .map_err(|_| format!("Plugin '{}' not found", basename))?;
         if protected != 0 && !enabled {
-            return Err(format!("Protected plugin '{}' cannot be disabled", basename));
+            return Err(format!(
+                "Protected plugin '{}' cannot be disabled",
+                basename
+            ));
         }
         conn.execute(
             "UPDATE mantis_plugin_table SET enabled = ?1 WHERE basename = ?2",
@@ -4291,10 +4382,7 @@ mod tests {
             db.get_config("language", 10, 20).unwrap().as_deref(),
             Some("french")
         );
-        assert_eq!(
-            db.get_config("language", 10, 30).unwrap().as_deref(),
-            None
-        );
+        assert_eq!(db.get_config("language", 10, 30).unwrap().as_deref(), None);
     }
 
     #[test]
@@ -4373,11 +4461,19 @@ mod tests {
     #[test]
     fn test_effective_access_and_private_projects() {
         let db = Db::open_in_memory().unwrap();
-        let pub_id = db.create_project("PublicProj", 10, 10, "desc", true).unwrap();
-        let priv_id = db.create_project("PrivateProj", 10, 50, "desc", true).unwrap();
+        let pub_id = db
+            .create_project("PublicProj", 10, 10, "desc", true)
+            .unwrap();
+        let priv_id = db
+            .create_project("PrivateProj", 10, 50, "desc", true)
+            .unwrap();
 
-        let rep_id = db.create_user("alice", "Alice", "a@x.com", "pw", 25, true, false).unwrap();
-        let mgr_id = db.create_user("bob", "Bob", "b@x.com", "pw", 70, true, false).unwrap();
+        let rep_id = db
+            .create_user("alice", "Alice", "a@x.com", "pw", 25, true, false)
+            .unwrap();
+        let mgr_id = db
+            .create_user("bob", "Bob", "b@x.com", "pw", 70, true, false)
+            .unwrap();
         let alice = db.get_user_by_id(rep_id).unwrap().unwrap();
         let bob = db.get_user_by_id(mgr_id).unwrap().unwrap();
 
@@ -4390,7 +4486,8 @@ mod tests {
         assert_eq!(db.effective_access_level(&alice, priv_id).unwrap(), 55);
 
         // Disabled project returns 0 even with explicit override
-        db.update_project(priv_id, "PrivateProj", 10, false, 50, "desc", true).unwrap();
+        db.update_project(priv_id, "PrivateProj", 10, false, 50, "desc", true)
+            .unwrap();
         assert_eq!(db.effective_access_level(&alice, priv_id).unwrap(), 0);
         assert_eq!(db.effective_access_level(&bob, priv_id).unwrap(), 0);
     }
@@ -4425,11 +4522,15 @@ mod tests {
         assert!(db.create_project("  ", 10, 10, "desc", true).is_err());
 
         // Create project successfully
-        let pid = db.create_project("Project Alpha", 10, 10, "First project", true).unwrap();
+        let pid = db
+            .create_project("Project Alpha", 10, 10, "First project", true)
+            .unwrap();
         assert!(pid > 0);
 
         // Duplicate name fails
-        assert!(db.create_project("Project Alpha", 10, 10, "Duplicate", true).is_err());
+        assert!(db
+            .create_project("Project Alpha", 10, 10, "Duplicate", true)
+            .is_err());
 
         // Get by ID
         let proj = db.get_project_by_id(pid).unwrap().unwrap();
@@ -4442,7 +4543,17 @@ mod tests {
         assert_eq!(proj.inherit_global, 1);
 
         // Update project
-        assert!(db.update_project(pid, "Project Alpha Updated", 30, false, 50, "Updated desc", false).is_ok());
+        assert!(db
+            .update_project(
+                pid,
+                "Project Alpha Updated",
+                30,
+                false,
+                50,
+                "Updated desc",
+                false
+            )
+            .is_ok());
         let updated = db.get_project_by_id(pid).unwrap().unwrap();
         assert_eq!(updated.name, "Project Alpha Updated");
         assert_eq!(updated.status, 30);
@@ -4452,7 +4563,9 @@ mod tests {
         assert_eq!(updated.inherit_global, 0);
 
         // Update nonexistent project fails
-        assert!(db.update_project(9999, "Nonexistent", 10, true, 10, "", true).is_err());
+        assert!(db
+            .update_project(9999, "Nonexistent", 10, true, 10, "", true)
+            .is_err());
         // Update with empty name fails
         assert!(db.update_project(pid, "", 10, true, 10, "", true).is_err());
 
@@ -4500,7 +4613,9 @@ mod tests {
     fn test_project_user_management_and_overrides() {
         let db = Db::open_in_memory().unwrap();
         let pid = db.create_project("SecuredProj", 10, 50, "", true).unwrap();
-        let uid = db.create_user("charlie", "Charlie", "c@x.com", "pw", 10, true, false).unwrap();
+        let uid = db
+            .create_user("charlie", "Charlie", "c@x.com", "pw", 10, true, false)
+            .unwrap();
         let user = db.get_user_by_id(uid).unwrap().unwrap();
 
         // Initially Viewer (10) has no access to private project
@@ -4529,12 +4644,17 @@ mod tests {
         let pub_id = db.create_project("Pub", 10, 10, "", true).unwrap();
         let priv_id = db.create_project("Priv", 10, 50, "", true).unwrap();
         let disabled_id = db.create_project("Disabled", 10, 10, "", true).unwrap();
-        db.update_project(disabled_id, "Disabled", 10, false, 10, "", true).unwrap();
+        db.update_project(disabled_id, "Disabled", 10, false, 10, "", true)
+            .unwrap();
 
         let admin = db.get_user_by_username("administrator").unwrap().unwrap();
-        let dev_id = db.create_user("dev", "Dev", "d@x.com", "pw", 55, true, false).unwrap();
+        let dev_id = db
+            .create_user("dev", "Dev", "d@x.com", "pw", 55, true, false)
+            .unwrap();
         let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
-        let mgr_id = db.create_user("mgr", "Mgr", "m@x.com", "pw", 70, true, false).unwrap();
+        let mgr_id = db
+            .create_user("mgr", "Mgr", "m@x.com", "pw", 70, true, false)
+            .unwrap();
         let mgr = db.get_user_by_id(mgr_id).unwrap().unwrap();
 
         // Rule 1: project_id == 0 returns user.access_level
@@ -4555,7 +4675,10 @@ mod tests {
         assert_eq!(db.effective_access_level(&dev, 99999).unwrap(), 0);
 
         // auth module wrapper
-        assert_eq!(crate::auth::effective_access_level(&db, &dev, pub_id).unwrap(), 55);
+        assert_eq!(
+            crate::auth::effective_access_level(&db, &dev, pub_id).unwrap(),
+            55
+        );
     }
 
     #[test]
@@ -4569,19 +4692,26 @@ mod tests {
         //   -> P_PrivateSub (Public)
         let p_parent = db.create_project("Proj Parent", 10, 10, "", true).unwrap();
         let p_child = db.create_project("Proj Child", 10, 10, "", true).unwrap();
-        let p_grandchild = db.create_project("Proj Grandchild", 10, 10, "", true).unwrap();
+        let p_grandchild = db
+            .create_project("Proj Grandchild", 10, 10, "", true)
+            .unwrap();
         db.add_subproject(p_parent, p_child, true).unwrap();
         db.add_subproject(p_child, p_grandchild, true).unwrap();
 
         let p_priv = db.create_project("Proj Priv", 10, 50, "", true).unwrap();
-        let p_priv_sub = db.create_project("Proj Priv Sub", 10, 10, "", true).unwrap();
+        let p_priv_sub = db
+            .create_project("Proj Priv Sub", 10, 10, "", true)
+            .unwrap();
         db.add_subproject(p_priv, p_priv_sub, true).unwrap();
 
-        let rep_id = db.create_user("rep", "Rep", "r@x.com", "pw", 25, true, false).unwrap();
+        let rep_id = db
+            .create_user("rep", "Rep", "r@x.com", "pw", 25, true, false)
+            .unwrap();
         let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
 
         let visible = db.list_visible_projects(&rep).unwrap();
-        let vis_tuples: Vec<(&str, usize)> = visible.iter().map(|(p, d)| (p.name.as_str(), *d)).collect();
+        let vis_tuples: Vec<(&str, usize)> =
+            visible.iter().map(|(p, d)| (p.name.as_str(), *d)).collect();
 
         // P_Parent (0) -> P_Child (1) -> P_Grandchild (2)
         // P_Priv is hidden from rep, so P_Priv_Sub becomes root (depth 0)
@@ -4594,7 +4724,10 @@ mod tests {
         // Admin sees all, including P_Priv at depth 0 and P_Priv_Sub at depth 1
         let admin = db.get_user_by_username("administrator").unwrap().unwrap();
         let admin_visible = db.list_visible_projects(&admin).unwrap();
-        let admin_tuples: Vec<(&str, usize)> = admin_visible.iter().map(|(p, d)| (p.name.as_str(), *d)).collect();
+        let admin_tuples: Vec<(&str, usize)> = admin_visible
+            .iter()
+            .map(|(p, d)| (p.name.as_str(), *d))
+            .collect();
         assert!(admin_tuples.contains(&("Proj Priv", 0)));
         assert!(admin_tuples.contains(&("Proj Priv Sub", 1)));
     }
@@ -4634,8 +4767,12 @@ mod tests {
         assert!(db.add_version(pid, "   ", "desc", true, false).is_err());
 
         // Add versions
-        let v1 = db.add_version(pid, "1.0.0", "First release", true, false).unwrap();
-        let v2 = db.add_version(pid, "2.0.0", "Major update", false, false).unwrap();
+        let v1 = db
+            .add_version(pid, "1.0.0", "First release", true, false)
+            .unwrap();
+        let v2 = db
+            .add_version(pid, "2.0.0", "Major update", false, false)
+            .unwrap();
         assert!(v1 > 0);
         assert!(v2 > 0);
 
@@ -4650,7 +4787,9 @@ mod tests {
         assert!(ver_names.contains(&"2.0.0"));
 
         // Update version
-        assert!(db.update_version(v2, "2.0.0-rc1", "Release candidate", true, false).is_ok());
+        assert!(db
+            .update_version(v2, "2.0.0-rc1", "Release candidate", true, false)
+            .is_ok());
         let updated_versions = db.list_versions(pid).unwrap();
         assert!(updated_versions.iter().any(|v| v.version == "2.0.0-rc1"));
 
@@ -4928,7 +5067,9 @@ mod tests {
             .unwrap();
 
         // 1. Tags
-        let tag_id = db.create_tag(uid, "memory", "Memory related issues").unwrap();
+        let tag_id = db
+            .create_tag(uid, "memory", "Memory related issues")
+            .unwrap();
         db.attach_tag_to_bug(b1, tag_id, uid).unwrap();
         let b1_tags = db.list_bug_tags(b1).unwrap();
         assert_eq!(b1_tags.len(), 1);
@@ -4966,9 +5107,9 @@ mod tests {
 
         // History recorded for custom field change
         let hist = db.list_bug_history(b1).unwrap();
-        assert!(hist
-            .iter()
-            .any(|h| h.field_name == "Environment URL" && h.new_value == "https://prod.example.com"));
+        assert!(hist.iter().any(
+            |h| h.field_name == "Environment URL" && h.new_value == "https://prod.example.com"
+        ));
 
         // 3. Monitors
         db.add_bug_monitor(b2, uid).unwrap();
@@ -5053,9 +5194,7 @@ mod tests {
                 false,
             )
             .unwrap();
-        let proj_id = db
-            .create_project("Core", 10, 10, "desc", true)
-            .unwrap();
+        let proj_id = db.create_project("Core", 10, 10, "desc", true).unwrap();
 
         // 1. Creating bug queues email to reporter (admin: root@localhost)
         let bug_id = db
@@ -5172,7 +5311,9 @@ mod tests {
         assert!(db.is_plugin_enabled("EventAuditLog"));
 
         // Protected plugin cannot be disabled
-        assert!(db.set_plugin_enabled("MantisCoreFormatting", false).is_err());
+        assert!(db
+            .set_plugin_enabled("MantisCoreFormatting", false)
+            .is_err());
 
         // EventAuditLog increments plugin_event_audit_count when enabled
         let proj_id = db.create_project("PluginProj", 10, 10, "", true).unwrap();
@@ -5305,5 +5446,3 @@ mod tests {
         assert_eq!(conf_other.project_key, "DEFAULT_PROJ");
     }
 }
-
-

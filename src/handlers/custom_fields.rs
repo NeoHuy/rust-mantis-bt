@@ -324,10 +324,26 @@ pub async fn manage_custom_field_edit_page(
         html_escape(&cf.default_value),
         cf.length_min,
         cf.length_max,
-        if cf.display_report != 0 { "checked" } else { "" },
-        if cf.display_update != 0 { "checked" } else { "" },
-        if cf.require_report != 0 { "checked" } else { "" },
-        if cf.require_update != 0 { "checked" } else { "" },
+        if cf.display_report != 0 {
+            "checked"
+        } else {
+            ""
+        },
+        if cf.display_update != 0 {
+            "checked"
+        } else {
+            ""
+        },
+        if cf.require_report != 0 {
+            "checked"
+        } else {
+            ""
+        },
+        if cf.require_update != 0 {
+            "checked"
+        } else {
+            ""
+        },
         cf.id,
         linked_rows,
         cf.id,
@@ -395,11 +411,7 @@ pub async fn manage_custom_field_proj_add(
         return forbidden(&ctx, "Administrator access required.");
     }
     let _ = db.link_custom_field_to_project(id, form.project_id, form.sequence.unwrap_or(0));
-    Redirect::to(&format!(
-        "/manage_custom_field_edit_page/{}?msg=Linked",
-        id
-    ))
-    .into_response()
+    Redirect::to(&format!("/manage_custom_field_edit_page/{}?msg=Linked", id)).into_response()
 }
 
 pub async fn manage_custom_field_proj_remove(

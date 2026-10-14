@@ -71,7 +71,12 @@ pub async fn manage_user_page(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                render_layout("Error", &ctx, Some(&e.to_string()), "<p>Error loading users.</p>"),
+                render_layout(
+                    "Error",
+                    &ctx,
+                    Some(&e.to_string()),
+                    "<p>Error loading users.</p>",
+                ),
             )
                 .into_response();
         }
@@ -287,14 +292,24 @@ pub async fn manage_user_edit_page(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                render_layout("User Not Found", &ctx, Some("User not found"), "<p>User not found.</p>"),
+                render_layout(
+                    "User Not Found",
+                    &ctx,
+                    Some("User not found"),
+                    "<p>User not found.</p>",
+                ),
             )
                 .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                render_layout("Error", &ctx, Some(&e.to_string()), "<p>Error loading user.</p>"),
+                render_layout(
+                    "Error",
+                    &ctx,
+                    Some(&e.to_string()),
+                    "<p>Error loading user.</p>",
+                ),
             )
                 .into_response();
         }
@@ -303,16 +318,30 @@ pub async fn manage_user_edit_page(
     let levels = [10, 25, 40, 55, 70, 90];
     let mut level_opts = String::new();
     for lvl in levels {
-        let name = AccessLevel::from_i32(lvl).map(|a| a.as_str()).unwrap_or("unknown");
-        let selected = if target_user.access_level == lvl { "selected" } else { "" };
+        let name = AccessLevel::from_i32(lvl)
+            .map(|a| a.as_str())
+            .unwrap_or("unknown");
+        let selected = if target_user.access_level == lvl {
+            "selected"
+        } else {
+            ""
+        };
         level_opts.push_str(&format!(
             r#"<option value="{}" {}>{} ({})</option>"#,
             lvl, selected, name, lvl
         ));
     }
 
-    let enabled_checked = if target_user.enabled == 1 { "checked" } else { "" };
-    let protected_checked = if target_user.protected == 1 { "checked" } else { "" };
+    let enabled_checked = if target_user.enabled == 1 {
+        "checked"
+    } else {
+        ""
+    };
+    let protected_checked = if target_user.protected == 1 {
+        "checked"
+    } else {
+        ""
+    };
 
     let delete_btn = if target_user.protected == 0 {
         format!(

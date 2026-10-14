@@ -1,0 +1,45 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.gitignore'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-and-test:
+    name: Lint, Format & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust & Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --verbose

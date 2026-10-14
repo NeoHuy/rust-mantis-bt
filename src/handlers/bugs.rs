@@ -65,15 +65,21 @@ fn not_found(ctx: &AuthContext, msg: &str) -> Response {
 }
 
 fn status_label(v: i32) -> &'static str {
-    BugStatus::from_i32(v).map(|s| s.as_str()).unwrap_or("unknown")
+    BugStatus::from_i32(v)
+        .map(|s| s.as_str())
+        .unwrap_or("unknown")
 }
 
 fn priority_label(v: i32) -> &'static str {
-    BugPriority::from_i32(v).map(|p| p.as_str()).unwrap_or("unknown")
+    BugPriority::from_i32(v)
+        .map(|p| p.as_str())
+        .unwrap_or("unknown")
 }
 
 fn severity_label(v: i32) -> &'static str {
-    BugSeverity::from_i32(v).map(|s| s.as_str()).unwrap_or("unknown")
+    BugSeverity::from_i32(v)
+        .map(|s| s.as_str())
+        .unwrap_or("unknown")
 }
 
 fn reproducibility_label(v: i32) -> &'static str {
@@ -117,11 +123,10 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         }
     }
 
-    let kw = q
-        .q
-        .clone()
-        .or_else(|| q.search.clone())
-        .filter(|s| !s.trim().is_empty());
+    let kw =
+        q.q.clone()
+            .or_else(|| q.search.clone())
+            .filter(|s| !s.trim().is_empty());
 
     BugFilter {
         project_id: if ctx.active_project_id > 0 {
@@ -271,7 +276,10 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         {}"#,
         render_my_view_box(
             "Assigned to Me (Unresolved)",
-            &format!("/view_all_bug_page?handler_id={}&hide_status=80", ctx.user.id),
+            &format!(
+                "/view_all_bug_page?handler_id={}&hide_status=80",
+                ctx.user.id
+            ),
             &assigned_to_me
         ),
         render_my_view_box(
@@ -285,7 +293,11 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
             &reported_by_me
         ),
         render_my_view_box("Resolved", "/view_all_bug_page?status=80", &resolved),
-        render_my_view_box("Recently Modified", "/view_all_bug_page", &recently_modified),
+        render_my_view_box(
+            "Recently Modified",
+            "/view_all_bug_page",
+            &recently_modified
+        ),
         render_my_view_box(
             "Monitored by Me",
             &format!("/view_all_bug_page?monitored_by={}", ctx.user.id),
@@ -865,10 +877,7 @@ pub async fn bug_report_page(
     let default_proj_id = if ctx.active_project_id > 0 {
         ctx.active_project_id
     } else {
-        ctx.visible_projects
-            .first()
-            .map(|(p, _)| p.id)
-            .unwrap_or(0)
+        ctx.visible_projects.first().map(|(p, _)| p.id).unwrap_or(0)
     };
 
     if default_proj_id > 0 {
@@ -1187,10 +1196,8 @@ pub async fn view_bug_page(
         .unwrap_or_else(|| "General".to_string());
 
     let users = db.list_users(None, false).unwrap_or_default();
-    let users_map: HashMap<i64, String> = users
-        .iter()
-        .map(|u| (u.id, u.username.clone()))
-        .collect();
+    let users_map: HashMap<i64, String> =
+        users.iter().map(|u| (u.id, u.username.clone())).collect();
 
     let reporter_name = users_map
         .get(&bug.reporter_id)
@@ -1996,12 +2003,36 @@ pub async fn update_bug_page(
         if bug.severity == 60 { "selected" } else { "" },
         if bug.severity == 70 { "selected" } else { "" },
         if bug.severity == 80 { "selected" } else { "" },
-        if bug.reproducibility == 10 { "selected" } else { "" },
-        if bug.reproducibility == 30 { "selected" } else { "" },
-        if bug.reproducibility == 50 { "selected" } else { "" },
-        if bug.reproducibility == 70 { "selected" } else { "" },
-        if bug.reproducibility == 90 { "selected" } else { "" },
-        if bug.reproducibility == 100 { "selected" } else { "" },
+        if bug.reproducibility == 10 {
+            "selected"
+        } else {
+            ""
+        },
+        if bug.reproducibility == 30 {
+            "selected"
+        } else {
+            ""
+        },
+        if bug.reproducibility == 50 {
+            "selected"
+        } else {
+            ""
+        },
+        if bug.reproducibility == 70 {
+            "selected"
+        } else {
+            ""
+        },
+        if bug.reproducibility == 90 {
+            "selected"
+        } else {
+            ""
+        },
+        if bug.reproducibility == 100 {
+            "selected"
+        } else {
+            ""
+        },
         html_escape(&bug.version),
         html_escape(&bug.fixed_in_version),
         html_escape(&bug.target_version),
@@ -2014,7 +2045,13 @@ pub async fn update_bug_page(
         cf_rows_html
     );
 
-    render_layout(&format!("Update Issue #{:07}", bug.id), &ctx, None, &content).into_response()
+    render_layout(
+        &format!("Update Issue #{:07}", bug.id),
+        &ctx,
+        None,
+        &content,
+    )
+    .into_response()
 }
 
 pub async fn update_bug(
@@ -2072,7 +2109,10 @@ pub async fn update_bug(
             for cf in &custom_fields {
                 let key = format!("custom_field_{}", cf.id);
                 if let Some(val) = form.get(&key) {
-                    if db.set_custom_field_value(cf.id, id, ctx.user.id, val).is_err() {
+                    if db
+                        .set_custom_field_value(cf.id, id, ctx.user.id, val)
+                        .is_err()
+                    {
                         return Redirect::to(&format!(
                             "/view_bug_page/{}?err=Invalid+custom+field",
                             id
@@ -2120,11 +2160,7 @@ pub async fn bug_monitor_delete(
     .into_response()
 }
 
-pub async fn bug_delete(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-) -> Response {
+pub async fn bug_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {
     let bug = match db.get_bug(id) {
         Ok(Some(b)) => b,
         _ => return not_found(&ctx, "Issue not found."),
@@ -2189,7 +2225,9 @@ pub async fn bug_change_status(
         resolution,
         form.note.as_deref(),
     ) {
-        Ok(()) => Redirect::to(&format!("/view_bug_page/{}?msg=Status+updated", id)).into_response(),
+        Ok(()) => {
+            Redirect::to(&format!("/view_bug_page/{}?msg=Status+updated", id)).into_response()
+        }
         Err(_) => Redirect::to(&format!(
             "/view_bug_page/{}?err=Invalid+status+transition",
             id
@@ -2222,7 +2260,9 @@ pub async fn bug_assign(
     }
 
     match db.assign_bug(id, ctx.user.id, form.handler_id) {
-        Ok(()) => Redirect::to(&format!("/view_bug_page/{}?msg=Issue+assigned", id)).into_response(),
+        Ok(()) => {
+            Redirect::to(&format!("/view_bug_page/{}?msg=Issue+assigned", id)).into_response()
+        }
         Err(_) => Redirect::to(&format!("/view_bug_page/{}?err=Failed+to+assign+issue", id))
             .into_response(),
     }
@@ -2342,11 +2382,8 @@ pub async fn bug_relationship_add(
     }
 
     match db.add_bug_relationship(bug_id, form.dest_bug_id, form.relationship_type) {
-        Ok(()) => Redirect::to(&format!(
-            "/view_bug_page/{}?msg=Relationship+added",
-            bug_id
-        ))
-        .into_response(),
+        Ok(()) => Redirect::to(&format!("/view_bug_page/{}?msg=Relationship+added", bug_id))
+            .into_response(),
         Err(_) => Redirect::to(&format!(
             "/view_bug_page/{}?err=Failed+to+add+relationship",
             bug_id
@@ -2405,16 +2442,13 @@ fn parse_multipart_file(headers: &HeaderMap, body: &[u8]) -> Option<(String, Str
         .or_else(|| after_boundary.strip_prefix(b"\n"))?;
 
     // Find end of part headers (\r\n\r\n or \n\n)
-    let (part_headers_bytes, rest) = if let Some(pos) = after_boundary
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-    {
-        (&after_boundary[..pos], &after_boundary[pos + 4..])
-    } else if let Some(pos) = after_boundary.windows(2).position(|w| w == b"\n\n") {
-        (&after_boundary[..pos], &after_boundary[pos + 2..])
-    } else {
-        return None;
-    };
+    let (part_headers_bytes, rest) =
+        if let Some(pos) = after_boundary.windows(4).position(|w| w == b"\r\n\r\n") {
+            (&after_boundary[..pos], &after_boundary[pos + 4..])
+        } else {
+            let pos = after_boundary.windows(2).position(|w| w == b"\n\n")?;
+            (&after_boundary[..pos], &after_boundary[pos + 2..])
+        };
 
     let part_headers = String::from_utf8_lossy(part_headers_bytes);
     let mut filename = "attachment.bin".to_string();
@@ -2489,7 +2523,11 @@ pub async fn bug_file_add(
             .into_response();
     }
 
-    Redirect::to(&format!("/view_bug_page/{}?msg=Attachment+uploaded", bug_id)).into_response()
+    Redirect::to(&format!(
+        "/view_bug_page/{}?msg=Attachment+uploaded",
+        bug_id
+    ))
+    .into_response()
 }
 
 pub async fn bug_file_download(

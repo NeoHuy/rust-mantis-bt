@@ -83,11 +83,7 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         for (ver, items) in by_target {
             let total = items.len();
             let resolved = items.iter().filter(|b| b.status >= 80).count();
-            let pct = if total > 0 {
-                (resolved * 100) / total
-            } else {
-                0
-            };
+            let pct = (resolved * 100).checked_div(total).unwrap_or(0);
 
             let mut list_html = String::new();
             for b in &items {
@@ -475,9 +471,7 @@ pub async fn news_page(
         ctx.user.access_level
     };
 
-    let items = db
-        .list_news(ctx.active_project_id, eff)
-        .unwrap_or_default();
+    let items = db.list_news(ctx.active_project_id, eff).unwrap_or_default();
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
         .unwrap_or_default()
@@ -618,11 +612,7 @@ pub async fn news_add(
     }
 }
 
-pub async fn news_delete(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-) -> Response {
+pub async fn news_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {
     if ctx.user.access_level < 70 {
         return forbidden(&ctx, "Manager access required to delete news.");
     }

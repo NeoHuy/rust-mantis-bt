@@ -32,7 +32,9 @@ async fn login_as_admin(app: &axum::Router) -> String {
 #[tokio::test]
 async fn test_rest_api_tokens_and_plugins_end_to_end() {
     let db = Db::open_in_memory().unwrap();
-    let proj_id = db.create_project("RestProject", 10, 10, "API Project", true).unwrap();
+    let proj_id = db
+        .create_project("RestProject", 10, 10, "API Project", true)
+        .unwrap();
     let app = build_router(db.clone());
 
     let cookie = login_as_admin(&app).await;
@@ -84,7 +86,9 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let json_me: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json_me["name"], "administrator");
     assert_eq!(json_me["access_level"]["id"], 90);
@@ -103,7 +107,9 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let json_projs: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json_projs["projects"][0]["name"], "RestProject");
 
@@ -133,7 +139,9 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
-    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let created: Value = serde_json::from_slice(&body).unwrap();
     let bug_id = created["issue"]["id"].as_i64().unwrap();
     assert_eq!(created["issue"]["summary"], "REST API created bug");
@@ -145,7 +153,7 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api/rest/issues/{}/notes", bug_id))
+                .uri(format!("/api/rest/issues/{}/notes", bug_id))
                 .header("authorization", &raw_token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -168,7 +176,7 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(&format!("/api/rest/issues/{}", bug_id))
+                .uri(format!("/api/rest/issues/{}", bug_id))
                 .header("authorization", &raw_token)
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -185,7 +193,9 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let patched: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(patched["issues"][0]["summary"], "REST API resolved bug");
     assert_eq!(patched["issues"][0]["status"]["id"], 80);
@@ -205,7 +215,9 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("MantisCoreFormatting"));
     assert!(html.contains("EventAuditLog"));
@@ -232,7 +244,7 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(&format!("/api/rest/issues/{}", bug_id))
+                .uri(format!("/api/rest/issues/{}", bug_id))
                 .header("authorization", &raw_token)
                 .body(Body::empty())
                 .unwrap(),
@@ -248,7 +260,7 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(&format!("/api_token_revoke/{}", tok_id))
+                .uri(format!("/api_token_revoke/{}", tok_id))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),

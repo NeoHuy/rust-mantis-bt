@@ -1,31 +1,12 @@
 use crate::auth::AuthContext;
-use crate::db::Db;
-use crate::handlers::parse_bool;
-use crate::models::{BugFilter, BugPriority, BugResolution, BugSeverity, BugStatus, ViewState};
-use crate::ui::{format_timestamp, html_escape, render_layout, render_status_badge};
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Redirect, Response};
-use serde::Deserialize;
+use crate::models::{
+    Bug, BugPriority, BugResolution, BugSeverity, BugStatus, EmailMessage, NewsItem,
+    TimeTrackingEntry, ViewState,
+};
+use crate::views::layout::render_layout;
+use crate::views::{format_timestamp, html_escape, render_status_badge};
+use axum::response::Html;
 use std::collections::{BTreeMap, HashMap};
-
-#[derive(Deserialize, Default)]
-pub struct FlashQuery {
-    pub msg: Option<String>,
-    pub err: Option<String>,
-}
-
-fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
-    let body = format!(
-        r#"<div class="flash-error">Access Denied: {}</div>"#,
-        html_escape(msg)
-    );
-    (
-        StatusCode::FORBIDDEN,
-        render_layout("Access Denied", ctx, None, &body),
-    )
-        .into_response()
-}
 
 fn status_label(v: i32) -> &'static str {
     BugStatus::from_i32(v).map(|s| s.as_str()).unwrap_or("new")
@@ -49,33 +30,11 @@ fn resolution_label(v: i32) -> &'static str {
         .unwrap_or("open")
 }
 
-pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
-    let filter = BugFilter {
-        project_id: if ctx.active_project_id > 0 {
-            Some(ctx.active_project_id)
-        } else {
-            None
-        },
-        ..Default::default()
-    };
-    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
-    let users_map: HashMap<i64, String> = db
-        .list_users(None, false)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| (u.id, u.username))
-        .collect();
-
-    let mut by_target: BTreeMap<String, Vec<_>> = BTreeMap::new();
-    for b in bugs {
-        if !b.target_version.trim().is_empty() {
-            by_target
-                .entry(b.target_version.trim().to_string())
-                .or_default()
-                .push(b);
-        }
-    }
-
+pub fn render_roadmap_page(
+    ctx: &AuthContext,
+    by_target: &BTreeMap<String, Vec<Bug>>,
+    users_map: &HashMap<i64, String>,
+) -> Html<String> {
     let mut sections_html = String::new();
     if by_target.is_empty() {
         sections_html.push_str("<p>No roadmap items with a Target Version found.</p>");
@@ -86,7 +45,7 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
             let pct = (resolved * 100).checked_div(total).unwrap_or(0);
 
             let mut list_html = String::new();
-            for b in &items {
+            for b in items {
                 let handler_str = if b.handler_id > 0 {
                     format!(
                         " ({})",
@@ -125,7 +84,7 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
                         </ul>
                     </div>
                 </div>"#,
-                html_escape(&ver),
+                html_escape(ver),
                 resolved,
                 total,
                 pct,
@@ -141,43 +100,21 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         sections_html
     );
 
-    render_layout("Roadmap", &ctx, None, &content).into_response()
+    render_layout("Roadmap", ctx, None, &content)
 }
 
-pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response {
-    let filter = BugFilter {
-        project_id: if ctx.active_project_id > 0 {
-            Some(ctx.active_project_id)
-        } else {
-            None
-        },
-        ..Default::default()
-    };
-    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
-    let users_map: HashMap<i64, String> = db
-        .list_users(None, false)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| (u.id, u.username))
-        .collect();
-
-    let mut by_fixed: BTreeMap<String, Vec<_>> = BTreeMap::new();
-    for b in bugs {
-        if b.status >= 80 && !b.fixed_in_version.trim().is_empty() {
-            by_fixed
-                .entry(b.fixed_in_version.trim().to_string())
-                .or_default()
-                .push(b);
-        }
-    }
-
+pub fn render_changelog_page(
+    ctx: &AuthContext,
+    by_fixed: &BTreeMap<String, Vec<Bug>>,
+    users_map: &HashMap<i64, String>,
+) -> Html<String> {
     let mut sections_html = String::new();
     if by_fixed.is_empty() {
         sections_html.push_str("<p>No resolved issues with a Fixed in Version found.</p>");
     } else {
         for (ver, items) in by_fixed {
             let mut list_html = String::new();
-            for b in &items {
+            for b in items {
                 let handler_str = if b.handler_id > 0 {
                     format!(
                         " ({})",
@@ -209,7 +146,7 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
                         </ul>
                     </div>
                 </div>"#,
-                html_escape(&ver),
+                html_escape(ver),
                 items.len(),
                 list_html
             ));
@@ -222,66 +159,24 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         sections_html
     );
 
-    render_layout("Changelog", &ctx, None, &content).into_response()
+    render_layout("Changelog", ctx, None, &content)
 }
 
-pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
-    let filter = BugFilter {
-        project_id: if ctx.active_project_id > 0 {
-            Some(ctx.active_project_id)
-        } else {
-            None
-        },
-        ..Default::default()
-    };
-    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
-    let users_map: HashMap<i64, String> = db
-        .list_users(None, false)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| (u.id, u.username))
-        .collect();
-
-    let mut by_status: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_severity: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_priority: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_reporter: BTreeMap<String, usize> = BTreeMap::new();
-    let mut by_handler: BTreeMap<String, usize> = BTreeMap::new();
-
-    let mut open_count = 0usize;
-    let mut resolved_count = 0usize;
-    let mut closed_count = 0usize;
-
-    for b in &bugs {
-        *by_status.entry(b.status).or_default() += 1;
-        *by_severity.entry(b.severity).or_default() += 1;
-        *by_priority.entry(b.priority).or_default() += 1;
-
-        let rep = users_map
-            .get(&b.reporter_id)
-            .cloned()
-            .unwrap_or_else(|| format!("user#{}", b.reporter_id));
-        *by_reporter.entry(rep).or_default() += 1;
-
-        if b.handler_id > 0 {
-            let hnd = users_map
-                .get(&b.handler_id)
-                .cloned()
-                .unwrap_or_else(|| format!("user#{}", b.handler_id));
-            *by_handler.entry(hnd).or_default() += 1;
-        }
-
-        if b.status == 90 {
-            closed_count += 1;
-        } else if b.status >= 80 {
-            resolved_count += 1;
-        } else {
-            open_count += 1;
-        }
-    }
-
+#[allow(clippy::too_many_arguments)]
+pub fn render_summary_page(
+    ctx: &AuthContext,
+    total_bugs: usize,
+    open_count: usize,
+    resolved_count: usize,
+    closed_count: usize,
+    by_status: &BTreeMap<i32, usize>,
+    by_severity: &BTreeMap<i32, usize>,
+    by_priority: &BTreeMap<i32, usize>,
+    by_reporter: &BTreeMap<String, usize>,
+    by_handler: &BTreeMap<String, usize>,
+) -> Html<String> {
     let mut status_rows = String::new();
-    for (st, cnt) in by_status {
+    for (&st, &cnt) in by_status {
         status_rows.push_str(&format!(
             r#"<tr><td>{}</td><td>{}</td></tr>"#,
             render_status_badge(st, status_label(st)),
@@ -290,7 +185,7 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     }
 
     let mut sev_rows = String::new();
-    for (sev, cnt) in by_severity {
+    for (&sev, &cnt) in by_severity {
         sev_rows.push_str(&format!(
             r#"<tr><td>{}</td><td>{}</td></tr>"#,
             html_escape(severity_label(sev)),
@@ -299,7 +194,7 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     }
 
     let mut pri_rows = String::new();
-    for (pri, cnt) in by_priority {
+    for (&pri, &cnt) in by_priority {
         pri_rows.push_str(&format!(
             r#"<tr><td>{}</td><td>{}</td></tr>"#,
             html_escape(priority_label(pri)),
@@ -308,19 +203,19 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     }
 
     let mut rep_rows = String::new();
-    for (rep, cnt) in by_reporter {
+    for (rep, &cnt) in by_reporter {
         rep_rows.push_str(&format!(
             r#"<tr><td>{}</td><td>{}</td></tr>"#,
-            html_escape(&rep),
+            html_escape(rep),
             cnt
         ));
     }
 
     let mut hnd_rows = String::new();
-    for (hnd, cnt) in by_handler {
+    for (hnd, &cnt) in by_handler {
         hnd_rows.push_str(&format!(
             r#"<tr><td>{}</td><td>{}</td></tr>"#,
-            html_escape(&hnd),
+            html_escape(hnd),
             cnt
         ));
     }
@@ -362,7 +257,7 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
                 </div>
             </div>
         </div>"#,
-        bugs.len(),
+        total_bugs,
         open_count,
         resolved_count,
         closed_count,
@@ -373,31 +268,17 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         hnd_rows
     );
 
-    render_layout("Summary", &ctx, None, &content).into_response()
+    render_layout("Summary", ctx, None, &content)
 }
 
-pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
-    let eff = if ctx.active_project_id > 0 {
-        db.effective_access_level(&ctx.user, ctx.active_project_id)
-            .unwrap_or(0)
-    } else {
-        ctx.user.access_level
-    };
-    if eff < 55 {
-        return forbidden(&ctx, "Developer access required to view Time Tracking.");
-    }
-
-    let entries = db
-        .list_time_tracking(ctx.active_project_id)
-        .unwrap_or_default();
-
-    let mut total_mins = 0i32;
-    let mut by_user: BTreeMap<String, i32> = BTreeMap::new();
+pub fn render_billing_page(
+    ctx: &AuthContext,
+    entries: &[TimeTrackingEntry],
+    by_user: &BTreeMap<String, i32>,
+    total_mins: i32,
+) -> Html<String> {
     let mut rows_html = String::new();
-
-    for e in &entries {
-        total_mins += e.minutes;
-        *by_user.entry(e.username.clone()).or_default() += e.minutes;
+    for e in entries {
         rows_html.push_str(&format!(
             r#"<tr>
                 <td><a href="/view_bug_page/{id}">{id:07}</a>: {summary}</td>
@@ -422,7 +303,7 @@ pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     for (u, m) in by_user {
         user_rows.push_str(&format!(
             r#"<tr><td>{}</td><td>{:02}:{:02} ({} mins)</td></tr>"#,
-            html_escape(&u),
+            html_escape(u),
             m / 60,
             m % 60,
             m
@@ -456,34 +337,22 @@ pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         rows_html
     );
 
-    render_layout("Time Tracking", &ctx, None, &content).into_response()
+    render_layout("Time Tracking", ctx, None, &content)
 }
 
-pub async fn news_page(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Query(q): Query<FlashQuery>,
-) -> Response {
-    let eff = if ctx.active_project_id > 0 {
-        db.effective_access_level(&ctx.user, ctx.active_project_id)
-            .unwrap_or(0)
-    } else {
-        ctx.user.access_level
-    };
-
-    let items = db.list_news(ctx.active_project_id, eff).unwrap_or_default();
-    let users_map: HashMap<i64, String> = db
-        .list_users(None, false)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| (u.id, u.username))
-        .collect();
-
+pub fn render_news_page(
+    ctx: &AuthContext,
+    items: &[NewsItem],
+    users_map: &HashMap<i64, String>,
+    eff: i32,
+    msg: Option<&str>,
+    err: Option<&str>,
+) -> Html<String> {
     let mut list_html = String::new();
     if items.is_empty() {
         list_html.push_str("<p>No news announcements posted yet.</p>");
     } else {
-        for n in &items {
+        for n in items {
             let poster = users_map
                 .get(&n.poster_id)
                 .cloned()
@@ -563,9 +432,7 @@ pub async fn news_page(
         String::new()
     };
 
-    let err_banner = q
-        .err
-        .as_deref()
+    let err_banner = err
         .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
         .unwrap_or_default();
 
@@ -577,61 +444,16 @@ pub async fn news_page(
         err_banner, list_html, add_form_html
     );
 
-    render_layout("News", &ctx, q.msg.as_deref(), &content).into_response()
+    render_layout("News", ctx, msg, &content)
 }
 
-#[derive(Deserialize)]
-pub struct NewsAddForm {
-    pub project_id: Option<i64>,
-    pub headline: String,
-    pub body: String,
-    pub announcement: Option<String>,
-    pub view_state: Option<i32>,
-}
-
-pub async fn news_add(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    axum::Form(form): axum::Form<NewsAddForm>,
-) -> Response {
-    let pid = form.project_id.unwrap_or(ctx.active_project_id);
-    let eff = if pid > 0 {
-        db.effective_access_level(&ctx.user, pid).unwrap_or(0)
-    } else {
-        ctx.user.access_level
-    };
-    if eff < 70 {
-        return forbidden(&ctx, "Manager access required to post news.");
-    }
-
-    let ann = parse_bool(form.announcement.as_deref());
-    let vs = form.view_state.unwrap_or(10);
-    match db.create_news(pid, ctx.user.id, &form.headline, &form.body, ann, vs) {
-        Ok(_) => Redirect::to("/news_page?msg=News+posted").into_response(),
-        Err(_) => Redirect::to("/news_page?err=Invalid+news+fields").into_response(),
-    }
-}
-
-pub async fn news_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {
-    if ctx.user.access_level < 70 {
-        return forbidden(&ctx, "Manager access required to delete news.");
-    }
-    let _ = db.delete_news(id);
-    Redirect::to("/news_page?msg=News+deleted").into_response()
-}
-
-pub async fn manage_email_queue_page(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Query(q): Query<FlashQuery>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required to manage email queue.");
-    }
-
-    let emails = db.list_queued_emails().unwrap_or_default();
+pub fn render_manage_email_queue_page(
+    ctx: &AuthContext,
+    emails: &[EmailMessage],
+    msg: Option<&str>,
+) -> Html<String> {
     let mut rows_html = String::new();
-    for e in &emails {
+    for e in emails {
         rows_html.push_str(&format!(
             r#"<tr>
                 <td>{}</td>
@@ -687,25 +509,5 @@ pub async fn manage_email_queue_page(
         rows_html
     );
 
-    render_layout("Email Queue", &ctx, q.msg.as_deref(), &content).into_response()
-}
-
-pub async fn manage_email_queue_flush(State(db): State<Db>, ctx: AuthContext) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-    let _ = db.flush_email_queue();
-    Redirect::to("/manage_email_queue_page?msg=Email+queue+flushed").into_response()
-}
-
-pub async fn manage_email_delete(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-    let _ = db.delete_queued_email(id);
-    Redirect::to("/manage_email_queue_page?msg=Email+deleted").into_response()
+    render_layout("Email Queue", ctx, msg, &content)
 }

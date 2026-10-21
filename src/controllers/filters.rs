@@ -1,21 +1,23 @@
 use crate::auth::AuthContext;
+use crate::controllers::parse_bool;
 use crate::db::Db;
-use crate::handlers::parse_bool;
 use crate::models::BugFilter;
-use crate::ui::{html_escape, render_layout};
+use crate::views;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::post;
+use axum::Router;
 use serde::Deserialize;
 
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
     let body = format!(
         r#"<div class="flash-error">Access Denied: {}</div>"#,
-        html_escape(msg)
+        views::html_escape(msg)
     );
     (
         StatusCode::FORBIDDEN,
-        render_layout("Access Denied", ctx, None, &body),
+        views::layout::render_layout("Access Denied", ctx, None, &body),
     )
         .into_response()
 }
@@ -98,4 +100,10 @@ pub async fn filter_delete(
 
     let _ = db.delete_filter(id);
     Redirect::to("/view_all_bug_page?msg=Filter+deleted").into_response()
+}
+
+pub fn router() -> Router<Db> {
+    Router::new()
+        .route("/filter_save", post(filter_save))
+        .route("/filter_delete/:id", post(filter_delete))
 }

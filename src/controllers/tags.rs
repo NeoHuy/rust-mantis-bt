@@ -1,9 +1,11 @@
 use crate::auth::AuthContext;
 use crate::db::Db;
-use crate::ui::{html_escape, render_layout};
+use crate::views;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
+use axum::Router;
 use serde::Deserialize;
 
 #[derive(Deserialize, Default)]
@@ -15,11 +17,11 @@ pub struct FlashQuery {
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
     let body = format!(
         r#"<div class="flash-error">Access Denied: {}</div>"#,
-        html_escape(msg)
+        views::html_escape(msg)
     );
     (
         StatusCode::FORBIDDEN,
-        render_layout("Access Denied", ctx, None, &body),
+        views::layout::render_layout("Access Denied", ctx, None, &body),
     )
         .into_response()
 }
@@ -30,93 +32,8 @@ pub async fn manage_tags_page(
     Query(q): Query<FlashQuery>,
 ) -> Response {
     let tags = db.list_tags().unwrap_or_default();
-    let err_banner = q
-        .err
-        .as_deref()
-        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
-        .unwrap_or_default();
-
-    let mut rows_html = String::new();
-    if tags.is_empty() {
-        rows_html.push_str(
-            r#"<tr><td colspan="3" style="text-align:center; padding:12px;">No tags defined.</td></tr>"#,
-        );
-    } else {
-        for (idx, t) in tags.iter().enumerate() {
-            let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
-            let actions = if ctx.user.access_level >= 70 {
-                format!(
-                    r#"<form method="POST" action="/tag_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
-                    t.id
-                )
-            } else {
-                String::new()
-            };
-            rows_html.push_str(&format!(
-                r#"<tr class="{}">
-                    <td><a href="/view_all_bug_page?tag_id={}"><strong>{}</strong></a></td>
-                    <td>{}</td>
-                    <td>{}</td>
-                </tr>"#,
-                row_class,
-                t.id,
-                html_escape(&t.name),
-                html_escape(&t.description),
-                actions
-            ));
-        }
-    }
-
-    let create_form = if ctx.user.access_level >= 25 {
-        r#"<div class="panel">
-            <div class="panel-header">Create Tag</div>
-            <div class="panel-body">
-                <form method="POST" action="/tag_create">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Tag Name *</td>
-                            <td class="input-col"><input type="text" name="name" required></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Description</td>
-                            <td class="input-col"><textarea name="description"></textarea></td>
-                        </tr>
-                    </table>
-                    <button type="submit" class="btn">Create Tag</button>
-                </form>
-            </div>
-        </div>"#
-    } else {
-        ""
-    };
-
-    let content = format!(
-        r#"{}
-        <div class="panel">
-            <div class="panel-header">Manage Tags ({})</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Description</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        {}"#,
-        err_banner,
-        tags.len(),
-        rows_html,
-        create_form
-    );
-
-    render_layout("Manage Tags", &ctx, q.msg.as_deref(), &content).into_response()
+    views::tags::render_manage_tags_page(&ctx, &tags, q.msg.as_deref(), q.err.as_deref())
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -240,4 +157,14 @@ pub async fn bug_tag_detach(
 
     let _ = db.detach_tag_from_bug(bug_id, tag_id, ctx.user.id);
     Redirect::to(&format!("/view_bug_page/{}?msg=Tag+detached", bug_id)).into_response()
+}
+
+pub fn router() -> Router<Db> {
+    Router::new()
+        .route("/manage_tags_page", get(manage_tags_page))
+        .route("/tag_create", post(tag_create))
+        .route("/tag_update/:id", post(tag_update))
+        .route("/tag_delete/:id", post(tag_delete))
+        .route("/bug_tag_attach/:bug_id", post(bug_tag_attach))
+        .route("/bug_tag_detach/:bug_id/:tag_id", post(bug_tag_detach))
 }

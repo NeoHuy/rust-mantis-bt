@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
+pub mod jira;
 pub mod layout;
 pub mod planning;
 pub mod projects;

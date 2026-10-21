@@ -382,6 +382,13 @@ pub async fn view_all_bug_page(
         .list_visible_filters(ctx.user.id, ctx.active_project_id)
         .unwrap_or_default();
 
+    let mut jira_links = HashMap::new();
+    for b in &paged_bugs {
+        if let Ok(Some(jl)) = db.get_jira_link_by_bug_id(b.id) {
+            jira_links.insert(b.id, jl);
+        }
+    }
+
     views::bugs::render_view_all_bug_page(
         &ctx,
         &paged_bugs,
@@ -392,6 +399,7 @@ pub async fn view_all_bug_page(
         &projects_map,
         &categories_map,
         &users_map,
+        &jira_links,
         &all_users,
         &all_cats,
         &all_tags,
@@ -728,6 +736,31 @@ pub async fn view_bug_page(
         ));
     }
 
+    let jira_link = db.get_jira_link_by_bug_id(id).unwrap_or(None);
+    let jira_conf =
+        db.get_jira_config(bug.project_id)
+            .unwrap_or_else(|_| crate::models::JiraResolvedConfig {
+                enabled: false,
+                base_url: String::new(),
+                email: String::new(),
+                api_token: String::new(),
+                default_issue_type: "Bug".to_string(),
+                project_key: String::new(),
+            });
+
+    if jira_link.is_none() && jira_conf.enabled && eff >= 55 {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/view_bug_page/{}/jira_push" style="display:inline-flex; gap:4px; align-items:center;">
+                <select name="issue_type" style="width:auto;">
+                    <option value="Bug">Jira Bug</option>
+                    <option value="Task">Jira Task</option>
+                </select>
+                <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6;">Push to Jira</button>
+            </form>"#,
+            bug.id
+        ));
+    }
+
     let mut tags_html = String::new();
     if bug_tags.is_empty() {
         tags_html.push_str("<span>No tags attached.</span>");
@@ -1009,6 +1042,7 @@ pub async fn view_bug_page(
         &notes_html,
         &note_form_html,
         &history_html,
+        jira_link.as_ref(),
         q.msg.as_deref(),
         q.err.as_deref(),
     )

@@ -3,6 +3,7 @@ pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
 pub mod filters;
+pub mod jira;
 pub mod planning;
 pub mod projects;
 pub mod tags;
@@ -44,6 +45,7 @@ pub fn router() -> Router<Db> {
         .merge(filters::router())
         .merge(planning::router())
         .merge(api::router())
+        .merge(jira::router())
 }
 
 pub fn build_router(db: Db) -> Router {

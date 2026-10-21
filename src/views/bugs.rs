@@ -1,8 +1,8 @@
 use crate::auth::AuthContext;
 use crate::models::{
     Bug, BugFilter, BugFull, BugPriority, BugReproducibility, BugResolution, BugSeverity,
-    BugStatus, CustomField, CustomFieldValue, ProjectVersion, RelationshipType, SavedFilter, Tag,
-    User, ViewState,
+    BugStatus, CustomField, CustomFieldValue, JiraLink, ProjectVersion, RelationshipType,
+    SavedFilter, Tag, User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
@@ -150,6 +150,7 @@ pub fn render_view_all_bug_page(
     projects_map: &HashMap<i64, String>,
     categories_map: &HashMap<i64, String>,
     users_map: &HashMap<i64, String>,
+    jira_links: &HashMap<i64, JiraLink>,
     all_users: &[User],
     all_categories: &[(i64, String)],
     all_tags: &[Tag],
@@ -187,6 +188,15 @@ pub fn render_view_all_bug_page(
             } else {
                 ""
             };
+            let jira_badge = if let Some(jl) = jira_links.get(&b.id) {
+                format!(
+                    r#" <a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; font-size:10px; text-decoration:none;">Jira: {}</a>"#,
+                    html_escape(&jl.jira_url),
+                    html_escape(&jl.jira_key)
+                )
+            } else {
+                String::new()
+            };
             let status_badge = render_status_badge(b.status, status_label(b.status));
 
             rows_html.push_str(&format!(
@@ -197,7 +207,7 @@ pub fn render_view_all_bug_page(
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}{}{}</td>
-                    <td><a href="/view_bug_page/{}">{}</a>{}</td>
+                    <td><a href="/view_bug_page/{}">{}</a>{}{}</td>
                     <td style="white-space:nowrap;">{}</td>
                 </tr>"#,
                 row_class,
@@ -218,6 +228,7 @@ pub fn render_view_all_bug_page(
                 b.id,
                 html_escape(&b.summary),
                 priv_badge,
+                jira_badge,
                 format_timestamp(b.last_updated)
             ));
         }
@@ -733,13 +744,28 @@ pub fn render_view_bug_page(
     notes_html: &str,
     note_form_html: &str,
     history_html: &str,
+    jira_link: Option<&JiraLink>,
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
 ) -> Html<String> {
     let bug = &full.bug;
-    let err_banner = flash_err
-        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
-        .unwrap_or_default();
+    let banner = if let Some(m) = flash_msg {
+        format!(r#"<div class="flash-success">{}</div>"#, html_escape(m))
+    } else if let Some(e) = flash_err {
+        format!(r#"<div class="flash-error">{}</div>"#, html_escape(e))
+    } else {
+        String::new()
+    };
+
+    let jira_badge = if let Some(jl) = jira_link {
+        format!(
+            r#"<a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; text-decoration:none; margin-left:8px; font-size:11px; font-weight:bold;">Jira: {} &nearr;</a>"#,
+            html_escape(&jl.jira_url),
+            html_escape(&jl.jira_key)
+        )
+    } else {
+        String::new()
+    };
 
     let mut cf_rows_html = String::new();
     for cfv in cf_values {
@@ -777,7 +803,7 @@ pub fn render_view_bug_page(
                     </thead>
                     <tbody>
                         <tr>
-                            <td>{:07}</td>
+                            <td>{:07}{}</td>
                             <td>{}</td>
                             <td>{}</td>
                             <td>{}</td>
@@ -882,9 +908,10 @@ pub fn render_view_bug_page(
                 {}
             </div>
         </div>"#,
-        err_banner,
+        banner,
         bug.id,
         bug.id,
+        jira_badge,
         html_escape(proj_name),
         html_escape(cat_name),
         html_escape(view_state_str),

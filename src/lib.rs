@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod controllers;
 pub mod db;
+pub mod jira;
 pub mod models;
 pub mod views;
 

@@ -83,11 +83,10 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         }
     }
 
-    let kw = q
-        .q
-        .clone()
-        .or_else(|| q.search.clone())
-        .filter(|s| !s.trim().is_empty());
+    let kw =
+        q.q.clone()
+            .or_else(|| q.search.clone())
+            .filter(|s| !s.trim().is_empty());
 
     BugFilter {
         project_id: if ctx.active_project_id > 0 {
@@ -121,10 +120,7 @@ pub fn router() -> Router<Db> {
         .route("/bug_assign/:id", post(bug_assign))
         .route("/bugnote_add/:bug_id", post(bugnote_add))
         .route("/bugnote_delete/:id", post(bugnote_delete))
-        .route(
-            "/bug_relationship_add/:bug_id",
-            post(bug_relationship_add),
-        )
+        .route("/bug_relationship_add/:bug_id", post(bug_relationship_add))
         .route(
             "/bug_relationship_delete/:id",
             post(bug_relationship_delete),
@@ -138,10 +134,7 @@ pub fn router() -> Router<Db> {
         .route("/my_view_page", get(my_view_page))
         .route("/csv_export", get(csv_export))
         .route("/bug_monitor_add/:bug_id", post(bug_monitor_add))
-        .route(
-            "/bug_monitor_delete/:bug_id",
-            post(bug_monitor_delete),
-        )
+        .route("/bug_monitor_delete/:bug_id", post(bug_monitor_delete))
 }
 
 pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
@@ -478,9 +471,14 @@ pub async fn bug_report(
         None => return Redirect::to("/bug_report_page?err=Invalid+project").into_response(),
     };
 
-    let eff = db.effective_access_level(&ctx.user, project_id).unwrap_or(0);
+    let eff = db
+        .effective_access_level(&ctx.user, project_id)
+        .unwrap_or(0);
     if eff < 25 {
-        return forbidden(&ctx, "Reporter access required to report issues in this project.");
+        return forbidden(
+            &ctx,
+            "Reporter access required to report issues in this project.",
+        );
     }
 
     let summary = form.get("summary").map(|s| s.trim()).unwrap_or("");
@@ -488,7 +486,10 @@ pub async fn bug_report(
         return Redirect::to("/bug_report_page?err=Summary+is+required").into_response();
     }
 
-    let category_id: i64 = form.get("category_id").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let category_id: i64 = form
+        .get("category_id")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let reproducibility: i32 = form
         .get("reproducibility")
         .and_then(|v| v.parse().ok())
@@ -507,8 +508,14 @@ pub async fn bug_report(
     let os_build = form.get("os_build").cloned().unwrap_or_default();
     let description = form.get("description").cloned().unwrap_or_default();
     let steps_to_reproduce = form.get("steps_to_reproduce").cloned().unwrap_or_default();
-    let additional_info = form.get("additional_information").cloned().unwrap_or_default();
-    let view_state: i32 = form.get("view_state").and_then(|v| v.parse().ok()).unwrap_or(10);
+    let additional_info = form
+        .get("additional_information")
+        .cloned()
+        .unwrap_or_default();
+    let view_state: i32 = form
+        .get("view_state")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
 
     let bug_id = match db.create_bug(
         project_id,
@@ -528,7 +535,9 @@ pub async fn bug_report(
         view_state,
     ) {
         Ok(id) => id,
-        Err(_) => return Redirect::to("/bug_report_page?err=Failed+to+create+issue").into_response(),
+        Err(_) => {
+            return Redirect::to("/bug_report_page?err=Failed+to+create+issue").into_response()
+        }
     };
 
     let custom_fields = db

@@ -266,8 +266,7 @@ pub async fn manage_email_queue_page(
     }
 
     let emails = db.list_queued_emails().unwrap_or_default();
-    views::planning::render_manage_email_queue_page(&ctx, &emails, q.msg.as_deref())
-        .into_response()
+    views::planning::render_manage_email_queue_page(&ctx, &emails, q.msg.as_deref()).into_response()
 }
 
 pub async fn manage_email_queue_flush(State(db): State<Db>, ctx: AuthContext) -> Response {

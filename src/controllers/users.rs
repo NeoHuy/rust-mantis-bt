@@ -47,15 +47,9 @@ pub struct UpdateUserForm {
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/manage_user_page", get(manage_user_page))
-        .route(
-            "/manage_user_create_page",
-            get(manage_user_create_page),
-        )
+        .route("/manage_user_create_page", get(manage_user_create_page))
         .route("/manage_user_create", post(manage_user_create))
-        .route(
-            "/manage_user_edit_page/:id",
-            get(manage_user_edit_page),
-        )
+        .route("/manage_user_edit_page/:id", get(manage_user_edit_page))
         .route("/manage_user_update/:id", post(manage_user_update))
         .route("/manage_user_delete/:id", post(manage_user_delete))
 }

@@ -1,8 +1,8 @@
 use crate::auth::AuthContext;
 use crate::models::{
-    Bug, BugFilter, BugFull, BugPriority, BugReproducibility,
-    BugResolution, BugSeverity, BugStatus, CustomField, CustomFieldValue,
-    ProjectVersion, RelationshipType, SavedFilter, Tag, User, ViewState,
+    Bug, BugFilter, BugFull, BugPriority, BugReproducibility, BugResolution, BugSeverity,
+    BugStatus, CustomField, CustomFieldValue, ProjectVersion, RelationshipType, SavedFilter, Tag,
+    User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
@@ -127,11 +127,7 @@ pub fn render_my_view_page(
             reported_by_me
         ),
         render_my_view_box("Resolved", "/view_all_bug_page?status=80", resolved),
-        render_my_view_box(
-            "Recently Modified",
-            "/view_all_bug_page",
-            recently_modified
-        ),
+        render_my_view_box("Recently Modified", "/view_all_bug_page", recently_modified),
         render_my_view_box(
             "Monitored by Me",
             &format!("/view_all_bug_page?monitored_by={}", ctx.user.id),
@@ -143,6 +139,7 @@ pub fn render_my_view_page(
     render_layout("My View", ctx, None, &content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_view_all_bug_page(
     ctx: &AuthContext,
     bugs: &[Bug],
@@ -718,6 +715,7 @@ pub fn render_bug_report_page(
     render_layout("Report Issue", ctx, flash_msg, &content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_view_bug_page(
     ctx: &AuthContext,
     full: &BugFull,
@@ -1085,10 +1083,5 @@ pub fn render_update_bug_page(
         cf_rows_html
     );
 
-    render_layout(
-        &format!("Update Issue #{:07}", bug.id),
-        ctx,
-        None,
-        &content,
-    )
+    render_layout(&format!("Update Issue #{:07}", bug.id), ctx, None, &content)
 }

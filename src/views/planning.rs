@@ -162,6 +162,7 @@ pub fn render_changelog_page(
     render_layout("Changelog", ctx, None, &content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_summary_page(
     ctx: &AuthContext,
     total_bugs: usize,

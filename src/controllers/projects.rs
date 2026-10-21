@@ -105,23 +105,11 @@ pub struct AddUserProjForm {
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/manage_proj_page", get(manage_proj_page))
-        .route(
-            "/manage_proj_create_page",
-            get(manage_proj_create_page),
-        )
+        .route("/manage_proj_create_page", get(manage_proj_create_page))
         .route("/manage_proj_create", post(manage_proj_create))
-        .route(
-            "/manage_proj_edit_page/:id",
-            get(manage_proj_edit_page),
-        )
-        .route(
-            "/manage_proj_update/:id",
-            post(manage_proj_update),
-        )
-        .route(
-            "/manage_proj_delete/:id",
-            post(manage_proj_delete),
-        )
+        .route("/manage_proj_edit_page/:id", get(manage_proj_edit_page))
+        .route("/manage_proj_update/:id", post(manage_proj_update))
+        .route("/manage_proj_delete/:id", post(manage_proj_delete))
         .route(
             "/manage_proj_subproj_add/:id",
             post(manage_proj_subproj_add),
@@ -139,10 +127,7 @@ pub fn router() -> Router<Db> {
             "/manage_proj_cat_delete/:cat_id",
             post(manage_proj_cat_delete),
         )
-        .route(
-            "/manage_proj_ver_add/:id",
-            post(manage_proj_ver_add),
-        )
+        .route("/manage_proj_ver_add/:id", post(manage_proj_ver_add))
         .route(
             "/manage_proj_ver_update/:ver_id",
             post(manage_proj_ver_update),
@@ -151,10 +136,7 @@ pub fn router() -> Router<Db> {
             "/manage_proj_ver_delete/:ver_id",
             post(manage_proj_ver_delete),
         )
-        .route(
-            "/manage_proj_user_add/:id",
-            post(manage_proj_user_add),
-        )
+        .route("/manage_proj_user_add/:id", post(manage_proj_user_add))
         .route(
             "/manage_proj_user_remove/:id/:user_id",
             post(manage_proj_user_remove),

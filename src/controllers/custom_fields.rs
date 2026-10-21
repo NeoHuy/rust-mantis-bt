@@ -210,7 +210,10 @@ pub async fn manage_custom_field_proj_remove(
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/manage_custom_field_page", get(manage_custom_field_page))
-        .route("/manage_custom_field_create", post(manage_custom_field_create))
+        .route(
+            "/manage_custom_field_create",
+            post(manage_custom_field_create),
+        )
         .route(
             "/manage_custom_field_edit_page/:id",
             get(manage_custom_field_edit_page),

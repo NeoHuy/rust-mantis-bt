@@ -1,7 +1,7 @@
 use crate::auth::AuthContext;
 use crate::models::AccessLevel;
-use crate::views::layout::{render_layout, render_unauthenticated_layout};
 use crate::views::html_escape;
+use crate::views::layout::{render_layout, render_unauthenticated_layout};
 use axum::response::Html;
 
 pub fn render_login_page(flash_error: Option<&str>) -> Html<String> {

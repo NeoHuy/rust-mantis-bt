@@ -140,7 +140,12 @@ pub async fn account_update(
             let content = "<p>Passwords do not match.</p>";
             return (
                 StatusCode::BAD_REQUEST,
-                views::layout::render_layout("Error", &ctx, Some("Passwords do not match."), content),
+                views::layout::render_layout(
+                    "Error",
+                    &ctx,
+                    Some("Passwords do not match."),
+                    content,
+                ),
             )
                 .into_response();
         }
@@ -170,7 +175,10 @@ pub async fn account_update(
     ) {
         Ok(_) => Redirect::to("/account_page?msg=Account+updated+successfully").into_response(),
         Err(e) => {
-            let content = format!("<p>Failed to update account: {}</p>", views::html_escape(&e));
+            let content = format!(
+                "<p>Failed to update account: {}</p>",
+                views::html_escape(&e)
+            );
             (
                 StatusCode::BAD_REQUEST,
                 views::layout::render_layout("Error", &ctx, Some(&e), &content),

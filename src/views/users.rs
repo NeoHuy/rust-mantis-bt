@@ -1,7 +1,7 @@
 use crate::auth::AuthContext;
 use crate::models::{AccessLevel, User};
-use crate::views::layout::render_layout;
 use crate::views::html_escape;
+use crate::views::layout::render_layout;
 use axum::http::StatusCode;
 use axum::response::Html;
 
@@ -288,7 +288,11 @@ pub fn render_user_create_error(ctx: &AuthContext, err: &str) -> (StatusCode, Ht
     )
 }
 
-pub fn render_user_update_error(ctx: &AuthContext, id: i64, err: &str) -> (StatusCode, Html<String>) {
+pub fn render_user_update_error(
+    ctx: &AuthContext,
+    id: i64,
+    err: &str,
+) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to update user: {}</p>
         <p style="margin-top:12px;"><a href="/manage_user_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,

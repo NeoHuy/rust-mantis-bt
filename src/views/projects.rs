@@ -1,5 +1,7 @@
 use crate::auth::AuthContext;
-use crate::models::{AccessLevel, Category, Project, ProjectStatus, ProjectVersion, User, ViewState};
+use crate::models::{
+    AccessLevel, Category, Project, ProjectStatus, ProjectVersion, User, ViewState,
+};
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
 use axum::http::StatusCode;
@@ -196,6 +198,7 @@ pub fn render_proj_create_page(ctx: &AuthContext) -> Html<String> {
     render_layout("Create Project", ctx, None, content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_proj_edit_page(
     ctx: &AuthContext,
     project: &Project,
@@ -521,8 +524,16 @@ pub fn render_proj_edit_page(
         if project.status == 50 { "selected" } else { "" },
         if project.status == 70 { "selected" } else { "" },
         enabled_checked,
-        if project.view_state == 10 { "selected" } else { "" },
-        if project.view_state == 50 { "selected" } else { "" },
+        if project.view_state == 10 {
+            "selected"
+        } else {
+            ""
+        },
+        if project.view_state == 50 {
+            "selected"
+        } else {
+            ""
+        },
         inherit_global_checked,
         html_escape(&project.description),
         project.id,
@@ -564,7 +575,11 @@ pub fn render_proj_create_error(ctx: &AuthContext, err: &str) -> (StatusCode, Ht
     )
 }
 
-pub fn render_proj_update_error(ctx: &AuthContext, id: i64, err: &str) -> (StatusCode, Html<String>) {
+pub fn render_proj_update_error(
+    ctx: &AuthContext,
+    id: i64,
+    err: &str,
+) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to update project: {}</p>
         <p style="margin-top:12px;"><a href="/manage_proj_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,
@@ -602,7 +617,11 @@ pub fn render_subproj_error(ctx: &AuthContext, id: i64, err: &str) -> (StatusCod
     )
 }
 
-pub fn render_category_error(ctx: &AuthContext, target_url: &str, err: &str) -> (StatusCode, Html<String>) {
+pub fn render_category_error(
+    ctx: &AuthContext,
+    target_url: &str,
+    err: &str,
+) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to process category: {}</p>
         <p style="margin-top:12px;"><a href="{}" class="btn btn-secondary">Back</a></p>"#,
@@ -615,7 +634,11 @@ pub fn render_category_error(ctx: &AuthContext, target_url: &str, err: &str) -> 
     )
 }
 
-pub fn render_version_error(ctx: &AuthContext, project_id: i64, err: &str) -> (StatusCode, Html<String>) {
+pub fn render_version_error(
+    ctx: &AuthContext,
+    project_id: i64,
+    err: &str,
+) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to process version: {}</p>
         <p style="margin-top:12px;"><a href="/manage_proj_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,

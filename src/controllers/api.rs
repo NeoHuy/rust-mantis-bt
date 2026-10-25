@@ -1,15 +1,17 @@
 use crate::auth::{ApiAuth, AuthContext};
+use crate::controllers::parse_bool;
 use crate::db::Db;
-use crate::handlers::parse_bool;
 use crate::models::{
     AccessLevel, BugFilter, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus,
     BugUpdate, ViewState,
 };
-use crate::ui::{format_timestamp, html_escape, render_layout};
+use crate::views;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::{get, post};
 use axum::Json;
+use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -23,11 +25,11 @@ pub struct FlashQuery {
 fn forbidden_html(ctx: &AuthContext, msg: &str) -> Response {
     let body = format!(
         r#"<div class="flash-error">Access Denied: {}</div>"#,
-        html_escape(msg)
+        views::html_escape(msg)
     );
     (
         StatusCode::FORBIDDEN,
-        render_layout("Access Denied", ctx, None, &body),
+        views::layout::render_layout("Access Denied", ctx, None, &body),
     )
         .into_response()
 }
@@ -40,92 +42,14 @@ pub async fn api_tokens_page(
     Query(q): Query<FlashQuery>,
 ) -> Response {
     let tokens = db.list_api_tokens(ctx.user.id).unwrap_or_default();
-
-    let token_banner = match q.token.as_deref() {
-        Some(raw) if !raw.is_empty() => format!(
-            r#"<div class="flash-message">
-                <strong>New API Token Created!</strong> Copy it now — it will not be shown again:<br>
-                <code style="display:inline-block; margin-top:6px; padding:6px 10px; background:#fff; border:1px solid #b2dba1; font-weight:bold; font-size:13px;">{}</code>
-            </div>"#,
-            html_escape(raw)
-        ),
-        _ => String::new(),
-    };
-
-    let err_banner = q
-        .err
-        .as_deref()
-        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
-        .unwrap_or_default();
-
-    let mut rows_html = String::new();
-    for t in &tokens {
-        let used_str = if t.date_used > 0 {
-            format!("Used ({})", format_timestamp(t.date_used))
-        } else {
-            "Never used".to_string()
-        };
-        rows_html.push_str(&format!(
-            r#"<tr>
-                <td>{}</td>
-                <td><strong>{}</strong></td>
-                <td>{}</td>
-                <td>{}</td>
-                <td>
-                    <form method="POST" action="/api_token_revoke/{}" style="display:inline;">
-                        <button type="submit" class="btn btn-danger btn-sm">Revoke</button>
-                    </form>
-                </td>
-            </tr>"#,
-            t.id,
-            html_escape(&t.name),
-            format_timestamp(t.date_created),
-            used_str,
-            t.id
-        ));
-    }
-    if rows_html.is_empty() {
-        rows_html.push_str(r#"<tr><td colspan="5">No API tokens created yet.</td></tr>"#);
-    }
-
-    let content = format!(
-        r#"{}
-        {}
-        <div class="panel">
-            <div class="panel-header">Create API Token</div>
-            <div class="panel-body">
-                <form method="POST" action="/api_token_create" style="display:flex; gap:8px; align-items:center;">
-                    <input type="text" name="name" placeholder="Token Name (e.g. CI/CD, CLI)" required style="max-width:300px;">
-                    <button type="submit" class="btn">Create API Token</button>
-                </form>
-            </div>
-        </div>
-        <div class="panel">
-            <div class="panel-header">My API Tokens ({})</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>ID</th>
-                            <th>Token Name</th>
-                            <th>Created</th>
-                            <th>Last Used</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
-            </div>
-        </div>"#,
-        err_banner,
-        token_banner,
-        tokens.len(),
-        rows_html
-    );
-
-    render_layout("API Tokens", &ctx, q.msg.as_deref(), &content).into_response()
+    views::api::render_api_tokens_page(
+        &ctx,
+        &tokens,
+        q.token.as_deref(),
+        q.msg.as_deref(),
+        q.err.as_deref(),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -175,80 +99,14 @@ pub async fn manage_plugin_page(
         .flatten()
         .unwrap_or_else(|| "0".to_string());
 
-    let err_banner = q
-        .err
-        .as_deref()
-        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
-        .unwrap_or_default();
-
-    let mut rows_html = String::new();
-    for p in &plugins {
-        let status_badge = if p.enabled != 0 {
-            r#"<span class="badge badge-success">Enabled</span>"#
-        } else {
-            r#"<span class="badge badge-warning">Disabled</span>"#
-        };
-        let prot_str = if p.protected != 0 { "Yes" } else { "No" };
-        let action_html = if p.protected != 0 {
-            "<em>Protected</em>".to_string()
-        } else {
-            let next_enabled = if p.enabled != 0 { "0" } else { "1" };
-            let btn_label = if p.enabled != 0 { "Disable" } else { "Enable" };
-            format!(
-                r#"<form method="POST" action="/manage_plugin_toggle/{}" style="display:inline;">
-                    <input type="hidden" name="enabled" value="{}">
-                    <button type="submit" class="btn btn-secondary btn-sm">{}</button>
-                </form>"#,
-                html_escape(&p.basename),
-                next_enabled,
-                btn_label
-            )
-        };
-
-        rows_html.push_str(&format!(
-            r#"<tr>
-                <td><strong>{}</strong></td>
-                <td>{}</td>
-                <td>{}</td>
-                <td>{}</td>
-                <td>{}</td>
-            </tr>"#,
-            html_escape(&p.basename),
-            status_badge,
-            prot_str,
-            p.priority,
-            action_html
-        ));
-    }
-
-    let content = format!(
-        r#"{}
-        <div class="panel">
-            <div class="panel-header">Installed Plugins ({}) — EventAuditLog Dispatched Events: {}</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Plugin Basename</th>
-                            <th>Status</th>
-                            <th>Protected</th>
-                            <th>Priority</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
-            </div>
-        </div>"#,
-        err_banner,
-        plugins.len(),
-        html_escape(&audit_count),
-        rows_html
-    );
-
-    render_layout("Manage Plugins", &ctx, q.msg.as_deref(), &content).into_response()
+    views::api::render_manage_plugin_page(
+        &ctx,
+        &plugins,
+        &audit_count,
+        q.msg.as_deref(),
+        q.err.as_deref(),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -455,7 +313,7 @@ fn serialize_issue_json(db: &Db, bug_id: i64, user_access: i32) -> Option<Value>
         .map(|s| s.as_str())
         .unwrap_or("have not tried");
     let vs_str = ViewState::from_i32(b.view_state)
-        .map(|s| s.as_str())
+        .map(|v| v.as_str())
         .unwrap_or("public");
 
     let notes: Vec<Value> = db
@@ -866,3 +724,33 @@ pub async fn rest_add_issue_note(
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response(),
     }
 }
+
+pub fn router() -> Router<Db> {
+    Router::new()
+        .route("/api_tokens_page", get(api_tokens_page))
+        .route("/api_token_create", post(api_token_create))
+        .route("/api_token_revoke/:id", post(api_token_revoke))
+        .route("/manage_plugin_page", get(manage_plugin_page))
+        .route(
+            "/manage_plugin_toggle/:basename",
+            post(manage_plugin_toggle),
+        )
+        .route("/api/rest/users/me", get(rest_users_me))
+        .route("/api/rest/projects", get(rest_list_projects))
+        .route("/api/rest/projects/:id", get(rest_get_project))
+        .route(
+            "/api/rest/issues",
+            get(rest_list_issues).post(rest_create_issue),
+        )
+        .route(
+            "/api/rest/issues/:id",
+            get(rest_get_issue)
+                .patch(rest_update_issue)
+                .delete(rest_delete_issue),
+        )
+        .route("/api/rest/issues/:id/notes", post(rest_add_issue_note))
+}
+
+#[cfg(test)]
+#[path = "api_test.rs"]
+mod tests;

@@ -90,3 +90,7 @@ pub fn render_account_page(ctx: &AuthContext, flash: Option<&str>) -> Html<Strin
 
     render_layout("My Account", ctx, flash, &content)
 }
+
+#[cfg(test)]
+#[path = "auth_test.rs"]
+mod tests;

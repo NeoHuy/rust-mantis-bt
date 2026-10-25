@@ -187,3 +187,7 @@ pub async fn account_update(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "auth_test.rs"]
+mod tests;

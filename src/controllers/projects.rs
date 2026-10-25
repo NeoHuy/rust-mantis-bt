@@ -510,3 +510,7 @@ pub async fn manage_proj_user_remove(
         Err(e) => views::projects::render_proj_user_error(&ctx, id, &e).into_response(),
     }
 }
+
+#[cfg(test)]
+#[path = "projects_test.rs"]
+mod tests;

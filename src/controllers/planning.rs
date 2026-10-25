@@ -302,3 +302,7 @@ pub fn router() -> Router<Db> {
         .route("/manage_email_queue_flush", post(manage_email_queue_flush))
         .route("/manage_email_delete/:id", post(manage_email_delete))
 }
+
+#[cfg(test)]
+#[path = "planning_test.rs"]
+mod tests;

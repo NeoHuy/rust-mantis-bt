@@ -264,3 +264,7 @@ pub fn render_manage_custom_field_edit_page(
 
     render_layout("Edit Custom Field", ctx, msg, &content)
 }
+
+#[cfg(test)]
+#[path = "custom_fields_test.rs"]
+mod tests;

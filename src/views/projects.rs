@@ -663,3 +663,7 @@ pub fn render_proj_user_error(ctx: &AuthContext, id: i64, err: &str) -> (StatusC
         render_layout("Project User Error", ctx, Some(err), &content),
     )
 }
+
+#[cfg(test)]
+#[path = "projects_test.rs"]
+mod tests;

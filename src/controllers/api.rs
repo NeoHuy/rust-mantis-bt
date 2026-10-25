@@ -750,3 +750,7 @@ pub fn router() -> Router<Db> {
         )
         .route("/api/rest/issues/:id/notes", post(rest_add_issue_note))
 }
+
+#[cfg(test)]
+#[path = "api_test.rs"]
+mod tests;

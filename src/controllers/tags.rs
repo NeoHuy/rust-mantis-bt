@@ -168,3 +168,7 @@ pub fn router() -> Router<Db> {
         .route("/bug_tag_attach/:bug_id", post(bug_tag_attach))
         .route("/bug_tag_detach/:bug_id/:tag_id", post(bug_tag_detach))
 }
+
+#[cfg(test)]
+#[path = "tags_test.rs"]
+mod tests;

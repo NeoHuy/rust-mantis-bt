@@ -511,3 +511,7 @@ pub fn render_manage_email_queue_page(
 
     render_layout("Email Queue", ctx, msg, &content)
 }
+
+#[cfg(test)]
+#[path = "planning_test.rs"]
+mod tests;

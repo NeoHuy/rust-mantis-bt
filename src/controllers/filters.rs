@@ -107,3 +107,7 @@ pub fn router() -> Router<Db> {
         .route("/filter_save", post(filter_save))
         .route("/filter_delete/:id", post(filter_delete))
 }
+
+#[cfg(test)]
+#[path = "filters_test.rs"]
+mod tests;

@@ -1112,3 +1112,7 @@ pub fn render_update_bug_page(
 
     render_layout(&format!("Update Issue #{:07}", bug.id), ctx, None, &content)
 }
+
+#[cfg(test)]
+#[path = "bugs_test.rs"]
+mod tests;

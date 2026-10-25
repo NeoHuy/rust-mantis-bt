@@ -176,3 +176,7 @@ pub fn render_manage_plugin_page(
 
     render_layout("Manage Plugins", ctx, msg, &content)
 }
+
+#[cfg(test)]
+#[path = "api_test.rs"]
+mod tests;

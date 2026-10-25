@@ -96,3 +96,7 @@ pub fn render_manage_tags_page(
 
     render_layout("Manage Tags", ctx, msg, &content)
 }
+
+#[cfg(test)]
+#[path = "tags_test.rs"]
+mod tests;

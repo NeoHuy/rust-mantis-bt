@@ -316,3 +316,7 @@ pub fn render_user_delete_error(ctx: &AuthContext, err: &str) -> (StatusCode, Ht
         render_layout("Delete User Error", ctx, Some(err), &content),
     )
 }
+
+#[cfg(test)]
+#[path = "users_test.rs"]
+mod tests;

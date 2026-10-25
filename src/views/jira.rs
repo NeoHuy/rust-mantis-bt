@@ -157,3 +157,7 @@ pub fn render_manage_jira_page(
 
     render_layout("Manage Jira", ctx, None, &body)
 }
+
+#[cfg(test)]
+#[path = "jira_test.rs"]
+mod tests;

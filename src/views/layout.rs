@@ -810,3 +810,7 @@ pub fn render_unauthenticated_layout(
 
     Html(html)
 }
+
+#[cfg(test)]
+#[path = "layout_test.rs"]
+mod tests;

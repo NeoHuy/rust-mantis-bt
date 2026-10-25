@@ -235,3 +235,7 @@ pub fn router() -> Router<Db> {
             post(manage_custom_field_proj_remove),
         )
 }
+
+#[cfg(test)]
+#[path = "custom_fields_test.rs"]
+mod tests;

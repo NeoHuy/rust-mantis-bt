@@ -195,3 +195,7 @@ pub async fn manage_user_delete(
         Err(e) => views::users::render_user_delete_error(&ctx, &e).into_response(),
     }
 }
+
+#[cfg(test)]
+#[path = "users_test.rs"]
+mod tests;

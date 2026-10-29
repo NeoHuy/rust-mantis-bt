@@ -1,44 +1,16 @@
 use crate::auth::AuthContext;
-use crate::db::Db;
-use crate::handlers::parse_bool;
-use crate::models::CustomFieldType;
-use crate::ui::{html_escape, render_layout};
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Redirect, Response};
-use serde::Deserialize;
+use crate::models::{CustomField, CustomFieldType, Project};
+use crate::views::html_escape;
+use crate::views::layout::render_layout;
+use axum::response::Html;
 
-#[derive(Deserialize, Default)]
-pub struct FlashQuery {
-    pub msg: Option<String>,
-    pub err: Option<String>,
-}
-
-fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
-    let body = format!(
-        r#"<div class="flash-error">Access Denied: {}</div>"#,
-        html_escape(msg)
-    );
-    (
-        StatusCode::FORBIDDEN,
-        render_layout("Access Denied", ctx, None, &body),
-    )
-        .into_response()
-}
-
-pub async fn manage_custom_field_page(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Query(q): Query<FlashQuery>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-
-    let fields = db.list_custom_fields().unwrap_or_default();
-    let err_banner = q
-        .err
-        .as_deref()
+pub fn render_manage_custom_field_page(
+    ctx: &AuthContext,
+    fields: &[(CustomField, usize)],
+    msg: Option<&str>,
+    err: Option<&str>,
+) -> Html<String> {
+    let err_banner = err
         .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
         .unwrap_or_default();
 
@@ -48,15 +20,11 @@ pub async fn manage_custom_field_page(
             r#"<tr><td colspan="5" style="text-align:center; padding:12px;">No custom fields defined.</td></tr>"#,
         );
     } else {
-        for (idx, cf) in fields.iter().enumerate() {
+        for (idx, (cf, linked_count)) in fields.iter().enumerate() {
             let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
             let ftype = CustomFieldType::from_i32(cf.field_type)
                 .map(|t| t.as_str())
                 .unwrap_or("string");
-            let linked_count = db
-                .list_projects_for_custom_field(cf.id)
-                .map(|v| v.len())
-                .unwrap_or(0);
             rows_html.push_str(&format!(
                 r#"<tr class="{}">
                     <td><a href="/manage_custom_field_edit_page/{}"><strong>{}</strong></a></td>
@@ -158,77 +126,21 @@ pub async fn manage_custom_field_page(
         rows_html
     );
 
-    render_layout("Manage Custom Fields", &ctx, q.msg.as_deref(), &content).into_response()
+    render_layout("Manage Custom Fields", ctx, msg, &content)
 }
 
-#[derive(Deserialize)]
-pub struct CustomFieldForm {
-    pub name: String,
-    pub field_type: Option<i32>,
-    pub possible_values: Option<String>,
-    pub default_value: Option<String>,
-    pub valid_regexp: Option<String>,
-    pub length_min: Option<i32>,
-    pub length_max: Option<i32>,
-    pub require_report: Option<String>,
-    pub require_update: Option<String>,
-    pub display_report: Option<String>,
-    pub display_update: Option<String>,
-}
-
-pub async fn manage_custom_field_create(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    axum::Form(form): axum::Form<CustomFieldForm>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-
-    match db.create_custom_field(
-        &form.name,
-        form.field_type.unwrap_or(0),
-        form.possible_values.as_deref().unwrap_or(""),
-        form.default_value.as_deref().unwrap_or(""),
-        form.valid_regexp.as_deref().unwrap_or(""),
-        form.length_min.unwrap_or(0),
-        form.length_max.unwrap_or(0),
-        parse_bool(form.require_report.as_deref()),
-        parse_bool(form.require_update.as_deref()),
-        parse_bool(form.display_report.as_deref()),
-        parse_bool(form.display_update.as_deref()),
-    ) {
-        Ok(id) => Redirect::to(&format!(
-            "/manage_custom_field_edit_page/{}?msg=Custom+field+created",
-            id
-        ))
-        .into_response(),
-        Err(_) => Redirect::to("/manage_custom_field_page?err=Failed+to+create+custom+field")
-            .into_response(),
-    }
-}
-
-pub async fn manage_custom_field_edit_page(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-    Query(q): Query<FlashQuery>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-
-    let cf = match db.get_custom_field_by_id(id) {
-        Ok(Some(c)) => c,
-        _ => return Redirect::to("/manage_custom_field_page?err=Not+found").into_response(),
-    };
-
-    let linked = db.list_projects_for_custom_field(id).unwrap_or_default();
+pub fn render_manage_custom_field_edit_page(
+    ctx: &AuthContext,
+    cf: &CustomField,
+    linked: &[(Project, i32)],
+    msg: Option<&str>,
+    _err: Option<&str>,
+) -> Html<String> {
     let mut linked_rows = String::new();
     if linked.is_empty() {
         linked_rows.push_str(r#"<tr><td colspan="3">Not linked to any projects.</td></tr>"#);
     } else {
-        for (p, seq) in &linked {
+        for (p, seq) in linked {
             linked_rows.push_str(&format!(
                 r#"<tr>
                     <td>{}</td>
@@ -350,82 +262,9 @@ pub async fn manage_custom_field_edit_page(
         proj_opts
     );
 
-    render_layout("Edit Custom Field", &ctx, q.msg.as_deref(), &content).into_response()
+    render_layout("Edit Custom Field", ctx, msg, &content)
 }
 
-pub async fn manage_custom_field_update(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-    axum::Form(form): axum::Form<CustomFieldForm>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-    let _ = db.update_custom_field(
-        id,
-        &form.name,
-        form.field_type.unwrap_or(0),
-        form.possible_values.as_deref().unwrap_or(""),
-        form.default_value.as_deref().unwrap_or(""),
-        form.valid_regexp.as_deref().unwrap_or(""),
-        form.length_min.unwrap_or(0),
-        form.length_max.unwrap_or(0),
-        parse_bool(form.require_report.as_deref()),
-        parse_bool(form.require_update.as_deref()),
-        parse_bool(form.display_report.as_deref()),
-        parse_bool(form.display_update.as_deref()),
-    );
-    Redirect::to(&format!(
-        "/manage_custom_field_edit_page/{}?msg=Updated",
-        id
-    ))
-    .into_response()
-}
-
-pub async fn manage_custom_field_delete(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-    let _ = db.delete_custom_field(id);
-    Redirect::to("/manage_custom_field_page?msg=Custom+field+deleted").into_response()
-}
-
-#[derive(Deserialize)]
-pub struct LinkProjectForm {
-    pub project_id: i64,
-    pub sequence: Option<i32>,
-}
-
-pub async fn manage_custom_field_proj_add(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path(id): Path<i64>,
-    axum::Form(form): axum::Form<LinkProjectForm>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-    let _ = db.link_custom_field_to_project(id, form.project_id, form.sequence.unwrap_or(0));
-    Redirect::to(&format!("/manage_custom_field_edit_page/{}?msg=Linked", id)).into_response()
-}
-
-pub async fn manage_custom_field_proj_remove(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Path((id, project_id)): Path<(i64, i64)>,
-) -> Response {
-    if ctx.user.access_level < 90 {
-        return forbidden(&ctx, "Administrator access required.");
-    }
-    let _ = db.unlink_custom_field_from_project(id, project_id);
-    Redirect::to(&format!(
-        "/manage_custom_field_edit_page/{}?msg=Unlinked",
-        id
-    ))
-    .into_response()
-}
+#[cfg(test)]
+#[path = "custom_fields_test.rs"]
+mod tests;

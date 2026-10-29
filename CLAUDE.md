@@ -31,9 +31,17 @@ This file instructs Claude Code and Anthropic models on project conventions, wor
    - All PRs for features, fixes, refactorings, or docs **MUST target `develop`**.
    - Do **NOT** target `main` unless executing an explicit production release.
 
-3. **Database & SQL Rule:**
+3. **Architecture & 1:1 Test Layout:**
+   - Adhere strictly to the MVC layer separation:
+     - Domain entities in `src/models/`
+     - Request orchestration & routing in `src/controllers/`
+     - HTML presentation in `src/views/`
+   - Maintain 1:1 companion unit test files (`*_test.rs`) alongside each module using `#[cfg(test)] #[path = "<name>_test.rs"] mod tests;`.
+
+4. **Database & SQL Rule:**
    - Use `rusqlite::params![...]` for all queries. Never construct raw SQL strings with formatting.
    - Keep migrations idempotent in `src/db.rs`.
+   - Never use `.unwrap()` or `.expect()` in route controllers or production code.
 
-4. **Verification Gate:**
+5. **Verification Gate:**
    - Always run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` before claiming a task is done.

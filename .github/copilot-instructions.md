@@ -14,14 +14,17 @@ See [AGENTS.md](../AGENTS.md) for full project rules and architecture.
 - **Branch Naming:** `feat/<name>`, `fix/<name>`, `refactor/<name>`, `ci/<name>`, `docs/<name>`.
 - **PR Target:** All Pull Requests must target `develop` (never `main`).
 
-### 2. Architecture & Patterns
-- **Web Layer:** Axum 0.7 routes defined in `src/handlers/mod.rs` and implemented in domain files (`src/handlers/*.rs`).
-- **Data Layer:** SQLite with `rusqlite` bundled in `src/db.rs`. Queries must **always** use `rusqlite::params![...]` (no SQL string formatting).
-- **Security:** Access levels in `src/auth.rs` and `src/models.rs` (Viewer=10, Reporter=25, Updater=40, Developer=55, Manager=70, Administrator=90). Guard handlers with `ctx.user.access_level`.
-- **UI:** Server-side rendered HTML in `src/ui.rs` (MantisBT 2.x responsive theme). Sanitize user input to prevent XSS.
+### 2. Architecture & Patterns (MVC)
+- **Controllers (`src/controllers/`):** Axum 0.7 request orchestration and routing. Sub-routers in domain files (`src/controllers/*.rs`) merged in `src/controllers/mod.rs`. Handlers parse requests, verify permissions, call DB methods, invoke views, and return responses.
+- **Views (`src/views/`):** Server-side rendered HTML templates and layout (`src/views/layout.rs`). Render page content and escape user input with `views::html_escape` to prevent XSS.
+- **Models (`src/models/`):** Pure domain structs, enums, validation, and DTOs partitioned by domain (`src/models/*.rs`) and re-exported in `src/models/mod.rs`.
+- **Data Layer (`src/db.rs`):** SQLite with bundled `rusqlite`. Queries must **always** use parameterized `rusqlite::params![...]` (no SQL string formatting). Migrations must be idempotent.
+- **Security & Permissions:** Access levels in `src/auth.rs` and `src/models/user.rs` (Viewer=10, Reporter=25, Updater=40, Developer=55, Manager=70, Administrator=90). Guard controllers with `ctx.user.access_level`.
+- **Integrations:** Jira Cloud REST API client in `src/jira.rs`, with dedicated controllers and views.
+- **Testing Layout:** Maintain 1:1 companion unit test files (`*_test.rs`) alongside each module using `#[cfg(test)] #[path = "<name>_test.rs"] mod tests;`. HTTP integration tests live in `tests/`.
 
 ### 3. Rust Code Standards
-- Avoid `.unwrap()` / `.expect()` in handler code; return `Result` or handle errors cleanly.
+- Avoid `.unwrap()` / `.expect()` in controller code or production paths; propagate errors with `?` or return clean error responses.
 - Keep dependencies lean. Do not add new crates to `Cargo.toml` without explicit instruction.
 
 ### 4. Verification Gate

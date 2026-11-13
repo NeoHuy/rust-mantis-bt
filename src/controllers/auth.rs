@@ -16,6 +16,15 @@ pub struct LoginForm {
 }
 
 #[derive(Deserialize)]
+pub struct SignupForm {
+    pub username: String,
+    pub realname: Option<String>,
+    pub email: String,
+    pub password: String,
+    pub password_confirm: String,
+}
+
+#[derive(Deserialize)]
 pub struct SetProjectForm {
     pub project_id: i64,
     pub return_url: Option<String>,
@@ -37,6 +46,8 @@ pub struct AccountQuery {
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/login", get(login_page).post(login_submit))
+        .route("/signup_page", get(signup_page))
+        .route("/signup", post(signup_submit))
         .route("/logout", get(logout).post(logout))
         .route("/set_project", post(set_project))
         .route("/account_page", get(account_page))
@@ -53,7 +64,7 @@ pub async fn login_page(headers: HeaderMap, State(db): State<Db>) -> Response {
         }
     }
 
-    views::auth::render_login_page(None).into_response()
+    views::auth::render_login_page(None, db.is_signup_allowed()).into_response()
 }
 
 pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> Response {
@@ -70,7 +81,73 @@ pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> 
         }
         _ => (
             StatusCode::UNAUTHORIZED,
-            views::auth::render_login_page(Some("Invalid username or password.")),
+            views::auth::render_login_page(
+                Some("Invalid username or password."),
+                db.is_signup_allowed(),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn signup_page(headers: HeaderMap, State(db): State<Db>) -> Response {
+    let cookies = parse_cookies(&headers);
+    if let Some(cookie_str) = cookies.get("MANTIS_STRING_COOKIE") {
+        if let Ok(Some(user)) = db.get_user_by_cookie(cookie_str) {
+            if user.enabled == 1 {
+                return Redirect::to("/my_view_page").into_response();
+            }
+        }
+    }
+
+    if !db.is_signup_allowed() {
+        return (
+            StatusCode::FORBIDDEN,
+            views::auth::render_signup_disabled_page(),
+        )
+            .into_response();
+    }
+
+    views::auth::render_signup_page(None, "", "", "").into_response()
+}
+
+pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -> Response {
+    if !db.is_signup_allowed() {
+        return (
+            StatusCode::FORBIDDEN,
+            views::auth::render_signup_disabled_page(),
+        )
+            .into_response();
+    }
+
+    let realname = form.realname.as_deref().unwrap_or("").trim();
+
+    if form.password != form.password_confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            views::auth::render_signup_page(
+                Some("Passwords do not match."),
+                &form.username,
+                realname,
+                &form.email,
+            ),
+        )
+            .into_response();
+    }
+
+    match db.signup_user(&form.username, realname, &form.email, &form.password) {
+        Ok(user) => {
+            let cookie_val =
+                make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, None);
+            let mut res = Redirect::to("/my_view_page").into_response();
+            if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
+                res.headers_mut().insert(SET_COOKIE, hv);
+            }
+            res
+        }
+        Err(err_msg) => (
+            StatusCode::BAD_REQUEST,
+            views::auth::render_signup_page(Some(&err_msg), &form.username, realname, &form.email),
         )
             .into_response(),
     }

@@ -3,19 +3,40 @@ use crate::models::User;
 
 #[test]
 fn test_render_login_page_default() {
-    let out = render_login_page(None);
+    let out = render_login_page(None, true);
     let html = out.0;
     assert!(html.contains("<title>Login - MantisBT</title>"));
     assert!(html.contains(r#"action="/login""#));
     assert!(html.contains("Remember my login on this browser"));
+    assert!(html.contains("/signup_page"));
 }
 
 #[test]
 fn test_render_login_page_with_error() {
-    let out = render_login_page(Some("Invalid username or password."));
+    let out = render_login_page(Some("Invalid username or password."), false);
     let html = out.0;
     assert!(html.contains("<title>Login Failed - MantisBT</title>"));
     assert!(html.contains("Invalid username or password."));
+    assert!(!html.contains("/signup_page"));
+}
+
+#[test]
+fn test_render_signup_page() {
+    let out = render_signup_page(None, "user1", "Real Name", "user1@example.com");
+    let html = out.0;
+    assert!(html.contains("<title>Create New Account - MantisBT</title>"));
+    assert!(html.contains(r#"action="/signup""#));
+    assert!(html.contains("value=\"user1\""));
+    assert!(html.contains("value=\"Real Name\""));
+    assert!(html.contains("value=\"user1@example.com\""));
+}
+
+#[test]
+fn test_render_signup_disabled_page() {
+    let out = render_signup_disabled_page();
+    let html = out.0;
+    assert!(html.contains("<title>Registration Disabled - MantisBT</title>"));
+    assert!(html.contains("User registration is currently disabled."));
 }
 
 #[test]

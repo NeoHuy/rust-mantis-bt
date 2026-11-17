@@ -15,7 +15,8 @@ RUN mkdir src && \
     cargo build --release && \
     rm -rf src
 
-# Copy toàn bộ mã nguồn thật và biên dịch
+# Copy assets và toàn bộ mã nguồn thật rồi biên dịch
+COPY assets ./assets
 COPY src ./src
 RUN touch src/main.rs src/lib.rs && \
     cargo build --release

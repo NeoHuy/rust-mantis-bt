@@ -786,3 +786,255 @@ async fn test_no_nested_forms_in_edit_pages() {
     .unwrap();
     assert_no_nested_forms(&html);
 }
+
+#[tokio::test]
+async fn test_user_signup_flow() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    // 1. GET /login should display a link to /signup_page
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let login_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        login_html.contains("/signup_page"),
+        "Login page should include a link to /signup_page"
+    );
+
+    // 2. GET /signup_page returns 200 OK with registration form
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/signup_page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let signup_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(signup_html.contains("name=\"username\""));
+    assert!(signup_html.contains("name=\"email\""));
+    assert!(signup_html.contains("name=\"password\""));
+    assert!(signup_html.contains("name=\"password_confirm\""));
+
+    // 3. POST /signup with mismatched passwords returns 400 Bad Request
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/signup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=newreporter&email=newrep@example.com&password=password123&password_confirm=different",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let err_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(err_html.contains("Passwords do not match"));
+
+    // 4. POST /signup with valid data registers user, logs them in, and returns success redirect screen with 5s countdown
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/signup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=newreporter&realname=New+Reporter&email=newrep@example.com&password=password123&password_confirm=password123",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let cookie_hdr = res
+        .headers()
+        .get("set-cookie")
+        .expect("Should set MANTIS_STRING_COOKIE")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie_hdr.contains("MANTIS_STRING_COOKIE="));
+
+    let success_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(success_html.contains("Registration Successful"));
+    assert!(success_html.contains("http-equiv=\"refresh\" content=\"5;url=/my_view_page\""));
+    assert!(success_html.contains("newreporter"));
+    assert!(success_html.contains("/my_view_page"));
+    assert!(success_html.contains("Go to Dashboard Now"));
+
+    // 5. Newly registered user has Reporter access level (25) in DB
+    let user = db
+        .get_user_by_username("newreporter")
+        .unwrap()
+        .expect("User should exist");
+    assert_eq!(user.access_level, 25);
+    assert_eq!(user.realname, "New Reporter");
+    assert_eq!(user.email, "newrep@example.com");
+
+    // 6. Access /account_page using new user session
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/account_page")
+                .header("cookie", &cookie_hdr)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 7. Test disabled signup: set allow_signup = 0
+    db.set_config("allow_signup", 0, 0, "0").unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/signup_page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/signup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=blockeduser&email=blocked@example.com&password=password123&password_confirm=password123",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // GET /login should not show signup link when disabled
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let login_disabled_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!login_disabled_html.contains("/signup_page"));
+}
+
+#[tokio::test]
+async fn test_mantis_logo_and_favicon() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    // 1. GET /login contains Mantis logo image and no longer contains caterpillar emoji &#128027;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !html.contains("&#128027;"),
+        "HTML should not contain caterpillar bug code &#128027;"
+    );
+    assert!(html.contains("class=\"login-logo\""));
+    assert!(html.contains("data:image/png;base64,"));
+
+    // 2. GET /favicon.ico returns 200 OK and image/x-icon
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.ico")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("content-type").unwrap(), "image/x-icon");
+
+    // 3. GET /images/mantis_logo.png returns 200 OK and image/png
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/images/mantis_logo.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("content-type").unwrap(), "image/png");
+}

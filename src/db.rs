@@ -422,6 +422,132 @@ impl Db {
         Self::query_user_by_id(&conn, id)
     }
 
+    pub fn get_user_by_email(&self, email: &str) -> rusqlite::Result<Option<User>> {
+        let trimmed = email.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, username, realname, email, password, enabled, protected, access_level,
+                    login_count, lost_password_request_count, failed_login_count, cookie_string,
+                    last_visit, date_created
+             FROM mantis_user_table
+             WHERE LOWER(email) = LOWER(?1)",
+        )?;
+        let mut rows = stmt.query(params![trimmed])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(User {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                realname: row.get(2)?,
+                email: row.get(3)?,
+                password: row.get(4)?,
+                enabled: row.get(5)?,
+                protected: row.get(6)?,
+                access_level: row.get(7)?,
+                login_count: row.get(8)?,
+                lost_password_request_count: row.get(9)?,
+                failed_login_count: row.get(10)?,
+                cookie_string: row.get(11)?,
+                last_visit: row.get(12)?,
+                date_created: row.get(13)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn is_signup_allowed(&self) -> bool {
+        match self.get_config("allow_signup", 0, 0) {
+            Ok(Some(val)) => {
+                let v = val.trim().to_ascii_lowercase();
+                !(v == "0" || v == "false" || v == "off" || v == "no")
+            }
+            _ => true,
+        }
+    }
+
+    pub fn signup_user(
+        &self,
+        username: &str,
+        realname: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<User, String> {
+        if !self.is_signup_allowed() {
+            return Err("User registration is currently disabled.".to_string());
+        }
+
+        let trimmed_username = username.trim();
+        if trimmed_username.is_empty() {
+            return Err("Username cannot be empty.".to_string());
+        }
+        if trimmed_username.len() > 32 {
+            return Err("Username cannot exceed 32 characters.".to_string());
+        }
+        if !trimmed_username
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+        {
+            return Err("Username contains invalid characters. Only letters, numbers, '.', '_' and '-' are allowed.".to_string());
+        }
+
+        // Check if username already exists (case-insensitive)
+        let conn = self.conn();
+        let username_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mantis_user_table WHERE LOWER(username) = LOWER(?1)",
+                params![trimmed_username],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|cnt| cnt > 0)
+            .unwrap_or(false);
+        drop(conn);
+
+        if username_exists {
+            return Err("Username is already taken.".to_string());
+        }
+
+        let trimmed_email = email.trim();
+        if trimmed_email.is_empty() {
+            return Err("Email cannot be empty.".to_string());
+        }
+        if !trimmed_email.contains('@') || !trimmed_email.contains('.') {
+            return Err("Invalid email address format.".to_string());
+        }
+
+        // Check if email already exists
+        if let Ok(Some(_)) = self.get_user_by_email(trimmed_email) {
+            return Err("Email address is already in use.".to_string());
+        }
+
+        if password.len() < 6 {
+            return Err("Password must be at least 6 characters long.".to_string());
+        }
+
+        let default_access_level = self
+            .get_config("default_new_account_access_level", 0, 0)
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(25); // Reporter = 25
+
+        let user_id = self.create_user(
+            trimmed_username,
+            realname.trim(),
+            trimmed_email,
+            password,
+            default_access_level,
+            true,
+            false,
+        )?;
+
+        self.get_user_by_id(user_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Failed to retrieve newly created user.".to_string())
+    }
+
     fn query_user_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<User>> {
         let mut stmt = conn.prepare(
             "SELECT id, username, realname, email, password, enabled, protected, access_level,

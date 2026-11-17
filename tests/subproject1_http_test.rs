@@ -786,3 +786,63 @@ async fn test_no_nested_forms_in_edit_pages() {
     .unwrap();
     assert_no_nested_forms(&html);
 }
+
+#[tokio::test]
+async fn test_mantis_logo_and_favicon() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    // 1. GET /login contains Mantis logo image and no longer contains caterpillar emoji &#128027;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        !html.contains("&#128027;"),
+        "HTML should not contain caterpillar bug code &#128027;"
+    );
+    assert!(html.contains("class=\"login-logo\""));
+    assert!(html.contains("data:image/png;base64,"));
+
+    // 2. GET /favicon.ico returns 200 OK and image/x-icon
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.ico")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("content-type").unwrap(), "image/x-icon");
+
+    // 3. GET /images/mantis_logo.png returns 200 OK and image/png
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/images/mantis_logo.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("content-type").unwrap(), "image/png");
+}

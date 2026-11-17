@@ -33,9 +33,25 @@ async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
     }
 }
 
+async fn favicon_handler() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/x-icon")],
+        include_bytes!("../../assets/favicon.ico"),
+    )
+}
+
+async fn logo_handler() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../../assets/mantis_logo_notext.png"),
+    )
+}
+
 pub fn build_router(db: Db) -> Router {
     Router::new()
         .route("/", get(root_handler))
+        .route("/favicon.ico", get(favicon_handler))
+        .route("/images/mantis_logo.png", get(logo_handler))
         // Auth routes
         .route("/login", get(auth::login_page).post(auth::login_submit))
         .route("/logout", get(auth::logout).post(auth::logout))

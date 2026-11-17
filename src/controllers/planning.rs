@@ -273,8 +273,21 @@ pub async fn manage_email_queue_flush(State(db): State<Db>, ctx: AuthContext) ->
     if ctx.user.access_level < 90 {
         return forbidden(&ctx, "Administrator access required.");
     }
-    let _ = db.flush_email_queue();
-    Redirect::to("/manage_email_queue_page?msg=Email+queue+flushed").into_response()
+    if let Some(mailer) = crate::mailer::SendGridMailer::from_env() {
+        match mailer.dispatch_pending_queue(&db).await {
+            Ok(count) => {
+                let msg = format!("Email+queue+dispatched+({}+sent)", count);
+                Redirect::to(&format!("/manage_email_queue_page?msg={}", msg)).into_response()
+            }
+            Err(e) => {
+                let msg = format!("Failed+to+dispatch+emails:+{}", e);
+                Redirect::to(&format!("/manage_email_queue_page?msg={}", msg)).into_response()
+            }
+        }
+    } else {
+        let _ = db.flush_email_queue();
+        Redirect::to("/manage_email_queue_page?msg=Email+queue+flushed").into_response()
+    }
 }
 
 pub async fn manage_email_delete(

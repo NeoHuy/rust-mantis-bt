@@ -1151,3 +1151,66 @@ fn test_jira_config_resolution() {
     let conf_other = db.get_jira_config(9999).unwrap();
     assert_eq!(conf_other.project_key, "DEFAULT_PROJ");
 }
+
+#[test]
+fn test_signup_user_success_and_validations() {
+    let db = Db::open_in_memory().unwrap();
+
+    // 1. Successful signup
+    let new_user = db
+        .signup_user("johndoe", "John Doe", "john@example.com", "secret123")
+        .expect("Signup should succeed");
+    assert_eq!(new_user.username, "johndoe");
+    assert_eq!(new_user.realname, "John Doe");
+    assert_eq!(new_user.email, "john@example.com");
+    assert_eq!(new_user.access_level, 25); // Reporter
+    assert_eq!(new_user.enabled, 1);
+    assert_eq!(new_user.protected, 0);
+
+    // Verification via get_user_by_email
+    let by_email = db.get_user_by_email("john@example.com").unwrap().unwrap();
+    assert_eq!(by_email.id, new_user.id);
+    assert_eq!(by_email.username, "johndoe");
+
+    // 2. Duplicate username rejection
+    let err_dup_user = db.signup_user("johndoe", "Another John", "john2@example.com", "secret123");
+    assert!(err_dup_user.is_err());
+    assert!(err_dup_user.unwrap_err().contains("already taken"));
+
+    // Case-insensitive duplicate username
+    let err_dup_user_case =
+        db.signup_user("JohnDoe", "Another John", "john3@example.com", "secret123");
+    assert!(err_dup_user_case.is_err());
+
+    // 3. Duplicate email rejection
+    let err_dup_email = db.signup_user("johndoe2", "John 2", "john@example.com", "secret123");
+    assert!(err_dup_email.is_err());
+    assert!(err_dup_email.unwrap_err().contains("already in use"));
+
+    // 4. Invalid username format or empty
+    let err_empty_user = db.signup_user("   ", "Name", "empty@example.com", "secret123");
+    assert!(err_empty_user.is_err());
+
+    // 5. Invalid email format
+    let err_invalid_email = db.signup_user("validuser", "Name", "not-an-email", "secret123");
+    assert!(err_invalid_email.is_err());
+
+    // 6. Password too short (< 6 chars)
+    let err_short_pass = db.signup_user("shortpassuser", "Name", "short@example.com", "12345");
+    assert!(err_short_pass.is_err());
+}
+
+#[test]
+fn test_is_signup_allowed_default_and_override() {
+    let db = Db::open_in_memory().unwrap();
+    // Default should be allowed
+    assert!(db.is_signup_allowed());
+
+    // Explicitly disable signup
+    db.set_config("allow_signup", 0, 0, "0").unwrap();
+    assert!(!db.is_signup_allowed());
+
+    // Re-enable
+    db.set_config("allow_signup", 0, 0, "1").unwrap();
+    assert!(db.is_signup_allowed());
+}

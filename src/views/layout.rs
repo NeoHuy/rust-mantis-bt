@@ -737,7 +737,7 @@ pub fn render_layout(
             {report_top_btn}
             <form action="/set_project" method="POST" style="display:inline-flex; align-items:center; gap:6px; margin:0;">
                 <label for="top_project_id" style="color:#dce7f5; font-size:12px;">Project:</label>
-                <select name="project_id" id="top_project_id" onchange="this.form.submit()">
+                <select name="project_id" id="top_project_id" onchange="var pid=this.value;this.disabled=true;fetch('/set_project',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:'project_id='+encodeURIComponent(pid)}}).then(function(){{window.location.reload();}}).catch(function(){{window.location.reload();}});">
                     {project_options}
                 </select>
                 <noscript><button type="submit">Switch</button></noscript>

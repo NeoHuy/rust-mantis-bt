@@ -1038,3 +1038,36 @@ async fn test_mantis_logo_and_favicon() {
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers().get("content-type").unwrap(), "image/png");
 }
+
+#[tokio::test]
+async fn test_top_project_selector_fetch_and_reload() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let admin_cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/my_view_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert!(html.contains(r#"id="top_project_id""#));
+    assert!(html.contains("fetch('/set_project'"));
+    assert!(html.contains("location.reload()"));
+    assert!(!html.contains(r#"id="top_project_id" onchange="this.form.submit()""#));
+}

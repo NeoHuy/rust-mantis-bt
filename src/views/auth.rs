@@ -112,6 +112,70 @@ pub fn render_signup_disabled_page() -> Html<String> {
     )
 }
 
+pub fn render_signup_success_page(username: &str) -> Html<String> {
+    let content = format!(
+        r#"
+    <div class="login-box">
+        <div class="login-header" style="background-color: #5cb85c; color: white;">&#10004; Registration Successful</div>
+        <div class="login-body" style="text-align: center; padding: 24px 20px;">
+            <p style="font-size: 15px; font-weight: 600; color: #3c763d; margin-bottom: 12px;">
+                Account created successfully!
+            </p>
+            <p style="color: #555; margin-bottom: 16px;">
+                You are now logged in as <strong>{}</strong>.
+            </p>
+            <p style="color: #777; font-size: 13px; margin-bottom: 20px;">
+                You will be redirected to the dashboard in <span id="countdown" style="font-weight: bold; color: #337ab7;">5</span> seconds...
+            </p>
+            <div>
+                <a href="/my_view_page" class="btn" style="display: inline-block; padding: 8px 18px; text-decoration: none;">
+                    Go to Dashboard Now &rarr;
+                </a>
+            </div>
+        </div>
+    </div>
+    <script>
+        let seconds = 5;
+        const countdownEl = document.getElementById('countdown');
+        const interval = setInterval(function() {{
+            seconds--;
+            if (countdownEl) {{
+                countdownEl.textContent = seconds;
+            }}
+            if (seconds <= 0) {{
+                clearInterval(interval);
+                window.location.href = '/my_view_page';
+            }}
+        }}, 1000);
+    </script>
+    "#,
+        html_escape(username)
+    );
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="5;url=/my_view_page">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Registration Successful - MantisBT</title>
+    <style>{}</style>
+</head>
+<body class="login-layout">
+    <div class="login-container">
+        <div class="login-logo-title">&#128027; <span>Mantis</span>BT</div>
+        {}
+    </div>
+</body>
+</html>"#,
+        crate::views::layout::CSS,
+        content
+    );
+
+    Html(html)
+}
+
 pub fn render_account_page(ctx: &AuthContext, flash: Option<&str>) -> Html<String> {
     let access_level_name = AccessLevel::from_i32(ctx.user.access_level)
         .map(|a| a.as_str())

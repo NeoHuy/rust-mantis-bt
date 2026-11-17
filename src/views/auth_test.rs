@@ -40,6 +40,19 @@ fn test_render_signup_disabled_page() {
 }
 
 #[test]
+fn test_render_signup_success_page() {
+    let out = render_signup_success_page("testuser");
+    let html = out.0;
+    assert!(html.contains("<title>Registration Successful - MantisBT</title>"));
+    assert!(html.contains("Account created successfully!"));
+    assert!(html.contains("testuser"));
+    assert!(html.contains("http-equiv=\"refresh\" content=\"5;url=/my_view_page\""));
+    assert!(html.contains("Go to Dashboard Now"));
+    assert!(html.contains("href=\"/my_view_page\""));
+    assert!(html.contains("id=\"countdown\""));
+}
+
+#[test]
 fn test_render_account_page() {
     let user = User {
         id: 1,

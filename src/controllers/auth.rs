@@ -139,7 +139,7 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
         Ok(user) => {
             let cookie_val =
                 make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, None);
-            let mut res = Redirect::to("/my_view_page").into_response();
+            let mut res = views::auth::render_signup_success_page(&user.username).into_response();
             if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
                 res.headers_mut().insert(SET_COOKIE, hv);
             }

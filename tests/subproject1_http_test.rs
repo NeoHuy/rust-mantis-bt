@@ -865,7 +865,7 @@ async fn test_user_signup_flow() {
     .unwrap();
     assert!(err_html.contains("Passwords do not match"));
 
-    // 4. POST /signup with valid data registers user, logs them in, and redirects to /my_view_page
+    // 4. POST /signup with valid data registers user, logs them in, and returns success redirect screen with 5s countdown
     let res = app
         .clone()
         .oneshot(
@@ -880,11 +880,7 @@ async fn test_user_signup_flow() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    assert_eq!(
-        res.headers().get("location").unwrap().to_str().unwrap(),
-        "/my_view_page"
-    );
+    assert_eq!(res.status(), StatusCode::OK);
     let cookie_hdr = res
         .headers()
         .get("set-cookie")
@@ -893,6 +889,19 @@ async fn test_user_signup_flow() {
         .unwrap()
         .to_string();
     assert!(cookie_hdr.contains("MANTIS_STRING_COOKIE="));
+
+    let success_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(success_html.contains("Registration Successful"));
+    assert!(success_html.contains("http-equiv=\"refresh\" content=\"5;url=/my_view_page\""));
+    assert!(success_html.contains("newreporter"));
+    assert!(success_html.contains("/my_view_page"));
+    assert!(success_html.contains("Go to Dashboard Now"));
 
     // 5. Newly registered user has Reporter access level (25) in DB
     let user = db

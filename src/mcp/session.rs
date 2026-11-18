@@ -7,6 +7,8 @@ use tokio::sync::{mpsc, RwLock};
 
 pub struct McpSession {
     pub id: String,
+    pub token_id: i64,
+    pub user_id: i64,
     pub user: User,
     pub sender: mpsc::Sender<Event>,
     pub last_active: Instant,
@@ -24,7 +26,11 @@ impl SessionManager {
         }
     }
 
-    pub async fn create_session(&self, user: User) -> (String, mpsc::Receiver<Event>) {
+    pub async fn create_session(
+        &self,
+        token_id: i64,
+        user: User,
+    ) -> (String, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel(32);
         let id = format!(
             "{:016x}{:016x}",
@@ -33,6 +39,8 @@ impl SessionManager {
         );
         let session = McpSession {
             id: id.clone(),
+            token_id,
+            user_id: user.id,
             user,
             sender: tx,
             last_active: Instant::now(),
@@ -40,6 +48,54 @@ impl SessionManager {
         let mut map = self.sessions.write().await;
         map.insert(id.clone(), session);
         (id, rx)
+    }
+
+    /// Fetches the user after re-validating that the token still exists in the database
+    /// and that the user account is still enabled. If revoked or disabled, automatically
+    /// terminates the session and returns None.
+    pub async fn get_user_validated(&self, db: &crate::db::Db, session_id: &str) -> Option<User> {
+        let (token_id, user_id) = {
+            let mut map = self.sessions.write().await;
+            let session = map.get_mut(session_id)?;
+            session.last_active = Instant::now();
+            (session.token_id, session.user_id)
+        };
+
+        // Re-validate against database using a blocking task to avoid stalling executor
+        let db_clone = db.clone();
+        let is_valid = tokio::task::spawn_blocking(move || {
+            let token_exists = {
+                let conn = db_clone.conn();
+                conn.query_row(
+                    "SELECT 1 FROM mantis_api_token_table WHERE id = ?1 AND user_id = ?2",
+                    rusqlite::params![token_id, user_id],
+                    |_| Ok(()),
+                )
+                .is_ok()
+            };
+            if !token_exists {
+                return None;
+            }
+            match db_clone.get_user_by_id(user_id) {
+                Ok(Some(u)) if u.enabled == 1 => Some(u),
+                _ => None,
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+
+        if let Some(fresh_user) = is_valid {
+            let mut map = self.sessions.write().await;
+            if let Some(session) = map.get_mut(session_id) {
+                session.user = fresh_user.clone();
+            }
+            Some(fresh_user)
+        } else {
+            // Token was revoked or user was disabled! Eject session immediately
+            let _ = self.remove_session(session_id).await;
+            None
+        }
     }
 
     pub async fn get_user(&self, session_id: &str) -> Option<User> {
@@ -53,10 +109,14 @@ impl SessionManager {
     }
 
     pub async fn send_event(&self, session_id: &str, event: Event) -> Result<(), String> {
-        let map = self.sessions.read().await;
-        if let Some(session) = map.get(session_id) {
-            session
-                .sender
+        // Clone the sender and drop the lock BEFORE awaiting send to prevent stalling
+        let sender = {
+            let map = self.sessions.read().await;
+            map.get(session_id).map(|s| s.sender.clone())
+        };
+
+        if let Some(sender) = sender {
+            sender
                 .send(event)
                 .await
                 .map_err(|e| format!("Failed to send SSE event: {}", e))
@@ -111,7 +171,7 @@ pub mod tests {
         let manager = SessionManager::new();
         let user = dummy_user(10, "alice");
 
-        let (session_id, mut rx) = manager.create_session(user.clone()).await;
+        let (session_id, mut rx) = manager.create_session(1, user.clone()).await;
         assert_eq!(manager.count().await, 1);
 
         // Get user back
@@ -138,7 +198,7 @@ pub mod tests {
     async fn test_session_cleanup_stale() {
         let manager = SessionManager::new();
         let user = dummy_user(20, "bob");
-        let (session_id, _rx) = manager.create_session(user).await;
+        let (session_id, _rx) = manager.create_session(2, user).await;
 
         // Cleanup with 1 hour timeout shouldn't remove it
         let cleaned = manager.cleanup_stale(Duration::from_secs(3600)).await;

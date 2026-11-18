@@ -170,8 +170,8 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
 
         "get_project_metadata" => {
             let project_id = match args.get("project_id").and_then(|v| v.as_i64()) {
-                Some(id) => id,
-                None => return CallToolResult::error("Missing required parameter: project_id"),
+                Some(id) if id > 0 => id,
+                _ => return CallToolResult::error("Project ID must be greater than 0"),
             };
 
             let eff = db.effective_access_level(user, project_id).unwrap_or(0);
@@ -342,12 +342,12 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
 
         "create_issue" => {
             let project_id = match args.get("project_id").and_then(|v| v.as_i64()) {
-                Some(id) => id,
-                None => return CallToolResult::error("Missing required parameter: project_id"),
+                Some(id) if id > 0 => id,
+                _ => return CallToolResult::error("Project ID must be greater than 0"),
             };
             let category_id = match args.get("category_id").and_then(|v| v.as_i64()) {
-                Some(id) => id,
-                None => return CallToolResult::error("Missing required parameter: category_id"),
+                Some(id) if id > 0 => id,
+                _ => return CallToolResult::error("Category ID must be greater than 0"),
             };
             let summary = match args.get("summary").and_then(|v| v.as_str()) {
                 Some(s) if !s.trim().is_empty() => s.trim(),
@@ -367,6 +367,14 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 return CallToolResult::error(format!(
                     "Permission Denied: Reporter (25) or higher access required to create issues on project {} (your level: {})",
                     project_id, eff
+                ));
+            }
+
+            let categories = db.list_effective_categories(project_id).unwrap_or_default();
+            if !categories.iter().any(|c| c.id == category_id) {
+                return CallToolResult::error(format!(
+                    "Category #{} not found or does not belong to project #{}",
+                    category_id, project_id
                 ));
             }
 
@@ -552,10 +560,20 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                     "Permission Denied: Developer (55) or higher required to create private notes",
                 );
             }
-            let time_tracking = args
+            let raw_time = args
                 .get("time_tracking")
                 .and_then(|v| v.as_i64())
-                .unwrap_or(0) as i32;
+                .unwrap_or(0);
+            let time_tracking = if raw_time > 0 {
+                if eff < 55 {
+                    return CallToolResult::error(
+                        "Permission Denied: Developer (55) or higher required to record time tracking",
+                    );
+                }
+                raw_time.max(0) as i32
+            } else {
+                0
+            };
 
             match db.add_bugnote_with_time(issue_id, user.id, text, view_state, time_tracking) {
                 Ok(note_id) => {

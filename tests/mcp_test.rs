@@ -402,6 +402,40 @@ fn test_mcp_tools_and_rbac_dispatch() {
     assert!(res.content[0].text.contains("Permission Denied"));
 
     // 4. create_issue
+    // project_id <= 0 fails
+    let res = dispatch_tool_call(
+        &db,
+        &rep_user,
+        "create_issue",
+        json!({
+            "project_id": 0,
+            "category_id": cat_id,
+            "summary": "Bug under 0",
+            "description": "Desc"
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0]
+        .text
+        .contains("Project ID must be greater than 0"));
+
+    // invalid category_id fails
+    let res = dispatch_tool_call(
+        &db,
+        &rep_user,
+        "create_issue",
+        json!({
+            "project_id": pub_proj_id,
+            "category_id": 9999,
+            "summary": "Bug with wrong cat",
+            "description": "Desc"
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0]
+        .text
+        .contains("not found or does not belong to project"));
+
     // Viewer fails
     let res = dispatch_tool_call(
         &db,
@@ -439,6 +473,35 @@ fn test_mcp_tools_and_rbac_dispatch() {
     assert_eq!(created_bug.reporter_id, rep_user.id);
 
     // 5. add_issue_note
+    // Reporter cannot record time tracking
+    let res = dispatch_tool_call(
+        &db,
+        &rep_user,
+        "add_issue_note",
+        json!({
+            "issue_id": issue_id,
+            "text": "Note with time",
+            "time_tracking": 120
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0]
+        .text
+        .contains("Developer (55) or higher required to record time tracking"));
+
+    // Developer can record time tracking
+    let res = dispatch_tool_call(
+        &db,
+        &dev_user,
+        "add_issue_note",
+        json!({
+            "issue_id": issue_id,
+            "text": "Dev note with time",
+            "time_tracking": 60
+        }),
+    );
+    assert!(!res.is_error);
+
     let res = dispatch_tool_call(
         &db,
         &rep_user,
@@ -450,8 +513,9 @@ fn test_mcp_tools_and_rbac_dispatch() {
     );
     assert!(!res.is_error);
     let notes = db.list_bugnotes(issue_id, 90).unwrap();
-    assert_eq!(notes.len(), 1);
-    assert_eq!(notes[0].reporter_id, rep_user.id);
+    assert_eq!(notes.len(), 2);
+    assert_eq!(notes[0].reporter_id, dev_user.id);
+    assert_eq!(notes[1].reporter_id, rep_user.id);
 
     // 6. update_issue
     // Different reporter (rep2_user) tries to update -> Permission Denied
@@ -588,7 +652,6 @@ fn test_mcp_tools_and_rbac_dispatch() {
 
 #[tokio::test]
 async fn test_mcp_sse_and_messages_e2e() {
-    use axum::body::to_bytes;
     use serde_json::json;
 
     let db = Db::open_in_memory().unwrap();
@@ -604,7 +667,7 @@ async fn test_mcp_sse_and_messages_e2e() {
         )
         .unwrap();
 
-    let (_token_id, raw_token) = db.create_api_token(rep_id, "MCP Test Token").unwrap();
+    let (token_id, raw_token) = db.create_api_token(rep_id, "MCP Test Token").unwrap();
     let app = build_router(db.clone());
 
     // 1. Unauthenticated GET /mcp/sse returns 401
@@ -686,7 +749,7 @@ async fn test_mcp_sse_and_messages_e2e() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    // 5. POST initialize
+    // 5. POST initialize -> returns 202 Accepted, and response is delivered via SSE stream
     let res = app
         .clone()
         .oneshot(
@@ -711,18 +774,15 @@ async fn test_mcp_sse_and_messages_e2e() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let init_bytes = to_bytes(res.into_body(), 1024 * 16).await.unwrap();
-    let init_json: serde_json::Value = serde_json::from_slice(&init_bytes).unwrap();
-    assert_eq!(init_json["result"]["protocolVersion"], "2024-11-05");
-    assert_eq!(init_json["result"]["serverInfo"]["name"], "rust-mantis-bt");
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
 
-    // Verify SSE stream also received the message event!
+    // Verify SSE stream received the message event!
     let frame2 = body.frame().await.unwrap().unwrap();
     let data2 = frame2.into_data().unwrap();
     let sse_msg = String::from_utf8_lossy(&data2);
     assert!(sse_msg.contains("event: message"));
     assert!(sse_msg.contains(r#""protocolVersion":"2024-11-05""#));
+    assert!(sse_msg.contains("rust-mantis-bt"));
 
     // 6. POST tools/list
     let res = app
@@ -744,11 +804,14 @@ async fn test_mcp_sse_and_messages_e2e() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let tools_bytes = to_bytes(res.into_body(), 1024 * 16).await.unwrap();
-    let tools_json: serde_json::Value = serde_json::from_slice(&tools_bytes).unwrap();
-    let tools_arr = tools_json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools_arr.len(), 8);
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
+
+    let frame3 = body.frame().await.unwrap().unwrap();
+    let data3 = frame3.into_data().unwrap();
+    let sse_tools = String::from_utf8_lossy(&data3);
+    assert!(sse_tools.contains("event: message"));
+    assert!(sse_tools.contains("whoami"));
+    assert!(sse_tools.contains("create_issue"));
 
     // 7. POST tools/call for whoami
     let res = app
@@ -774,24 +837,83 @@ async fn test_mcp_sse_and_messages_e2e() {
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let call_bytes = to_bytes(res.into_body(), 1024 * 16).await.unwrap();
-    let call_json: serde_json::Value = serde_json::from_slice(&call_bytes).unwrap();
-    let call_text = call_json["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(call_text.contains("mcp_reporter"));
+    assert_eq!(res.status(), StatusCode::ACCEPTED);
 
-    // 8. Header Authorization: Bearer also works
+    let frame4 = body.frame().await.unwrap().unwrap();
+    let data4 = frame4.into_data().unwrap();
+    let sse_call = String::from_utf8_lossy(&data4);
+    assert!(sse_call.contains("event: message"));
+    assert!(sse_call.contains("mcp_reporter"));
+
+    // 8. Test dynamic token revocation on open session
+    // Revoke the token in DB
+    assert!(db.revoke_api_token(token_id, rep_id).unwrap());
     let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/mcp/messages?session_id={}", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "ping"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 9. Header Authorization: Bearer creates another working session
+    let (_tok2_id, raw_tok2) = db.create_api_token(rep_id, "Bearer Token").unwrap();
+    let res2 = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/mcp/sse")
-                .header("authorization", format!("Bearer {}", raw_token))
+                .header("authorization", format!("Bearer {}", raw_tok2))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res2.status(), StatusCode::OK);
+
+    // 10. Drop guard: dropping the SSE stream cleans up the session
+    let mut body2 = res2.into_body();
+    let frame_end = body2.frame().await.unwrap().unwrap();
+    let end_data = frame_end.into_data().unwrap();
+    let sse_end_text = String::from_utf8_lossy(&end_data);
+    let s_prefix = "/mcp/messages?session_id=";
+    let s_start = sse_end_text.find(s_prefix).unwrap() + s_prefix.len();
+    let s_end = sse_end_text[s_start..]
+        .find(|c: char| c.is_whitespace() || c == '\n' || c == '\r')
+        .map(|offset| s_start + offset)
+        .unwrap_or(sse_end_text.len());
+    let session2_id = sse_end_text[s_start..s_end].to_string();
+
+    // Drop the body stream
+    drop(body2);
+    // Allow spawned background task to run cleanup
+    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/mcp/messages?session_id={}", session2_id))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

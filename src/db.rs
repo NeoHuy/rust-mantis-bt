@@ -4049,6 +4049,13 @@ impl Db {
     }
 
     pub fn authenticate_api_token(&self, raw_token: &str) -> rusqlite::Result<Option<User>> {
+        Ok(self.authenticate_api_token_full(raw_token)?.map(|(_, u)| u))
+    }
+
+    pub fn authenticate_api_token_full(
+        &self,
+        raw_token: &str,
+    ) -> rusqlite::Result<Option<(i64, User)>> {
         let trimmed = raw_token.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -4084,7 +4091,7 @@ impl Db {
             params![now, token_id],
         );
 
-        Ok(Some(user))
+        Ok(Some((token_id, user)))
     }
 
     pub fn list_plugins(&self) -> rusqlite::Result<Vec<PluginItem>> {

@@ -10,6 +10,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
+use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -29,6 +30,22 @@ pub struct MessagesQuery {
     pub session_id: Option<String>,
 }
 
+/// Automatically removes the session when the client disconnects from the SSE stream.
+struct SessionDropGuard {
+    session_id: String,
+    session_manager: SessionManager,
+}
+
+impl Drop for SessionDropGuard {
+    fn drop(&mut self) {
+        let sm = self.session_manager.clone();
+        let sid = self.session_id.clone();
+        tokio::spawn(async move {
+            sm.remove_session(&sid).await;
+        });
+    }
+}
+
 pub async fn mcp_sse_handler(
     State(state): State<McpState>,
     headers: HeaderMap,
@@ -37,15 +54,11 @@ pub async fn mcp_sse_handler(
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
         .unwrap_or("");
 
-    let raw_token = if let Some(stripped) = auth_header.strip_prefix("Bearer ") {
-        stripped.trim()
-    } else if let Some(stripped) = auth_header.strip_prefix("bearer ") {
-        stripped.trim()
-    } else if !auth_header.is_empty() {
-        auth_header
+    let bearer_token = crate::auth::extract_bearer_token(auth_header);
+    let raw_token = if !bearer_token.is_empty() {
+        bearer_token
     } else if let Some(tok) = q.token.as_deref() {
         tok.trim()
     } else {
@@ -60,8 +73,8 @@ pub async fn mcp_sse_handler(
             .into_response();
     }
 
-    let user = match state.db.authenticate_api_token(raw_token) {
-        Ok(Some(u)) if u.enabled == 1 => u,
+    let (token_id, user) = match state.db.authenticate_api_token_full(raw_token) {
+        Ok(Some((tid, u))) if u.enabled == 1 => (tid, u),
         _ => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -77,14 +90,23 @@ pub async fn mcp_sse_handler(
         .cleanup_stale(std::time::Duration::from_secs(1800))
         .await;
 
-    let (session_id, rx) = state.session_manager.create_session(user).await;
+    let (session_id, rx) = state.session_manager.create_session(token_id, user).await;
 
     let initial_event = Event::default()
         .event("endpoint")
         .data(format!("/mcp/messages?session_id={}", session_id));
 
+    let guard = Arc::new(SessionDropGuard {
+        session_id: session_id.clone(),
+        session_manager: state.session_manager.clone(),
+    });
+
     let stream = tokio_stream::once(Ok::<Event, Infallible>(initial_event))
-        .chain(ReceiverStream::new(rx).map(Ok));
+        .chain(ReceiverStream::new(rx).map(Ok))
+        .map(move |item| {
+            let _ = &guard;
+            item
+        });
 
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
@@ -107,12 +129,17 @@ pub async fn mcp_messages_handler(
         }
     };
 
-    let user = match state.session_manager.get_user(session_id).await {
+    // Re-validate session against database to detect token revocation or user demotion
+    let user = match state
+        .session_manager
+        .get_user_validated(&state.db, session_id)
+        .await
+    {
         Some(u) => u,
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(json!({ "error": "Session not found" })),
+                Json(json!({ "error": "Session not found or revoked" })),
             )
                 .into_response();
         }
@@ -157,10 +184,23 @@ pub async fn mcp_messages_handler(
 
         "tools/call" => {
             let params = req.params.unwrap_or_default();
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+            let db = state.db.clone();
 
-            let result = dispatch_tool_call(&state.db, &user, name, arguments);
+            // Offload synchronous rusqlite queries to Tokio blocking threadpool
+            let result = tokio::task::spawn_blocking(move || {
+                dispatch_tool_call(&db, &user, &name, arguments)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                crate::mcp::protocol::CallToolResult::error(format!("Blocking task failure: {}", e))
+            });
+
             JsonRpcResponse::success(req.id, serde_json::to_value(result).unwrap_or_default())
         }
 
@@ -183,5 +223,6 @@ pub async fn mcp_messages_handler(
             .await;
     }
 
-    (StatusCode::OK, Json(resp)).into_response()
+    // Per MCP SSE Transport specification, response to POST message is HTTP 202 Accepted
+    StatusCode::ACCEPTED.into_response()
 }

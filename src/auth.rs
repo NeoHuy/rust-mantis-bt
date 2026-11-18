@@ -292,6 +292,17 @@ pub fn hash_api_token(raw: &str) -> String {
     out
 }
 
+pub fn extract_bearer_token(auth_header: &str) -> &str {
+    let trimmed = auth_header.trim();
+    if let Some(stripped) = trimmed.strip_prefix("Bearer ") {
+        stripped.trim()
+    } else if let Some(stripped) = trimmed.strip_prefix("bearer ") {
+        stripped.trim()
+    } else {
+        trimmed
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ApiAuth {
     pub user: crate::models::User,
@@ -318,16 +329,9 @@ where
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim())
             .unwrap_or("");
 
-        let raw_token = if let Some(stripped) = auth_header.strip_prefix("Bearer ") {
-            stripped.trim()
-        } else if let Some(stripped) = auth_header.strip_prefix("bearer ") {
-            stripped.trim()
-        } else {
-            auth_header
-        };
+        let raw_token = extract_bearer_token(auth_header);
 
         if raw_token.is_empty() {
             return Err((

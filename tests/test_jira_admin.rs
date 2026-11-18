@@ -92,7 +92,7 @@ async fn test_admin_jira_save_config() {
 
     // Save config
     let form_body = format!(
-        "jira_enabled=1&jira_base_url=https://myteam.atlassian.net&jira_email=bot@myteam.com&jira_api_token=secret_tok_123&jira_default_issue_type=Task&jira_default_project_key=GLOBAL_KEY&project_map_{}=ALPHA",
+        "jira_enabled=1&jira_base_url=https://myteam.atlassian.net&jira_email=bot@myteam.com&jira_api_token=secret_tok_123&jira_default_issue_type=Task&jira_default_project_key=GLOBAL_KEY&project_map_{}=ALPHA&status_jira_1=In+Testing&status_mantis_1=20&status_jira_2=Deployed&status_mantis_2=80",
         proj_id
     );
 
@@ -120,6 +120,11 @@ async fn test_admin_jira_save_config() {
     assert_eq!(conf.api_token, "secret_tok_123");
     assert_eq!(conf.default_issue_type, "Task");
     assert_eq!(conf.project_key, "ALPHA");
+
+    let sm = db.list_jira_status_mappings().unwrap();
+    assert_eq!(sm.len(), 2);
+    assert_eq!(sm[0], ("In Testing".to_string(), 20));
+    assert_eq!(sm[1], ("Deployed".to_string(), 80));
 }
 
 #[tokio::test]

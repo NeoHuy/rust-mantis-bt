@@ -36,3 +36,9 @@ pub struct JiraResolvedConfig {
     pub default_issue_type: String,
     pub project_key: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JiraStatusMapping {
+    pub jira_status: String,
+    pub mantis_status: i32,
+}

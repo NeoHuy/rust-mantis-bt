@@ -325,8 +325,36 @@ impl Db {
                 project_key TEXT PRIMARY KEY,
                 epics_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table (
+                jira_status TEXT PRIMARY KEY,
+                mantis_status INTEGER NOT NULL
             );",
         )?;
+
+        // Seed default Jira status mappings if table is empty
+        let status_map_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mantis_jira_status_mapping_table",
+            [],
+            |row| row.get(0),
+        )?;
+        if status_map_count == 0 {
+            let defaults = [
+                ("To Do", 30),
+                ("Open", 30),
+                ("In Progress", 50),
+                ("In Review", 20),
+                ("Done", 80),
+                ("Closed", 90),
+            ];
+            for (j_status, m_status) in defaults {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                    params![j_status, m_status],
+                );
+            }
+        }
 
         // Ensure jira_status column exists in mantis_jira_links_table for existing databases
         let has_jira_status = conn
@@ -4375,7 +4403,17 @@ impl Db {
             )
             .map_err(|e| e.to_string())?;
 
-        let new_status = crate::jira::map_jira_status_to_mantis(jira_status);
+        let mapped_status: Option<i32> = tx
+            .query_row(
+                "SELECT mantis_status FROM mantis_jira_status_mapping_table WHERE LOWER(jira_status) = LOWER(?1)",
+                params![jira_status.trim()],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+
+        let new_status =
+            mapped_status.unwrap_or_else(|| crate::jira::map_jira_status_to_mantis(jira_status));
         if old_status != new_status {
             tx.execute(
                 "UPDATE mantis_bug_table SET status = ?1, last_updated = ?2 WHERE id = ?3",
@@ -4640,6 +4678,53 @@ impl Db {
             conn.execute("DELETE FROM mantis_jira_epics_cache_table", [])?;
         }
         Ok(())
+    }
+
+    pub fn list_jira_status_mappings(&self) -> rusqlite::Result<Vec<(String, i32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT jira_status, mantis_status FROM mantis_jira_status_mapping_table ORDER BY mantis_status ASC, jira_status ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let j: String = row.get(0)?;
+            let m: i32 = row.get(1)?;
+            Ok((j, m))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn save_jira_status_mappings(&self, mappings: &[(String, i32)]) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM mantis_jira_status_mapping_table", [])?;
+        for (j_status, m_status) in mappings {
+            let trimmed = j_status.trim();
+            if !trimmed.is_empty() {
+                tx.execute(
+                    "INSERT OR REPLACE INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                    params![trimmed, m_status],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn resolve_jira_status_to_mantis(&self, jira_status: &str) -> i32 {
+        let conn = self.conn();
+        let found: Option<i32> = conn
+            .query_row(
+                "SELECT mantis_status FROM mantis_jira_status_mapping_table WHERE LOWER(jira_status) = LOWER(?1)",
+                params![jira_status.trim()],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        found.unwrap_or_else(|| crate::jira::map_jira_status_to_mantis(jira_status))
     }
 }
 

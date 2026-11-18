@@ -64,6 +64,7 @@ pub async fn manage_jira_page(
     }
 
     let cached_epics = db.list_cached_jira_epics_summary().unwrap_or_default();
+    let status_mappings = db.list_jira_status_mappings().unwrap_or_default();
 
     views::jira::render_manage_jira_page(
         &ctx,
@@ -71,6 +72,7 @@ pub async fn manage_jira_page(
         &projects,
         &project_mappings,
         &cached_epics,
+        &status_mappings,
         q.msg.as_deref(),
         q.err.as_deref(),
     )
@@ -133,6 +135,34 @@ pub async fn manage_jira_config(
                 let _ = db.set_jira_project_mapping(pid, v.trim());
             }
         }
+    }
+
+    // Process status mappings
+    let mut status_indices = std::collections::BTreeSet::new();
+    for k in form.keys() {
+        if let Some(rest) = k.strip_prefix("status_jira_") {
+            if let Ok(idx) = rest.parse::<usize>() {
+                status_indices.insert(idx);
+            }
+        }
+    }
+
+    let mut new_mappings = Vec::new();
+    for idx in status_indices {
+        let j_key = format!("status_jira_{}", idx);
+        let m_key = format!("status_mantis_{}", idx);
+        if let Some(j_val) = form.get(&j_key).map(|s| s.trim()) {
+            if !j_val.is_empty() {
+                let m_val = form
+                    .get(&m_key)
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .unwrap_or(10);
+                new_mappings.push((j_val.to_string(), m_val));
+            }
+        }
+    }
+    if !new_mappings.is_empty() {
+        let _ = db.save_jira_status_mappings(&new_mappings);
     }
 
     Redirect::to("/manage_jira_page?msg=Jira+configuration+saved+successfully").into_response()

@@ -1327,3 +1327,33 @@ fn test_jira_epics_cache() {
     db.clear_jira_epics_cache(Some("JBC")).unwrap();
     assert!(db.get_cached_jira_epics("JBC", 86400).unwrap().is_none());
 }
+
+#[test]
+fn test_jira_status_mappings() {
+    let db = Db::open_in_memory().unwrap();
+
+    // Default seeded mappings
+    let initial = db.list_jira_status_mappings().unwrap();
+    assert!(!initial.is_empty());
+    assert_eq!(db.resolve_jira_status_to_mantis("To Do"), 30);
+    assert_eq!(db.resolve_jira_status_to_mantis("In Progress"), 50);
+    assert_eq!(db.resolve_jira_status_to_mantis("In Review"), 20);
+    assert_eq!(db.resolve_jira_status_to_mantis("Done"), 80);
+
+    // Save custom mappings
+    let custom = vec![
+        ("Backlog".to_string(), 10),
+        ("In Dev".to_string(), 50),
+        ("QA Passed".to_string(), 80),
+        ("Live Released".to_string(), 90),
+    ];
+    db.save_jira_status_mappings(&custom).unwrap();
+
+    assert_eq!(db.resolve_jira_status_to_mantis("Backlog"), 10);
+    assert_eq!(db.resolve_jira_status_to_mantis("in dev"), 50); // case insensitive
+    assert_eq!(db.resolve_jira_status_to_mantis("QA Passed"), 80);
+    assert_eq!(db.resolve_jira_status_to_mantis("LIVE RELEASED"), 90);
+
+    // Unmapped fallback heuristic
+    assert_eq!(db.resolve_jira_status_to_mantis("Resolved"), 80);
+}

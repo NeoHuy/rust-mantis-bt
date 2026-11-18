@@ -4,12 +4,35 @@ use crate::views::html_escape;
 use crate::views::layout::render_layout;
 use axum::response::Html;
 
+fn render_mantis_status_options(selected: i32) -> String {
+    let statuses = [
+        (10, "10 - new"),
+        (20, "20 - feedback"),
+        (30, "30 - acknowledged"),
+        (40, "40 - confirmed"),
+        (50, "50 - assigned"),
+        (80, "80 - resolved"),
+        (90, "90 - closed"),
+    ];
+    let mut out = String::new();
+    for (val, label) in statuses {
+        let sel = if val == selected { " selected" } else { "" };
+        out.push_str(&format!(
+            r#"<option value="{}"{}>{}</option>"#,
+            val, sel, label
+        ));
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn render_manage_jira_page(
     ctx: &AuthContext,
     config: &JiraResolvedConfig,
     _projects: &[Project],
     project_mappings: &[(i64, String, String)],
     cached_epics: &[(String, usize, i64)],
+    status_mappings: &[(String, i32)],
     msg: Option<&str>,
     err: Option<&str>,
 ) -> Html<String> {
@@ -47,6 +70,46 @@ pub fn render_manage_jira_page(
             html_escape(pname),
             pid,
             html_escape(mapped_key)
+        ));
+    }
+
+    let mut status_mapping_rows = String::new();
+    let mut row_idx = 0;
+    for (j_status, m_status) in status_mappings {
+        row_idx += 1;
+        status_mapping_rows.push_str(&format!(
+            r#"<tr>
+                <td>
+                    <input type="text" name="status_jira_{}" value="{}" placeholder="e.g. In Progress" style="width:260px;">
+                </td>
+                <td>
+                    <select name="status_mantis_{}" style="width:200px;">
+                        {}
+                    </select>
+                </td>
+            </tr>"#,
+            row_idx,
+            html_escape(j_status),
+            row_idx,
+            render_mantis_status_options(*m_status)
+        ));
+    }
+    for _ in 0..2 {
+        row_idx += 1;
+        status_mapping_rows.push_str(&format!(
+            r#"<tr>
+                <td>
+                    <input type="text" name="status_jira_{}" value="" placeholder="(New Jira status)" style="width:260px;">
+                </td>
+                <td>
+                    <select name="status_mantis_{}" style="width:200px;">
+                        {}
+                    </select>
+                </td>
+            </tr>"#,
+            row_idx,
+            row_idx,
+            render_mantis_status_options(10)
         ));
     }
 
@@ -156,6 +219,20 @@ pub fn render_manage_jira_page(
                         </tbody>
                     </table>
 
+                    <h3 style="margin-top:24px; margin-bottom:12px; font-size:15px;">Status Mapping (Jira Status &rarr; Mantis Status)</h3>
+                    <table class="table" style="max-width:800px; margin-bottom:6px;">
+                        <thead>
+                            <tr>
+                                <th style="width:280px;">Jira Status (Case-insensitive)</th>
+                                <th>Mapped Mantis Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                    <small style="color:#777; display:block; margin-bottom:20px;">When issues sync from Jira, their Mantis status will automatically update to match this mapping. Leave Jira status blank to remove a mapping.</small>
+
                     <div style="display:flex; gap:10px; align-items:center;">
                         <button type="submit" class="btn btn-primary">Save Jira Configuration</button>
                     </div>
@@ -194,6 +271,7 @@ pub fn render_manage_jira_page(
         is_task_selected,
         html_escape(&config.project_key),
         project_mapping_rows,
+        status_mapping_rows,
         cached_epics_html
     );
 

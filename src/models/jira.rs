@@ -7,8 +7,24 @@ pub struct JiraLink {
     pub jira_key: String,
     pub jira_url: String,
     pub issue_type: String,
+    pub jira_status: String,
     pub created_by: i64,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JiraEpic {
+    pub key: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JiraIssueDetails {
+    pub id: String,
+    pub key: String,
+    pub summary: String,
+    pub issue_type: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

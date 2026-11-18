@@ -248,7 +248,7 @@ pub async fn push_bug_to_jira(
 
     let client = JiraClient::new();
     let jira_resp = match client
-        .create_issue(&config, summary, &description, issue_type)
+        .create_issue(&config, summary, &description, issue_type, None)
         .await
     {
         Ok(resp) => resp,

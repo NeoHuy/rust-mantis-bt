@@ -4282,6 +4282,7 @@ impl Db {
                 jira_key: row.get(2)?,
                 jira_url: row.get(3)?,
                 issue_type: row.get(4)?,
+                jira_status: String::new(),
                 created_by: row.get(5)?,
                 created_at: row.get(6)?,
             }))

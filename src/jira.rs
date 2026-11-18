@@ -1,4 +1,4 @@
-use crate::models::JiraResolvedConfig;
+use crate::models::{JiraEpic, JiraIssueDetails, JiraResolvedConfig};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -23,11 +23,18 @@ pub struct JiraIssueTypeField {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JiraParentField {
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JiraFields {
     pub project: JiraProjectField,
     pub summary: String,
     pub description: String,
     pub issuetype: JiraIssueTypeField,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<JiraParentField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +56,42 @@ pub struct JiraCreateIssueResponse {
     pub key: String,
     pub self_url: String,
     pub browse_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JiraStatusField {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JiraIssueDetailsFields {
+    pub summary: String,
+    pub issuetype: JiraIssueTypeField,
+    pub status: JiraStatusField,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JiraIssueDetailsRawResponse {
+    pub id: String,
+    pub key: String,
+    pub fields: JiraIssueDetailsFields,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JiraEpicFields {
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JiraEpicIssueRaw {
+    pub id: String,
+    pub key: String,
+    pub fields: JiraEpicFields,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JiraSearchEpicsRawResponse {
+    pub issues: Vec<JiraEpicIssueRaw>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +196,7 @@ impl JiraClient {
         summary: &str,
         description: &str,
         issue_type: &str,
+        epic_key: Option<&str>,
     ) -> Result<JiraCreateIssueResponse, JiraError> {
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
         if trimmed_url.is_empty() {
@@ -180,6 +224,7 @@ impl JiraClient {
             } else {
                 issue_type
             },
+            epic_key,
         );
 
         let url = format!("{}/rest/api/2/issue", trimmed_url);
@@ -214,6 +259,130 @@ impl JiraClient {
             .map_err(|e| JiraError::NetworkError(e.to_string()))?;
 
         parse_create_issue_response(&body_text, trimmed_url)
+    }
+
+    pub async fn get_issue(
+        &self,
+        config: &JiraResolvedConfig,
+        key: &str,
+    ) -> Result<JiraIssueDetails, JiraError> {
+        let trimmed_url = config.base_url.trim().trim_end_matches('/');
+        if trimmed_url.is_empty() {
+            return Err(JiraError::ConfigError(
+                "Jira Base URL is not configured".to_string(),
+            ));
+        }
+        if config.email.trim().is_empty() || config.api_token.trim().is_empty() {
+            return Err(JiraError::ConfigError(
+                "Email and API token must be configured".to_string(),
+            ));
+        }
+        let trimmed_key = key.trim();
+        if trimmed_key.is_empty() {
+            return Err(JiraError::ConfigError("Jira key cannot be empty".to_string()));
+        }
+
+        let url = format!(
+            "{}/rest/api/2/issue/{}?fields=summary,issuetype,status",
+            trimmed_url, trimmed_key
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .basic_auth(config.email.trim(), Some(config.api_token.trim()))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| JiraError::NetworkError(e.to_string()))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(JiraError::AuthError(
+                "Invalid credentials or insufficient permissions on Jira project".to_string(),
+            ));
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(JiraError::ApiError {
+                status: 404,
+                message: format!("Jira issue '{}' not found", trimmed_key),
+            });
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(JiraError::ApiError {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| JiraError::NetworkError(e.to_string()))?;
+
+        parse_issue_details_response(&body_text)
+    }
+
+    pub async fn list_epics(
+        &self,
+        config: &JiraResolvedConfig,
+    ) -> Result<Vec<JiraEpic>, JiraError> {
+        let trimmed_url = config.base_url.trim().trim_end_matches('/');
+        if trimmed_url.is_empty() {
+            return Err(JiraError::ConfigError(
+                "Jira Base URL is not configured".to_string(),
+            ));
+        }
+        if config.project_key.trim().is_empty() {
+            return Err(JiraError::ConfigError(
+                "Jira Project Key is not configured for this project".to_string(),
+            ));
+        }
+        if config.email.trim().is_empty() || config.api_token.trim().is_empty() {
+            return Err(JiraError::ConfigError(
+                "Email and API token must be configured".to_string(),
+            ));
+        }
+
+        let jql = format!(
+            "project = \"{}\" AND issuetype in ('Epic', 'epic') ORDER BY key DESC",
+            config.project_key.trim()
+        );
+        let url = format!("{}/rest/api/2/search", trimmed_url);
+        let resp = self
+            .client
+            .get(&url)
+            .query(&[
+                ("jql", jql.as_str()),
+                ("fields", "summary"),
+                ("maxResults", "50"),
+            ])
+            .basic_auth(config.email.trim(), Some(config.api_token.trim()))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| JiraError::NetworkError(e.to_string()))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(JiraError::AuthError(
+                "Invalid credentials or insufficient permissions to search Jira epics".to_string(),
+            ));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(JiraError::ApiError {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| JiraError::NetworkError(e.to_string()))?;
+
+        parse_search_epics_response(&body_text)
     }
 }
 
@@ -255,7 +424,15 @@ pub fn build_create_issue_payload(
     summary: &str,
     description: &str,
     issue_type: &str,
+    epic_key: Option<&str>,
 ) -> JiraIssueCreatePayload {
+    let parent = epic_key
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .map(|k| JiraParentField {
+            key: k.to_string(),
+        });
+
     JiraIssueCreatePayload {
         fields: JiraFields {
             project: JiraProjectField {
@@ -266,6 +443,7 @@ pub fn build_create_issue_payload(
             issuetype: JiraIssueTypeField {
                 name: issue_type.trim().to_string(),
             },
+            parent,
         },
     }
 }
@@ -284,6 +462,78 @@ pub fn parse_create_issue_response(
         self_url: raw.self_url,
         browse_url,
     })
+}
+
+pub fn parse_issue_details_response(raw_json: &str) -> Result<JiraIssueDetails, JiraError> {
+    let raw: JiraIssueDetailsRawResponse =
+        serde_json::from_str(raw_json).map_err(|e| JiraError::ParseError(e.to_string()))?;
+    Ok(JiraIssueDetails {
+        id: raw.id,
+        key: raw.key,
+        summary: raw.fields.summary,
+        issue_type: raw.fields.issuetype.name,
+        status: raw.fields.status.name,
+    })
+}
+
+pub fn parse_search_epics_response(raw_json: &str) -> Result<Vec<JiraEpic>, JiraError> {
+    let raw: JiraSearchEpicsRawResponse =
+        serde_json::from_str(raw_json).map_err(|e| JiraError::ParseError(e.to_string()))?;
+    Ok(raw
+        .issues
+        .into_iter()
+        .map(|i| JiraEpic {
+            key: i.key,
+            summary: i.fields.summary,
+        })
+        .collect())
+}
+
+pub fn normalize_jira_key(input: &str, default_project_key: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Some(idx) = trimmed.find("/browse/") {
+        let after = &trimmed[idx + "/browse/".len()..];
+        let key_part = after
+            .split(|c: char| c == '?' || c == '#' || c == '/')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !key_part.is_empty() {
+            return key_part.to_uppercase();
+        }
+    }
+
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        let prefix = default_project_key.trim().to_uppercase();
+        if !prefix.is_empty() {
+            return format!("{}-{}", prefix, trimmed);
+        }
+    }
+
+    trimmed.to_uppercase()
+}
+
+pub fn map_jira_status_to_mantis(jira_status: &str) -> i32 {
+    let s = jira_status.trim().to_lowercase();
+    if s.contains("closed") {
+        90 // closed
+    } else if s.contains("done") || s.contains("resolved") || s.contains("completed") {
+        80 // resolved
+    } else if s.contains("review")
+        || s.contains("testing")
+        || s.contains("qa")
+        || s.contains("feedback")
+    {
+        20 // feedback
+    } else if s.contains("in progress") || s.contains("in development") || s.contains("dev") {
+        50 // assigned
+    } else {
+        30 // acknowledged (default for To Do / Open / Backlog)
+    }
 }
 
 #[cfg(test)]

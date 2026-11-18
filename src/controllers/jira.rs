@@ -175,11 +175,18 @@ pub async fn manage_jira_test(State(db): State<Db>, ctx: AuthContext) -> Respons
     }
 }
 
-pub async fn push_bug_to_jira(
+#[derive(Deserialize, Default)]
+pub struct JiraSyncForm {
+    pub jira_key: Option<String>,
+    pub epic_key: Option<String>,
+    pub issue_type: Option<String>,
+}
+
+pub async fn sync_bug_with_jira(
     State(db): State<Db>,
     ctx: AuthContext,
     Path(bug_id): Path<i64>,
-    form: Result<Form<HashMap<String, String>>, axum::extract::rejection::FormRejection>,
+    form: Result<Form<JiraSyncForm>, axum::extract::rejection::FormRejection>,
 ) -> Response {
     let form_data = form.map(|Form(f)| f).unwrap_or_default();
 
@@ -195,17 +202,8 @@ pub async fn push_bug_to_jira(
     if eff < 55 || (bug.view_state == 50 && eff < 55) {
         return forbidden_html(
             &ctx,
-            "Developer access required on this project to push issues to Jira.",
+            "Developer access required on this project to sync issues with Jira.",
         );
-    }
-
-    // Check if already linked
-    if let Ok(Some(existing)) = db.get_jira_link_by_bug_id(bug_id) {
-        return Redirect::to(&format!(
-            "/view_bug_page/{}?err=Issue+is+already+linked+to+Jira+({})",
-            bug_id, existing.jira_key
-        ))
-        .into_response();
     }
 
     // Resolve Jira config for this bug's project
@@ -229,61 +227,215 @@ pub async fn push_bug_to_jira(
         .into_response();
     }
 
-    let summary = form_data
-        .get("summary")
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&bug.summary);
-
-    let issue_type = form_data
-        .get("issue_type")
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&config.default_issue_type);
-
-    let description = format!(
-        "{}\n\n---\nReported in MantisBT: Issue #{:07}\nSummary: {}\nReporter ID: {}\nPriority: {}",
-        bug_full.description, bug.id, bug.summary, bug.reporter_id, bug.priority
-    );
-
     let client = JiraClient::new();
-    let jira_resp = match client
-        .create_issue(&config, summary, &description, issue_type, None)
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
+    let existing_link = db.get_jira_link_by_bug_id(bug_id).unwrap_or(None);
+
+    if let Some(existing) = existing_link {
+        // Already linked -> Refresh status from Jira
+        let details = match client.get_issue(&config, &existing.jira_key).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err=Jira+sync+failed:+{}",
+                    bug_id,
+                    url_encode(&sanitize_error_message(&e.to_string()))
+                ))
+                .into_response();
+            }
+        };
+
+        if let Err(e) = db.record_jira_sync_success(
+            bug_id,
+            &details.key,
+            &existing.jira_url,
+            &details.issue_type,
+            &details.status,
+            ctx.user.id,
+            &ctx.user.username,
+            false,
+        ) {
             return Redirect::to(&format!(
-                "/view_bug_page/{}?err=Jira+creation+failed:+{}",
+                "/view_bug_page/{}?err=Failed+to+save+Jira+sync:+{}",
                 bug_id,
-                url_encode(&sanitize_error_message(&e.to_string()))
+                url_encode(&sanitize_error_message(&e))
             ))
             .into_response();
         }
-    };
 
-    // Save link, bugnote, and status update atomically in DB transaction
-    if let Err(e) = db.record_jira_push_success(
-        bug_id,
-        &jira_resp.key,
-        &jira_resp.browse_url,
-        issue_type,
-        ctx.user.id,
-        &ctx.user.username,
-    ) {
         return Redirect::to(&format!(
-            "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
+            "/view_bug_page/{}?msg=Synced+with+Jira+issue+{}",
             bug_id,
-            url_encode(&sanitize_error_message(&e))
+            url_encode(&details.key)
         ))
         .into_response();
     }
 
-    Redirect::to(&format!(
-        "/view_bug_page/{}?msg=Created+Jira+issue+{}",
-        bug_id, jira_resp.key
-    ))
-    .into_response()
+    // Not linked yet
+    let raw_key = form_data.jira_key.as_deref().unwrap_or("").trim();
+    let normalized_key = crate::jira::normalize_jira_key(raw_key, &config.project_key);
+
+    if !normalized_key.is_empty() {
+        // Link with existing ticket
+        let details = match client.get_issue(&config, &normalized_key).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err=Jira+link+failed:+{}",
+                    bug_id,
+                    url_encode(&sanitize_error_message(&e.to_string()))
+                ))
+                .into_response();
+            }
+        };
+
+        let trimmed_url = config.base_url.trim().trim_end_matches('/');
+        let browse_url = format!("{}/browse/{}", trimmed_url, details.key);
+
+        if let Err(e) = db.record_jira_sync_success(
+            bug_id,
+            &details.key,
+            &browse_url,
+            &details.issue_type,
+            &details.status,
+            ctx.user.id,
+            &ctx.user.username,
+            true,
+        ) {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
+                bug_id,
+                url_encode(&sanitize_error_message(&e))
+            ))
+            .into_response();
+        }
+
+        Redirect::to(&format!(
+            "/view_bug_page/{}?msg=Linked+to+Jira+issue+{}",
+            bug_id,
+            url_encode(&details.key)
+        ))
+        .into_response()
+    } else {
+        // Create new ticket in Jira
+        let issue_type = form_data
+            .issue_type
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&config.default_issue_type);
+
+        let epic_key = form_data
+            .epic_key
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
+        let description = format!(
+            "{}\n\n---\nReported in MantisBT: Issue #{:07}\nSummary: {}\nReporter ID: {}\nPriority: {}",
+            bug_full.description, bug.id, bug.summary, bug.reporter_id, bug.priority
+        );
+
+        let jira_resp = match client
+            .create_issue(&config, &bug.summary, &description, issue_type, epic_key)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err=Jira+creation+failed:+{}",
+                    bug_id,
+                    url_encode(&sanitize_error_message(&e.to_string()))
+                ))
+                .into_response();
+            }
+        };
+
+        let jira_status = match client.get_issue(&config, &jira_resp.key).await {
+            Ok(d) => d.status,
+            Err(_) => "To Do".to_string(),
+        };
+
+        if let Err(e) = db.record_jira_sync_success(
+            bug_id,
+            &jira_resp.key,
+            &jira_resp.browse_url,
+            issue_type,
+            &jira_status,
+            ctx.user.id,
+            &ctx.user.username,
+            true,
+        ) {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
+                bug_id,
+                url_encode(&sanitize_error_message(&e))
+            ))
+            .into_response();
+        }
+
+        Redirect::to(&format!(
+            "/view_bug_page/{}?msg=Created+Jira+issue+{}",
+            bug_id,
+            url_encode(&jira_resp.key)
+        ))
+        .into_response()
+    }
+}
+
+pub async fn unlink_bug_from_jira(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(bug_id): Path<i64>,
+) -> Response {
+    let bug_full = match db.get_bug_full(bug_id) {
+        Ok(Some(bf)) => bf,
+        _ => return Redirect::to("/view_all_bug_page?err=Issue+not+found").into_response(),
+    };
+    let bug = bug_full.bug;
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if eff < 55 || (bug.view_state == 50 && eff < 55) {
+        return forbidden_html(
+            &ctx,
+            "Developer access required on this project to unlink issues from Jira.",
+        );
+    }
+
+    match db.delete_jira_link_with_note(bug_id, ctx.user.id, &ctx.user.username) {
+        Ok(true) => Redirect::to(&format!(
+            "/view_bug_page/{}?msg=Jira+issue+unlinked+successfully",
+            bug_id
+        ))
+        .into_response(),
+        Ok(false) => Redirect::to(&format!(
+            "/view_bug_page/{}?err=No+Jira+link+found+to+unlink",
+            bug_id
+        ))
+        .into_response(),
+        Err(e) => Redirect::to(&format!(
+            "/view_bug_page/{}?err=Failed+to+unlink+Jira+issue:+{}",
+            bug_id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response(),
+    }
+}
+
+pub async fn push_bug_to_jira(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(bug_id): Path<i64>,
+    form: Result<Form<HashMap<String, String>>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let form_data = form.map(|Form(f)| f).unwrap_or_default();
+    let sync_form = JiraSyncForm {
+        jira_key: None,
+        epic_key: None,
+        issue_type: form_data.get("issue_type").cloned(),
+    };
+    sync_bug_with_jira(State(db), ctx, Path(bug_id), Ok(Form(sync_form))).await
 }
 
 fn sanitize_error_message(s: &str) -> String {
@@ -317,6 +469,8 @@ pub fn router() -> Router<Db> {
         .route("/manage_jira_page", get(manage_jira_page))
         .route("/manage_jira_config", post(manage_jira_config))
         .route("/manage_jira_test", post(manage_jira_test))
+        .route("/view_bug_page/:id/jira_sync", post(sync_bug_with_jira))
+        .route("/view_bug_page/:id/jira_unlink", post(unlink_bug_from_jira))
         .route("/view_bug_page/:id/jira_push", post(push_bug_to_jira))
 }
 

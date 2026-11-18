@@ -748,18 +748,20 @@ pub async fn view_bug_page(
                 project_key: String::new(),
             });
 
-    if jira_link.is_none() && jira_conf.enabled && eff >= 55 {
-        actions_html.push_str(&format!(
-            r#"<form method="POST" action="/view_bug_page/{}/jira_push" style="display:inline-flex; gap:4px; align-items:center;">
-                <select name="issue_type" style="width:auto;">
-                    <option value="Bug">Jira Bug</option>
-                    <option value="Task">Jira Task</option>
-                </select>
-                <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6;">Push to Jira</button>
-            </form>"#,
-            bug.id
-        ));
-    }
+    let epics = if jira_conf.enabled && eff >= 55 && jira_link.is_none() {
+        let client = crate::jira::JiraClient::new();
+        client.list_epics(&jira_conf).await.unwrap_or_default()
+    } else {
+        vec![]
+    };
+    let jira_section_html = views::jira::render_jira_section(
+        &ctx,
+        bug.id,
+        jira_link.as_ref(),
+        &epics,
+        jira_conf.enabled,
+        eff,
+    );
 
     let mut tags_html = String::new();
     if bug_tags.is_empty() {
@@ -1043,7 +1045,7 @@ pub async fn view_bug_page(
         &note_form_html,
         &history_html,
         jira_link.as_ref(),
-        "",
+        &jira_section_html,
         q.msg.as_deref(),
         q.err.as_deref(),
     )

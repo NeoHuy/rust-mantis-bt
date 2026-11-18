@@ -1,7 +1,8 @@
 use crate::models::{
-    ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugRelationship, BugTag, BugUpdate,
-    Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, NewsItem, PluginItem, Project,
-    ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
+    ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugPriority, BugRelationship,
+    BugResolution, BugSeverity, BugStatus, BugTag, BugUpdate, Bugnote, Category, CustomField,
+    CustomFieldValue, EmailMessage, NewsItem, PluginItem, Project, ProjectVersion, SavedFilter,
+    Tag, TimeTrackingEntry, User,
 };
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -1826,15 +1827,54 @@ impl Db {
 
         // Record new bug creation in history (type = 1)
         let _ = self.record_history(&conn, bug_id, reporter_id, "", "", "", 1);
+
+        let project_name = Self::helper_project_name(&conn, project_id);
+        let reporter_display = Self::helper_user_display(&conn, reporter_id);
+        let handler_display = Self::helper_user_display(&conn, 0);
+        let status_disp = Self::helper_status_display(10);
+        let priority_disp = Self::helper_priority_display(priority);
+        let severity_disp = Self::helper_severity_display(severity);
+
+        let mut body = format!(
+            "The following issue has been reported.\n\n\
+            ======================================================================\n\
+            Issue ID:     #{:07}\n\
+            Project:      {}\n\
+            Summary:      {}\n\
+            Reporter:     {}\n\
+            ======================================================================\n\
+            Status:       {}\n\
+            Assigned to:  {}\n\
+            Priority:     {}\n\
+            Severity:     {}\n\
+            ======================================================================\n\n\
+            Description:\n{}",
+            bug_id,
+            project_name,
+            trimmed_summary,
+            reporter_display,
+            status_disp,
+            handler_display,
+            priority_disp,
+            severity_disp,
+            description
+        );
+        if !steps_to_reproduce.trim().is_empty() {
+            body.push_str(&format!("\n\nSteps to Reproduce:\n{}", steps_to_reproduce));
+        }
+        if !additional_information.trim().is_empty() {
+            body.push_str(&format!(
+                "\n\nAdditional Information:\n{}",
+                additional_information
+            ));
+        }
+
         self.notify_bug_event(
             &conn,
             bug_id,
             reporter_id,
             &format!("[Issue #{:07}] New: {}", bug_id, trimmed_summary),
-            &format!(
-                "Issue #{:07} reported: {}\n\n{}",
-                bug_id, trimmed_summary, description
-            ),
+            &body,
         );
 
         Ok(bug_id)
@@ -2218,15 +2258,60 @@ impl Db {
             }
         }
 
+        let project_name = Self::helper_project_name(&conn, bug.project_id);
+        let actor_display = Self::helper_user_display(&conn, user_id);
+        let reporter_display = Self::helper_user_display(&conn, bug.reporter_id);
+        let handler_display = Self::helper_user_display(&conn, bug.handler_id);
+        let old_status_disp = Self::helper_status_display(bug.status);
+        let new_status_disp = Self::helper_status_display(new_status);
+        let new_status_name = Self::helper_status_name(new_status);
+        let resolution_disp = Self::helper_resolution_display(resolution);
+        let priority_disp = Self::helper_priority_display(bug.priority);
+        let severity_disp = Self::helper_severity_display(bug.severity);
+
+        let mut body = format!(
+            "The following issue status has been updated.\n\n\
+            ======================================================================\n\
+            Issue ID:     #{:07}\n\
+            Project:      {}\n\
+            Summary:      {}\n\
+            Updated by:   {}\n\
+            ======================================================================\n\
+            Status:       {} -> {}\n\
+            Resolution:   {}\n\
+            Assigned to:  {}\n\
+            Reporter:     {}\n\
+            Priority:     {}\n\
+            Severity:     {}\n\
+            ======================================================================",
+            bug_id,
+            project_name,
+            bug.summary,
+            actor_display,
+            old_status_disp,
+            new_status_disp,
+            resolution_disp,
+            handler_display,
+            reporter_display,
+            priority_disp,
+            severity_disp
+        );
+        if let Some(note_text) = note {
+            let trimmed = note_text.trim();
+            if !trimmed.is_empty() {
+                body.push_str(&format!("\n\nNote / Comment:\n{}", trimmed));
+            }
+        }
+
         self.notify_bug_event(
             &conn,
             bug_id,
             user_id,
-            &format!("[Issue #{:07}] Status changed to {}", bug_id, new_status),
             &format!(
-                "Issue #{:07} ({}) status changed from {} to {} (resolution {}).",
-                bug_id, bug.summary, bug.status, new_status, resolution
+                "[Issue #{:07}] Status changed to {}: {}",
+                bug_id, new_status_name, bug.summary
             ),
+            &body,
         );
 
         Ok(())
@@ -2291,15 +2376,53 @@ impl Db {
             .map_err(|e| e.to_string())?;
         }
 
+        let project_name = Self::helper_project_name(&conn, bug.project_id);
+        let actor_display = Self::helper_user_display(&conn, user_id);
+        let handler_display = Self::helper_user_display(&conn, handler_id);
+        let handler_name = Self::helper_username(&conn, handler_id);
+        let reporter_display = Self::helper_user_display(&conn, bug.reporter_id);
+        let status_disp = Self::helper_status_display(new_status);
+        let resolution_disp = Self::helper_resolution_display(bug.resolution);
+        let priority_disp = Self::helper_priority_display(bug.priority);
+        let severity_disp = Self::helper_severity_display(bug.severity);
+
+        let body = format!(
+            "The following issue has been assigned to {}.\n\n\
+            ======================================================================\n\
+            Issue ID:     #{:07}\n\
+            Project:      {}\n\
+            Summary:      {}\n\
+            Assigned to:  {}\n\
+            Assigned by:  {}\n\
+            ======================================================================\n\
+            Status:       {}\n\
+            Resolution:   {}\n\
+            Reporter:     {}\n\
+            Priority:     {}\n\
+            Severity:     {}\n\
+            ======================================================================",
+            handler_name,
+            bug_id,
+            project_name,
+            bug.summary,
+            handler_display,
+            actor_display,
+            status_disp,
+            resolution_disp,
+            reporter_display,
+            priority_disp,
+            severity_disp
+        );
+
         self.notify_bug_event(
             &conn,
             bug_id,
             user_id,
-            &format!("[Issue #{:07}] Assigned: {}", bug_id, bug.summary),
             &format!(
-                "Issue #{:07} ({}) assigned to user #{}.",
-                bug_id, bug.summary, handler_id
+                "[Issue #{:07}] Assigned to {}: {}",
+                bug_id, handler_name, bug.summary
             ),
+            &body,
         );
 
         Ok(())
@@ -2362,12 +2485,68 @@ impl Db {
             )?;
         }
 
+        let (
+            project_name,
+            bug_summary,
+            handler_display,
+            reporter_display,
+            status_disp,
+            resolution_disp,
+        ) = match Self::query_bug_by_id(conn, bug_id) {
+            Ok(Some(b)) => (
+                Self::helper_project_name(conn, b.project_id),
+                b.summary,
+                Self::helper_user_display(conn, b.handler_id),
+                Self::helper_user_display(conn, b.reporter_id),
+                Self::helper_status_display(b.status),
+                Self::helper_resolution_display(b.resolution),
+            ),
+            _ => (
+                format!("Bug #{}", bug_id),
+                String::new(),
+                "(Unassigned)".to_string(),
+                "(Unknown)".to_string(),
+                "".to_string(),
+                "".to_string(),
+            ),
+        };
+        let actor_display = Self::helper_user_display(conn, reporter_id);
+        let actor_name = Self::helper_username(conn, reporter_id);
+
+        let body = format!(
+            "A note has been added to the following issue.\n\n\
+            ======================================================================\n\
+            Issue ID:     #{:07}\n\
+            Project:      {}\n\
+            Summary:      {}\n\
+            Note Author:  {}\n\
+            ======================================================================\n\
+            Status:       {}\n\
+            Resolution:   {}\n\
+            Assigned to:  {}\n\
+            Reporter:     {}\n\
+            ======================================================================\n\n\
+            Note:\n{}",
+            bug_id,
+            project_name,
+            bug_summary,
+            actor_display,
+            status_disp,
+            resolution_disp,
+            handler_display,
+            reporter_display,
+            note
+        );
+
         db.notify_bug_event(
             conn,
             bug_id,
             reporter_id,
-            &format!("[Issue #{:07}] Note added", bug_id),
-            &format!("Note added to Issue #{:07}:\n\n{}", bug_id, note),
+            &format!(
+                "[Issue #{:07}] Note added by {}: {}",
+                bug_id, actor_name, bug_summary
+            ),
+            &body,
         );
 
         Ok(note_id)
@@ -3702,6 +3881,70 @@ impl Db {
     }
 
     // ─── Sub-project 4: Email Queue, Time Tracking & Project News ────────────
+
+    fn helper_user_display(conn: &Connection, id: i64) -> String {
+        if id <= 0 {
+            return "(Unassigned)".to_string();
+        }
+        match Self::query_user_by_id(conn, id) {
+            Ok(Some(u)) => {
+                let r = u.realname.trim();
+                if !r.is_empty() && r != u.username {
+                    format!("{} ({})", u.username, r)
+                } else {
+                    u.username
+                }
+            }
+            _ => format!("User #{}", id),
+        }
+    }
+
+    fn helper_username(conn: &Connection, id: i64) -> String {
+        if id <= 0 {
+            return "(Unassigned)".to_string();
+        }
+        match Self::query_user_by_id(conn, id) {
+            Ok(Some(u)) => u.username,
+            _ => format!("User #{}", id),
+        }
+    }
+
+    fn helper_project_name(conn: &Connection, id: i64) -> String {
+        match Self::query_project_by_id(conn, id) {
+            Ok(Some(p)) => p.name,
+            _ => format!("Project #{}", id),
+        }
+    }
+
+    fn helper_status_display(v: i32) -> String {
+        BugStatus::from_i32(v)
+            .map(|s| format!("{} ({})", s.display_name(), v))
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    fn helper_status_name(v: i32) -> String {
+        BugStatus::from_i32(v)
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    fn helper_resolution_display(v: i32) -> String {
+        BugResolution::from_i32(v)
+            .map(|r| format!("{} ({})", r.display_name(), v))
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    fn helper_priority_display(v: i32) -> String {
+        BugPriority::from_i32(v)
+            .map(|p| p.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    fn helper_severity_display(v: i32) -> String {
+        BugSeverity::from_i32(v)
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
 
     pub fn enqueue_email(
         &self,
@@ -5162,5 +5405,132 @@ mod tests {
                 .as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn test_email_templates_detailed() {
+        let db = Db::open_in_memory().unwrap();
+        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+        let dev_id = db
+            .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
+            .unwrap();
+        let proj_id = db
+            .create_project("Core System", 10, 10, "desc", true)
+            .unwrap();
+
+        // 1. Create bug -> New Issue email
+        let bug_id = db
+            .create_bug(
+                proj_id,
+                admin.id,
+                1,
+                "Null pointer in parser",
+                "Crash on empty token",
+                "1. Open page\n2. Click filter",
+                "",
+                30,
+                50,
+                10,
+                "1.0",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+        let emails = db.list_queued_emails().unwrap();
+        assert_eq!(emails.len(), 1);
+        assert_eq!(
+            emails[0].subject,
+            format!("[Issue #{:07}] New: Null pointer in parser", bug_id)
+        );
+        assert!(emails[0]
+            .body
+            .contains("The following issue has been reported."));
+        assert!(emails[0].body.contains("Project:      Core System"));
+        assert!(emails[0]
+            .body
+            .contains("Summary:      Null pointer in parser"));
+        assert!(emails[0].body.contains("Reporter:     administrator"));
+        assert!(emails[0].body.contains("Status:       New (10)"));
+        assert!(emails[0]
+            .body
+            .contains("Description:\nCrash on empty token"));
+        assert!(emails[0]
+            .body
+            .contains("Steps to Reproduce:\n1. Open page\n2. Click filter"));
+
+        db.flush_email_queue().unwrap();
+
+        // 2. Assign bug -> Assigned email
+        db.assign_bug(bug_id, admin.id, dev_id).unwrap();
+        let emails = db.list_queued_emails().unwrap();
+        assert_eq!(emails.len(), 2); // reporter & handler
+        assert_eq!(
+            emails[0].subject,
+            format!(
+                "[Issue #{:07}] Assigned to dev1: Null pointer in parser",
+                bug_id
+            )
+        );
+        assert!(emails[0]
+            .body
+            .contains("The following issue has been assigned to dev1"));
+        assert!(emails[0].body.contains("Assigned to:  dev1 (Dev One)"));
+        assert!(emails[0].body.contains("Assigned by:  administrator"));
+
+        db.flush_email_queue().unwrap();
+
+        // 3. Status change -> Status Changed email
+        db.change_bug_status(bug_id, dev_id, 80, 20, Some("Fixed in patch v1.2"))
+            .unwrap();
+        let emails = db.list_queued_emails().unwrap();
+        // Since bugnote is inserted as part of change_bug_status when note is provided,
+        // let's check the status change email
+        let status_email = emails
+            .iter()
+            .find(|e| e.subject.contains("Status changed"))
+            .expect("Status changed email not found");
+        assert_eq!(
+            status_email.subject,
+            format!(
+                "[Issue #{:07}] Status changed to Resolved: Null pointer in parser",
+                bug_id
+            )
+        );
+        assert!(status_email
+            .body
+            .contains("The following issue status has been updated."));
+        assert!(status_email
+            .body
+            .contains("Status:       Assigned (50) -> Resolved (80)"));
+        assert!(status_email.body.contains("Resolution:   Fixed (20)"));
+        assert!(status_email.body.contains("Updated by:   dev1 (Dev One)"));
+        assert!(status_email
+            .body
+            .contains("Note / Comment:\nFixed in patch v1.2"));
+
+        db.flush_email_queue().unwrap();
+
+        // 4. Note added -> Note added email
+        db.add_bugnote(bug_id, admin.id, "Please verify on staging", 10)
+            .unwrap();
+        let emails = db.list_queued_emails().unwrap();
+        let note_email = emails
+            .iter()
+            .find(|e| e.subject.contains("Note added"))
+            .expect("Note added email not found");
+        assert_eq!(
+            note_email.subject,
+            format!(
+                "[Issue #{:07}] Note added by administrator: Null pointer in parser",
+                bug_id
+            )
+        );
+        assert!(note_email
+            .body
+            .contains("A note has been added to the following issue."));
+        assert!(note_email.body.contains("Note Author:  administrator"));
+        assert!(note_email.body.contains("Note:\nPlease verify on staging"));
     }
 }

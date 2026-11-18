@@ -207,6 +207,18 @@ impl BugStatus {
             Self::Closed => "closed",
         }
     }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::New => "New",
+            Self::Feedback => "Feedback",
+            Self::Acknowledged => "Acknowledged",
+            Self::Confirmed => "Confirmed",
+            Self::Assigned => "Assigned",
+            Self::Resolved => "Resolved",
+            Self::Closed => "Closed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,6 +253,17 @@ impl BugPriority {
             Self::High => "high",
             Self::Urgent => "urgent",
             Self::Immediate => "immediate",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Low => "Low",
+            Self::Normal => "Normal",
+            Self::High => "High",
+            Self::Urgent => "Urgent",
+            Self::Immediate => "Immediate",
         }
     }
 }
@@ -283,6 +306,19 @@ impl BugSeverity {
             Self::Major => "major",
             Self::Crash => "crash",
             Self::Block => "block",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Feature => "Feature",
+            Self::Trivial => "Trivial",
+            Self::Text => "Text",
+            Self::Tweak => "Tweak",
+            Self::Minor => "Minor",
+            Self::Major => "Major",
+            Self::Crash => "Crash",
+            Self::Block => "Block",
         }
     }
 }
@@ -364,6 +400,20 @@ impl BugResolution {
             Self::NotABug => "not a bug",
             Self::Suspended => "suspended",
             Self::WontFix => "won't fix",
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Fixed => "Fixed",
+            Self::Reopened => "Reopened",
+            Self::UnableToReproduce => "Unable to Reproduce",
+            Self::NotFixable => "Not Fixable",
+            Self::Duplicate => "Duplicate",
+            Self::NotABug => "Not a Bug",
+            Self::Suspended => "Suspended",
+            Self::WontFix => "Won't Fix",
         }
     }
 }
@@ -749,5 +799,37 @@ mod tests {
 
         assert_eq!(ViewState::Public.as_str(), "public");
         assert_eq!(ViewState::Private.as_str(), "private");
+    }
+
+    #[test]
+    fn test_bug_enums_display_name() {
+        assert_eq!(BugStatus::New.display_name(), "New");
+        assert_eq!(BugStatus::Feedback.display_name(), "Feedback");
+        assert_eq!(BugStatus::Acknowledged.display_name(), "Acknowledged");
+        assert_eq!(BugStatus::Confirmed.display_name(), "Confirmed");
+        assert_eq!(BugStatus::Assigned.display_name(), "Assigned");
+        assert_eq!(BugStatus::Resolved.display_name(), "Resolved");
+        assert_eq!(BugStatus::Closed.display_name(), "Closed");
+
+        assert_eq!(BugResolution::Open.display_name(), "Open");
+        assert_eq!(BugResolution::Fixed.display_name(), "Fixed");
+        assert_eq!(BugResolution::Reopened.display_name(), "Reopened");
+        assert_eq!(
+            BugResolution::UnableToReproduce.display_name(),
+            "Unable to Reproduce"
+        );
+        assert_eq!(BugResolution::NotFixable.display_name(), "Not Fixable");
+        assert_eq!(BugResolution::Duplicate.display_name(), "Duplicate");
+        assert_eq!(BugResolution::NotABug.display_name(), "Not a Bug");
+        assert_eq!(BugResolution::Suspended.display_name(), "Suspended");
+        assert_eq!(BugResolution::WontFix.display_name(), "Won't Fix");
+
+        assert_eq!(BugPriority::Low.display_name(), "Low");
+        assert_eq!(BugPriority::Normal.display_name(), "Normal");
+        assert_eq!(BugPriority::High.display_name(), "High");
+
+        assert_eq!(BugSeverity::Feature.display_name(), "Feature");
+        assert_eq!(BugSeverity::Minor.display_name(), "Minor");
+        assert_eq!(BugSeverity::Major.display_name(), "Major");
     }
 }

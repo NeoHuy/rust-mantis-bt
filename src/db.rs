@@ -3,7 +3,7 @@ use crate::models::{
     Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig,
     NewsItem, PluginItem, Project, ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -312,6 +312,7 @@ impl Db {
                 jira_key TEXT NOT NULL,
                 jira_url TEXT NOT NULL,
                 issue_type TEXT NOT NULL DEFAULT 'Bug',
+                jira_status TEXT NOT NULL DEFAULT '',
                 created_by INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(bug_id) REFERENCES mantis_bug_table(id) ON DELETE CASCADE
@@ -320,6 +321,17 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_jira_links_bug_id ON mantis_jira_links_table(bug_id);
             CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);",
         )?;
+
+        // Ensure jira_status column exists in mantis_jira_links_table for existing databases
+        let has_jira_status = conn
+            .prepare("SELECT jira_status FROM mantis_jira_links_table LIMIT 1")
+            .is_ok();
+        if !has_jira_status {
+            let _ = conn.execute(
+                "ALTER TABLE mantis_jira_links_table ADD COLUMN jira_status TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+        }
 
         // Default administrator seed if user table is empty
         let user_count: i64 =
@@ -4255,15 +4267,27 @@ impl Db {
         issue_type: &str,
         user_id: i64,
     ) -> rusqlite::Result<i64> {
+        self.create_jira_link_with_status(bug_id, jira_key, jira_url, issue_type, "", user_id)
+    }
+
+    pub fn create_jira_link_with_status(
+        &self,
+        bug_id: i64,
+        jira_key: &str,
+        jira_url: &str,
+        issue_type: &str,
+        jira_status: &str,
+        user_id: i64,
+    ) -> rusqlite::Result<i64> {
         let conn = self.conn();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         conn.execute(
-            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -4271,7 +4295,7 @@ impl Db {
     pub fn get_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<Option<JiraLink>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, bug_id, jira_key, jira_url, issue_type, created_by, created_at
+            "SELECT id, bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at
              FROM mantis_jira_links_table WHERE bug_id = ?1",
         )?;
         let mut rows = stmt.query(params![bug_id])?;
@@ -4282,9 +4306,9 @@ impl Db {
                 jira_key: row.get(2)?,
                 jira_url: row.get(3)?,
                 issue_type: row.get(4)?,
-                jira_status: String::new(),
-                created_by: row.get(5)?,
-                created_at: row.get(6)?,
+                jira_status: row.get(5)?,
+                created_by: row.get(6)?,
+                created_at: row.get(7)?,
             }))
         } else {
             Ok(None)
@@ -4300,14 +4324,16 @@ impl Db {
         Ok(affected > 0)
     }
 
-    pub fn record_jira_push_success(
+    pub fn record_jira_sync_success(
         &self,
         bug_id: i64,
         jira_key: &str,
         jira_url: &str,
         issue_type: &str,
+        jira_status: &str,
         user_id: i64,
         username: &str,
+        is_new_link: bool,
     ) -> Result<(), String> {
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -4317,19 +4343,60 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        // 1. Insert jira link
-        tx.execute(
-            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
-        )
-        .map_err(|e| e.to_string())?;
+        // 1. Insert or update jira link
+        if is_new_link {
+            tx.execute(
+                "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            tx.execute(
+                "UPDATE mantis_jira_links_table SET jira_status = ?1, issue_type = ?2 WHERE bug_id = ?3",
+                params![jira_status, issue_type, bug_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
 
-        // 2. Insert bugnote text & bugnote
-        let note_text = format!(
-            "Created Jira issue [{}]({}) by {}.",
-            jira_key, jira_url, username
-        );
+        // 2. Map status to mantis and update bug if status changes
+        let old_status: i32 = tx
+            .query_row(
+                "SELECT status FROM mantis_bug_table WHERE id = ?1",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let new_status = crate::jira::map_jira_status_to_mantis(jira_status);
+        if old_status != new_status {
+            tx.execute(
+                "UPDATE mantis_bug_table SET status = ?1, last_updated = ?2 WHERE id = ?3",
+                params![new_status, now, bug_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+            tx.execute(
+                "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
+                 VALUES (?1, ?2, ?3, 'status', ?4, ?5, 0)",
+                params![user_id, bug_id, now, old_status.to_string(), new_status.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        // 3. Insert bugnote text & bugnote
+        let note_text = if is_new_link {
+            format!(
+                "Linked to Jira issue [{}]({}) (Status: {}) by {}.",
+                jira_key, jira_url, jira_status, username
+            )
+        } else {
+            format!(
+                "Synced with Jira issue [{}]({}) (Status: {}) by {}.",
+                jira_key, jira_url, jira_status, username
+            )
+        };
+
         tx.execute(
             "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
             params![note_text],
@@ -4344,32 +4411,83 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
 
-        // 3. Update bug status to 30 (acknowledged) if currently 10
-        let current_status: i32 = tx
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_jira_link_with_note(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        username: &str,
+    ) -> Result<bool, String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let existing_key: Option<String> = tx
             .query_row(
-                "SELECT status FROM mantis_bug_table WHERE id = ?1",
+                "SELECT jira_key FROM mantis_jira_links_table WHERE bug_id = ?1",
                 params![bug_id],
                 |row| row.get(0),
             )
+            .optional()
             .map_err(|e| e.to_string())?;
 
-        if current_status == 10 {
-            tx.execute(
-                "UPDATE mantis_bug_table SET status = 30, last_updated = ?1 WHERE id = ?2",
-                params![now, bug_id],
+        let key_str = match existing_key {
+            Some(k) => k,
+            None => return Ok(false),
+        };
+
+        let affected = tx
+            .execute(
+                "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1",
+                params![bug_id],
             )
             .map_err(|e| e.to_string())?;
 
-            tx.execute(
-                "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
-                 VALUES (?1, ?2, ?3, 'status', '10', '30', 0)",
-                params![user_id, bug_id, now],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let note_text = format!("Unlinked Jira issue {} by {}.", key_str, username);
+        tx.execute(
+            "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
+            params![note_text],
+        )
+        .map_err(|e| e.to_string())?;
+        let text_id = tx.last_insert_rowid();
+
+        tx.execute(
+            "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+             VALUES (?1, ?2, ?3, 10, ?4, ?4, 0, '', 0)",
+            params![bug_id, user_id, text_id, now],
+        )
+        .map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(affected > 0)
+    }
+
+    pub fn record_jira_push_success(
+        &self,
+        bug_id: i64,
+        jira_key: &str,
+        jira_url: &str,
+        issue_type: &str,
+        user_id: i64,
+        username: &str,
+    ) -> Result<(), String> {
+        self.record_jira_sync_success(
+            bug_id,
+            jira_key,
+            jira_url,
+            issue_type,
+            "To Do",
+            user_id,
+            username,
+            true,
+        )
     }
 
     pub fn get_jira_config(&self, project_id: i64) -> rusqlite::Result<JiraResolvedConfig> {

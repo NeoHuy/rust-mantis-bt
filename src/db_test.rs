@@ -1111,6 +1111,72 @@ fn test_jira_links_crud() {
 }
 
 #[test]
+fn test_jira_sync_success_updates_status_and_adds_history() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let project_id = db
+        .create_project("Jira Project", 10, 10, "Desc", false)
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            project_id, admin.id, 1, "Summary", "Desc", "", "", 10, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    // 1. Initial link with "In Progress" status
+    db.record_jira_sync_success(
+        bug_id,
+        "JBC-10",
+        "https://jira.example.com/browse/JBC-10",
+        "Story",
+        "In Progress",
+        admin.id,
+        "administrator",
+        true,
+    )
+    .unwrap();
+
+    let link = db.get_jira_link_by_bug_id(bug_id).unwrap().unwrap();
+    assert_eq!(link.jira_key, "JBC-10");
+    assert_eq!(link.jira_status, "In Progress");
+    assert_eq!(link.issue_type, "Story");
+
+    // Bug status should have transitioned to 50 (assigned)
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.status, 50);
+
+    // 2. Refresh sync with "Done" status
+    db.record_jira_sync_success(
+        bug_id,
+        "JBC-10",
+        "https://jira.example.com/browse/JBC-10",
+        "Story",
+        "Done",
+        admin.id,
+        "administrator",
+        false,
+    )
+    .unwrap();
+
+    let link2 = db.get_jira_link_by_bug_id(bug_id).unwrap().unwrap();
+    assert_eq!(link2.jira_status, "Done");
+
+    let bug2 = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug2.status, 80); // resolved
+
+    // 3. Unlink
+    let unlinked = db
+        .delete_jira_link_with_note(bug_id, admin.id, "administrator")
+        .unwrap();
+    assert!(unlinked);
+    assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
+
+    // Check bugnotes
+    let notes = db.list_bugnotes(bug_id, 90).unwrap();
+    assert!(notes.iter().any(|n| n.note.contains("Unlinked Jira issue JBC-10")));
+}
+
+#[test]
 fn test_jira_config_resolution() {
     let db = Db::open_in_memory().unwrap();
     let project_id = db

@@ -1043,6 +1043,7 @@ pub async fn view_bug_page(
         &note_form_html,
         &history_html,
         jira_link.as_ref(),
+        "",
         q.msg.as_deref(),
         q.err.as_deref(),
     )

@@ -745,6 +745,7 @@ pub fn render_view_bug_page(
     note_form_html: &str,
     history_html: &str,
     jira_link: Option<&JiraLink>,
+    jira_section_html: &str,
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
 ) -> Html<String> {
@@ -894,6 +895,8 @@ pub fn render_view_bug_page(
             </div>
         </div>
 
+        {}
+
         <div class="panel">
             <div class="panel-header">Activities / Bugnotes</div>
             <div class="panel-body">
@@ -942,6 +945,7 @@ pub fn render_view_bug_page(
         rel_form_html,
         files_html,
         upload_form_html,
+        jira_section_html,
         notes_html,
         note_form_html,
         history_html

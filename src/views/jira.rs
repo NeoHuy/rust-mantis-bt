@@ -158,6 +158,180 @@ pub fn render_manage_jira_page(
     render_layout("Manage Jira", ctx, None, &body)
 }
 
+pub fn render_jira_section(
+    _ctx: &AuthContext,
+    bug_id: i64,
+    jira_link: Option<&crate::models::JiraLink>,
+    epics: &[crate::models::JiraEpic],
+    config_enabled: bool,
+    eff: i32,
+) -> String {
+    if !config_enabled {
+        return String::new();
+    }
+
+    if let Some(jl) = jira_link {
+        let status_badge = if !jl.jira_status.is_empty() {
+            let lower = jl.jira_status.to_lowercase();
+            let bg = if lower.contains("done")
+                || lower.contains("resolved")
+                || lower.contains("closed")
+            {
+                "#28a745"
+            } else if lower.contains("in progress") || lower.contains("dev") {
+                "#0052cc"
+            } else if lower.contains("review") || lower.contains("testing") || lower.contains("qa")
+            {
+                "#ffab00"
+            } else {
+                "#6c757d"
+            };
+            format!(
+                r#"<span class="badge" style="background:{}; color:#fff; font-size:12px; padding:3px 8px; border-radius:3px;">{}</span>"#,
+                bg,
+                html_escape(&jl.jira_status)
+            )
+        } else {
+            String::new()
+        };
+
+        let unlink_btn = if eff >= 55 {
+            format!(
+                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" style="display:inline;" onsubmit="return confirm('Are you sure you want to unlink this Jira ticket?');">
+                    <button type="submit" class="btn btn-danger btn-sm" style="padding:4px 10px;">
+                        <i class="fa fa-chain-broken"></i> Unlink
+                    </button>
+                </form>"#,
+                bug_id
+            )
+        } else {
+            String::new()
+        };
+
+        let sync_btn = if eff >= 55 {
+            format!(
+                r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;">
+                    <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6; padding:4px 10px;">
+                        <i class="fa fa-refresh"></i> Sync with Jira
+                    </button>
+                </form>"#,
+                bug_id
+            )
+        } else {
+            String::new()
+        };
+
+        format!(
+            r#"<div class="panel">
+                <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <span><i class="fa fa-ticket"></i> Jira Integration</span>
+                    {}
+                </div>
+                <div class="panel-body">
+                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+                        <div style="display:flex; align-items:center; gap:16px;">
+                            <div>
+                                <span style="color:#777; font-size:11px; display:block;">TICKET</span>
+                                <a href="{}" target="_blank" rel="noopener noreferrer" style="font-weight:bold; font-size:14px; color:#0052cc; text-decoration:none;">
+                                    {} <i class="fa fa-external-link" style="font-size:11px;"></i>
+                                </a>
+                            </div>
+                            <div style="border-left:1px solid #ddd; height:24px;"></div>
+                            <div>
+                                <span style="color:#777; font-size:11px; display:block;">TYPE</span>
+                                <span style="font-weight:600; font-size:13px;">{}</span>
+                            </div>
+                            <div style="border-left:1px solid #ddd; height:24px;"></div>
+                            <div>
+                                <span style="color:#777; font-size:11px; display:block;">JIRA STATUS</span>
+                                <span style="font-weight:600; font-size:13px;">{}</span>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            {}
+                            {}
+                        </div>
+                    </div>
+                </div>
+            </div>"#,
+            status_badge,
+            html_escape(&jl.jira_url),
+            html_escape(&jl.jira_key),
+            html_escape(&jl.issue_type),
+            if jl.jira_status.is_empty() {
+                "Unknown"
+            } else {
+                &jl.jira_status
+            },
+            sync_btn,
+            unlink_btn
+        )
+    } else if eff >= 55 {
+        let mut epic_options = String::new();
+        for ep in epics {
+            epic_options.push_str(&format!(
+                r#"<option value="{}">{} - {}</option>"#,
+                html_escape(&ep.key),
+                html_escape(&ep.key),
+                html_escape(&ep.summary)
+            ));
+        }
+
+        format!(
+            r#"<div class="panel">
+                <div class="panel-header">
+                    <span><i class="fa fa-ticket"></i> Jira Integration</span>
+                </div>
+                <div class="panel-body">
+                    <form method="POST" action="/view_bug_page/{}/jira_sync">
+                        <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
+                            <div>
+                                <label style="display:block; font-size:12px; font-weight:bold; margin-bottom:4px; color:#333;">Jira Ticket Number</label>
+                                <input type="text" name="jira_key" placeholder="e.g. 123 or JBC-123 (empty to create new)" style="width:260px; padding:6px 8px; border:1px solid #ccc; border-radius:3px;">
+                                <small style="color:#777; display:block; font-size:11px; margin-top:2px;">Leave empty to create a new Jira ticket</small>
+                            </div>
+                            <div>
+                                <label style="display:block; font-size:12px; font-weight:bold; margin-bottom:4px; color:#333;">Epic</label>
+                                <select name="epic_key" style="min-width:200px; padding:6px 8px; border:1px solid #ccc; border-radius:3px;">
+                                    <option value="">None (No Epic)</option>
+                                    {}
+                                </select>
+                                <small style="color:#777; display:block; font-size:11px; margin-top:2px;">Optional parent epic in Jira</small>
+                            </div>
+                            <div>
+                                <label style="display:block; font-size:12px; font-weight:bold; margin-bottom:4px; color:#333;">Issue Type</label>
+                                <select name="issue_type" style="width:130px; padding:6px 8px; border:1px solid #ccc; border-radius:3px;">
+                                    <option value="Bug">Bug</option>
+                                    <option value="Task">Task</option>
+                                    <option value="Story">Story</option>
+                                </select>
+                                <small style="color:#777; display:block; font-size:11px; margin-top:2px;">Type if creating new</small>
+                            </div>
+                            <div>
+                                <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6; padding:7px 18px; font-weight:bold; border-radius:3px; cursor:pointer;">
+                                    <i class="fa fa-refresh"></i> Sync
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>"#,
+            bug_id,
+            epic_options
+        )
+    } else {
+        r#"<div class="panel">
+            <div class="panel-header">
+                <span><i class="fa fa-ticket"></i> Jira Integration</span>
+            </div>
+            <div class="panel-body">
+                <span style="color:#777;">No Jira ticket linked to this issue.</span>
+            </div>
+        </div>"#
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 #[path = "jira_test.rs"]
 mod tests;

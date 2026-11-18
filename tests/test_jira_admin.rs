@@ -121,3 +121,109 @@ async fn test_admin_jira_save_config() {
     assert_eq!(conf.default_issue_type, "Task");
     assert_eq!(conf.project_key, "ALPHA");
 }
+
+#[tokio::test]
+async fn test_admin_jira_refresh_epics_permissions_and_success() {
+    let app_jira = axum::Router::new().route(
+        "/rest/api/2/search",
+        axum::routing::get(|| async {
+            let res = serde_json::json!({
+                "issues": [
+                    {
+                        "id": "10",
+                        "key": "ALPHA-1",
+                        "fields": { "summary": "Alpha Epic One" }
+                    },
+                    {
+                        "id": "11",
+                        "key": "ALPHA-2",
+                        "fields": { "summary": "Alpha Epic Two" }
+                    }
+                ]
+            });
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::to_string(&res).unwrap(),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mock_url = format!("http://{}", addr);
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        axum::serve(listener, app_jira)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let db = Db::open_in_memory().unwrap();
+    db.save_jira_global_config(
+        true,
+        &mock_url,
+        "bot@example.com",
+        Some("secret_token"),
+        "Bug",
+        "ALPHA",
+    )
+    .unwrap();
+
+    let _ = db
+        .create_user(
+            "devuser",
+            "Developer",
+            "dev@example.com",
+            "devpass",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let app = build_router(db.clone());
+
+    // 1. Developer should be denied
+    let dev_cookie = login(&app, "devuser", "devpass").await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/manage_jira_refresh_epics")
+                .header("cookie", &dev_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 2. Administrator should succeed
+    let admin_cookie = login(&app, "administrator", "root").await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/manage_jira_refresh_epics")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Verify cache in DB
+    let cached = db.get_cached_jira_epics("ALPHA", 86400).unwrap().unwrap();
+    assert_eq!(cached.len(), 2);
+    assert_eq!(cached[0].key, "ALPHA-1");
+    assert_eq!(cached[0].summary, "Alpha Epic One");
+    assert_eq!(cached[1].key, "ALPHA-2");
+
+    let _ = tx.send(());
+}

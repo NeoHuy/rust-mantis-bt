@@ -9,6 +9,7 @@ pub fn render_manage_jira_page(
     config: &JiraResolvedConfig,
     _projects: &[Project],
     project_mappings: &[(i64, String, String)],
+    cached_epics: &[(String, usize, i64)],
     msg: Option<&str>,
     err: Option<&str>,
 ) -> Html<String> {
@@ -47,6 +48,35 @@ pub fn render_manage_jira_page(
             pid,
             html_escape(mapped_key)
         ));
+    }
+
+    let mut cached_epics_html = String::new();
+    if !cached_epics.is_empty() {
+        cached_epics_html.push_str(
+            r#"<h3 style="margin-top:24px; margin-bottom:10px; font-size:14px;">Cached Jira Epics</h3>
+            <table class="table" style="max-width:800px; margin-bottom:16px;">
+                <thead>
+                    <tr>
+                        <th style="width:180px;">Jira Project Key</th>
+                        <th style="width:140px;">Cached Epics</th>
+                        <th>Last Refreshed</th>
+                    </tr>
+                </thead>
+                <tbody>"#,
+        );
+        for (pkey, count, updated_at) in cached_epics {
+            cached_epics_html.push_str(&format!(
+                r#"<tr>
+                    <td><strong>{}</strong></td>
+                    <td>{} epic(s)</td>
+                    <td>{}</td>
+                </tr>"#,
+                html_escape(pkey),
+                count,
+                crate::views::format_timestamp(*updated_at)
+            ));
+        }
+        cached_epics_html.push_str("</tbody></table>");
     }
 
     let token_hint = if !config.api_token.is_empty() {
@@ -133,10 +163,21 @@ pub fn render_manage_jira_page(
 
                 <hr style="margin:24px 0;">
 
-                <form method="POST" action="/manage_jira_test" style="display:flex; align-items:center; gap:12px;">
-                    <button type="submit" class="btn btn-secondary">Test Connection to Jira</button>
-                    <small style="color:#666;">Verifies current credentials against Atlassian Jira /rest/api/3/myself</small>
-                </form>
+                <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+                    <form method="POST" action="/manage_jira_test" style="display:flex; align-items:center; gap:8px;">
+                        <button type="submit" class="btn btn-secondary">Test Connection to Jira</button>
+                        <small style="color:#666;">Verifies current credentials against Atlassian Jira /rest/api/3/myself</small>
+                    </form>
+
+                    <form method="POST" action="/manage_jira_refresh_epics" style="display:flex; align-items:center; gap:8px;">
+                        <button type="submit" class="btn btn-secondary">
+                            <i class="fa fa-refresh"></i> Refresh Epics Cache
+                        </button>
+                        <small style="color:#666;">Fetch and update cached Jira Epics immediately (cached for 24h by default)</small>
+                    </form>
+                </div>
+
+                {}
             </div>
         </div>"#,
         banner,
@@ -152,7 +193,8 @@ pub fn render_manage_jira_page(
         is_bug_selected,
         is_task_selected,
         html_escape(&config.project_key),
-        project_mapping_rows
+        project_mapping_rows,
+        cached_epics_html
     );
 
     render_layout("Manage Jira", ctx, None, &body)

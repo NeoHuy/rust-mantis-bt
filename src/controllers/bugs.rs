@@ -749,8 +749,27 @@ pub async fn view_bug_page(
             });
 
     let epics = if jira_conf.enabled && eff >= 55 && jira_link.is_none() {
-        let client = crate::jira::JiraClient::new();
-        client.list_epics(&jira_conf).await.unwrap_or_default()
+        let pkey = jira_conf.project_key.trim();
+        if pkey.is_empty() {
+            vec![]
+        } else if let Ok(Some(cached)) = db.get_cached_jira_epics(pkey, 86400) {
+            cached
+        } else {
+            let client = crate::jira::JiraClient::new();
+            match client.list_epics(&jira_conf).await {
+                Ok(fetched) => {
+                    let _ = db.save_jira_epics_cache(pkey, &fetched);
+                    fetched
+                }
+                Err(_) => {
+                    // Fallback to expired cache if available during transient Jira issues
+                    db.get_cached_jira_epics(pkey, i64::MAX)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default()
+                }
+            }
+        }
     } else {
         vec![]
     };

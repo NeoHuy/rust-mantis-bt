@@ -37,12 +37,14 @@ fn test_render_manage_jira_page() {
         project_key: "GLOBAL".to_string(),
     };
     let mappings = vec![(10, "Billing Service".to_string(), "BILL".to_string())];
+    let cached_epics = vec![("BILL".to_string(), 3, 1700000000)];
 
     let out = render_manage_jira_page(
         &ctx,
         &config,
         &[],
         &mappings,
+        &cached_epics,
         Some("Configuration saved successfully"),
         None,
     );
@@ -55,6 +57,9 @@ fn test_render_manage_jira_page() {
     assert!(html.contains("BILL"));
     assert!(html.contains(r#"action="/manage_jira_config""#));
     assert!(html.contains(r#"action="/manage_jira_test""#));
+    assert!(html.contains(r#"action="/manage_jira_refresh_epics""#));
+    assert!(html.contains("Cached Jira Epics"));
+    assert!(html.contains("3 epic(s)"));
 }
 
 #[test]
@@ -72,6 +77,7 @@ fn test_render_manage_jira_page_with_error() {
     let out = render_manage_jira_page(
         &ctx,
         &config,
+        &[],
         &[],
         &[],
         None,

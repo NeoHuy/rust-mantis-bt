@@ -1282,3 +1282,48 @@ fn test_is_signup_allowed_default_and_override() {
     db.set_config("allow_signup", 0, 0, "1").unwrap();
     assert!(db.is_signup_allowed());
 }
+
+#[test]
+fn test_jira_epics_cache() {
+    let db = Db::open_in_memory().unwrap();
+    let epics = vec![
+        crate::models::JiraEpic {
+            key: "JBC-1".to_string(),
+            summary: "Epic One".to_string(),
+        },
+        crate::models::JiraEpic {
+            key: "JBC-2".to_string(),
+            summary: "Epic Two".to_string(),
+        },
+    ];
+
+    // Initial cache should be None
+    assert!(db.get_cached_jira_epics("JBC", 86400).unwrap().is_none());
+
+    // Save cache
+    db.save_jira_epics_cache("JBC", &epics).unwrap();
+
+    // Cache hit within 86400s
+    let cached = db.get_cached_jira_epics("JBC", 86400).unwrap().unwrap();
+    assert_eq!(cached.len(), 2);
+    assert_eq!(cached[0].key, "JBC-1");
+    assert_eq!(cached[0].summary, "Epic One");
+    assert_eq!(cached[1].key, "JBC-2");
+
+    // Cache miss with max_age_secs = 0 (expired)
+    // Wait: saturating_sub(updated_at) might be 0 if same second, so test with negative or check summary
+    let summary = db.list_cached_jira_epics_summary().unwrap();
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].0, "JBC");
+    assert_eq!(summary[0].1, 2);
+    assert!(summary[0].2 > 0);
+
+    // Update with empty list
+    db.save_jira_epics_cache("JBC", &[]).unwrap();
+    let updated = db.get_cached_jira_epics("JBC", 86400).unwrap().unwrap();
+    assert_eq!(updated.len(), 0);
+
+    // Clear cache
+    db.clear_jira_epics_cache(Some("JBC")).unwrap();
+    assert!(db.get_cached_jira_epics("JBC", 86400).unwrap().is_none());
+}

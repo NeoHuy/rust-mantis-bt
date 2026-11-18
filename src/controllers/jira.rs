@@ -63,11 +63,14 @@ pub async fn manage_jira_page(
         project_mappings.push((p.id, p.name.clone(), mapped_key));
     }
 
+    let cached_epics = db.list_cached_jira_epics_summary().unwrap_or_default();
+
     views::jira::render_manage_jira_page(
         &ctx,
         &config,
         &projects,
         &project_mappings,
+        &cached_epics,
         q.msg.as_deref(),
         q.err.as_deref(),
     )
@@ -172,6 +175,79 @@ pub async fn manage_jira_test(State(db): State<Db>, ctx: AuthContext) -> Respons
             ))
             .into_response()
         }
+    }
+}
+
+pub async fn manage_jira_refresh_epics(State(db): State<Db>, ctx: AuthContext) -> Response {
+    if ctx.user.access_level < 90 {
+        return forbidden_html(&ctx, "Administrator access required to refresh Jira epics.");
+    }
+
+    let config = db
+        .get_jira_config(0)
+        .unwrap_or_else(|_| crate::models::JiraResolvedConfig {
+            enabled: false,
+            base_url: String::new(),
+            email: String::new(),
+            api_token: String::new(),
+            default_issue_type: "Bug".to_string(),
+            project_key: String::new(),
+        });
+
+    if !config.enabled {
+        return Redirect::to("/manage_jira_page?err=Jira+integration+is+currently+disabled")
+            .into_response();
+    }
+
+    let mut project_keys = std::collections::BTreeSet::new();
+    let def_key = config.project_key.trim();
+    if !def_key.is_empty() {
+        project_keys.insert(def_key.to_string());
+    }
+
+    let projects = db.list_all_projects().unwrap_or_default();
+    for p in &projects {
+        if let Ok(Some(pk)) = db.get_config("jira_project_key", p.id, 0) {
+            let trimmed = pk.trim();
+            if !trimmed.is_empty() {
+                project_keys.insert(trimmed.to_string());
+            }
+        }
+    }
+
+    if project_keys.is_empty() {
+        return Redirect::to("/manage_jira_page?err=No+Jira+project+keys+configured+to+refresh")
+            .into_response();
+    }
+
+    let client = JiraClient::new();
+    let mut total_epics = 0;
+    let mut errors = Vec::new();
+
+    for pk in &project_keys {
+        let mut key_conf = config.clone();
+        key_conf.project_key = pk.clone();
+        match client.list_epics(&key_conf).await {
+            Ok(epics) => {
+                total_epics += epics.len();
+                let _ = db.save_jira_epics_cache(pk, &epics);
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", pk, e));
+            }
+        }
+    }
+
+    if !errors.is_empty() && total_epics == 0 {
+        let err_msg = url_encode(&format!("Failed to refresh epics: {}", errors.join(", ")));
+        Redirect::to(&format!("/manage_jira_page?err={}", err_msg)).into_response()
+    } else {
+        let msg = url_encode(&format!(
+            "Epics cache refreshed successfully: {} epics cached across {} Jira project(s).",
+            total_epics,
+            project_keys.len()
+        ));
+        Redirect::to(&format!("/manage_jira_page?msg={}", msg)).into_response()
     }
 }
 
@@ -469,6 +545,10 @@ pub fn router() -> Router<Db> {
         .route("/manage_jira_page", get(manage_jira_page))
         .route("/manage_jira_config", post(manage_jira_config))
         .route("/manage_jira_test", post(manage_jira_test))
+        .route(
+            "/manage_jira_refresh_epics",
+            post(manage_jira_refresh_epics),
+        )
         .route("/view_bug_page/:id/jira_sync", post(sync_bug_with_jira))
         .route("/view_bug_page/:id/jira_unlink", post(unlink_bug_from_jira))
         .route("/view_bug_page/:id/jira_push", post(push_bug_to_jira))

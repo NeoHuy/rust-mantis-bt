@@ -319,7 +319,13 @@ impl Db {
             );
 
             CREATE INDEX IF NOT EXISTS idx_jira_links_bug_id ON mantis_jira_links_table(bug_id);
-            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);",
+            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_epics_cache_table (
+                project_key TEXT PRIMARY KEY,
+                epics_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );",
         )?;
 
         // Ensure jira_status column exists in mantis_jira_links_table for existing databases
@@ -4547,6 +4553,93 @@ impl Db {
         jira_project_key: &str,
     ) -> rusqlite::Result<()> {
         self.set_config("jira_project_key", project_id, 0, jira_project_key)
+    }
+
+    pub fn save_jira_epics_cache(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+    ) -> rusqlite::Result<()> {
+        let epics_json = serde_json::to_string(epics).unwrap_or_else(|_| "[]".to_string());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_jira_epics_cache_table (project_key, epics_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_key) DO UPDATE SET epics_json = excluded.epics_json, updated_at = excluded.updated_at",
+            params![project_key, epics_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_cached_jira_epics(
+        &self,
+        project_key: &str,
+        max_age_secs: i64,
+    ) -> rusqlite::Result<Option<Vec<crate::models::JiraEpic>>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn();
+        let res: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT epics_json, updated_at FROM mantis_jira_epics_cache_table WHERE project_key = ?1",
+                params![project_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        match res {
+            Some((json, updated_at)) => {
+                if now.saturating_sub(updated_at) <= max_age_secs {
+                    let epics: Vec<crate::models::JiraEpic> =
+                        serde_json::from_str(&json).unwrap_or_default();
+                    Ok(Some(epics))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_cached_jira_epics_summary(&self) -> rusqlite::Result<Vec<(String, usize, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT project_key, epics_json, updated_at FROM mantis_jira_epics_cache_table ORDER BY project_key ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            let updated_at: i64 = row.get(2)?;
+            let count = serde_json::from_str::<Vec<crate::models::JiraEpic>>(&json)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            Ok((key, count, updated_at))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn clear_jira_epics_cache(&self, project_key: Option<&str>) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        if let Some(pk) = project_key {
+            conn.execute(
+                "DELETE FROM mantis_jira_epics_cache_table WHERE project_key = ?1",
+                params![pk],
+            )?;
+        } else {
+            conn.execute("DELETE FROM mantis_jira_epics_cache_table", [])?;
+        }
+        Ok(())
     }
 }
 

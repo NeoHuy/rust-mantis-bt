@@ -895,8 +895,6 @@ pub fn render_view_bug_page(
             </div>
         </div>
 
-        {}
-
         <div class="panel">
             <div class="panel-header">Activities / Bugnotes</div>
             <div class="panel-body">
@@ -910,7 +908,9 @@ pub fn render_view_bug_page(
             <div class="panel-body">
                 {}
             </div>
-        </div>"#,
+        </div>
+
+        {}"#,
         banner,
         bug.id,
         bug.id,
@@ -945,10 +945,10 @@ pub fn render_view_bug_page(
         rel_form_html,
         files_html,
         upload_form_html,
-        jira_section_html,
         notes_html,
         note_form_html,
-        history_html
+        history_html,
+        jira_section_html
     );
 
     render_layout(&format!("Issue #{:07}", bug.id), ctx, flash_msg, &content)

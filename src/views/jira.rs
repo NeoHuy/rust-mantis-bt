@@ -187,20 +187,18 @@ pub fn render_jira_section(
                 "#6c757d"
             };
             format!(
-                r#"<span class="badge" style="background:{}; color:#fff; font-size:12px; padding:3px 8px; border-radius:3px;">{}</span>"#,
+                r#"<span class="badge" style="background:{}; color:#fff; font-size:11px; padding:2px 6px; border-radius:2px;">{}</span>"#,
                 bg,
                 html_escape(&jl.jira_status)
             )
         } else {
-            String::new()
+            "-".to_string()
         };
 
         let unlink_btn = if eff >= 55 {
             format!(
-                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" style="display:inline;" onsubmit="return confirm('Are you sure you want to unlink this Jira ticket?');">
-                    <button type="submit" class="btn btn-danger btn-sm" style="padding:4px 10px;">
-                        <i class="fa fa-chain-broken"></i> Unlink
-                    </button>
+                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" style="display:inline; margin-left:4px;" onsubmit="return confirm('Are you sure you want to unlink this Jira ticket?');">
+                    <button type="submit" class="btn btn-sm btn-danger">Unlink</button>
                 </form>"#,
                 bug_id
             )
@@ -211,9 +209,7 @@ pub fn render_jira_section(
         let sync_btn = if eff >= 55 {
             format!(
                 r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;">
-                    <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6; padding:4px 10px;">
-                        <i class="fa fa-refresh"></i> Sync with Jira
-                    </button>
+                    <button type="submit" class="btn btn-sm">Sync with Jira</button>
                 </form>"#,
                 bug_id
             )
@@ -223,48 +219,47 @@ pub fn render_jira_section(
 
         format!(
             r#"<div class="panel">
-                <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
-                    <span><i class="fa fa-ticket"></i> Jira Integration</span>
-                    {}
-                </div>
+                <div class="panel-header">Jira Integration</div>
                 <div class="panel-body">
-                    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
-                        <div style="display:flex; align-items:center; gap:16px;">
-                            <div>
-                                <span style="color:#777; font-size:11px; display:block;">TICKET</span>
-                                <a href="{}" target="_blank" rel="noopener noreferrer" style="font-weight:bold; font-size:14px; color:#0052cc; text-decoration:none;">
-                                    {} <i class="fa fa-external-link" style="font-size:11px;"></i>
-                                </a>
-                            </div>
-                            <div style="border-left:1px solid #ddd; height:24px;"></div>
-                            <div>
-                                <span style="color:#777; font-size:11px; display:block;">TYPE</span>
-                                <span style="font-weight:600; font-size:13px;">{}</span>
-                            </div>
-                            <div style="border-left:1px solid #ddd; height:24px;"></div>
-                            <div>
-                                <span style="color:#777; font-size:11px; display:block;">JIRA STATUS</span>
-                                <span style="font-weight:600; font-size:13px;">{}</span>
-                            </div>
-                        </div>
-                        <div style="display:flex; gap:8px; align-items:center;">
-                            {}
-                            {}
-                        </div>
-                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th style="width:140px;">Jira Ticket</th>
+                                <th style="width:100px;">Type</th>
+                                <th style="width:120px;">Jira Status</th>
+                                <th>Jira URL</th>
+                                <th style="width:180px;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>
+                                    <a href="{}" target="_blank" rel="noopener noreferrer" style="font-weight:bold; color:#0052cc;">
+                                        {} <i class="fa fa-external-link" style="font-size:11px;"></i>
+                                    </a>
+                                </td>
+                                <td>{}</td>
+                                <td>{}</td>
+                                <td>
+                                    <a href="{}" target="_blank" rel="noopener noreferrer" style="color:#555;">{}</a>
+                                </td>
+                                <td>
+                                    {}{}{}
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>"#,
-            status_badge,
             html_escape(&jl.jira_url),
             html_escape(&jl.jira_key),
             html_escape(&jl.issue_type),
-            if jl.jira_status.is_empty() {
-                "Unknown"
-            } else {
-                &jl.jira_status
-            },
+            status_badge,
+            html_escape(&jl.jira_url),
+            html_escape(&jl.jira_url),
             sync_btn,
-            unlink_btn
+            unlink_btn,
+            if eff < 55 { "—" } else { "" }
         )
     } else if eff >= 55 {
         let mut epic_options = String::new();
@@ -279,40 +274,41 @@ pub fn render_jira_section(
 
         format!(
             r#"<div class="panel">
-                <div class="panel-header">
-                    <span><i class="fa fa-ticket"></i> Jira Integration</span>
-                </div>
+                <div class="panel-header">Jira Integration</div>
                 <div class="panel-body">
+                    <p style="margin-bottom:12px; color:#666;">No Jira ticket linked to this issue.</p>
                     <form method="POST" action="/view_bug_page/{}/jira_sync">
-                        <div style="display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;">
-                            <div>
-                                <label style="display:block; font-size:12px; font-weight:bold; margin-bottom:4px; color:#333;">Jira Ticket Number</label>
-                                <input type="text" name="jira_key" placeholder="e.g. 123 or JBC-123 (empty to create new)" style="width:260px; padding:6px 8px; border:1px solid #ccc; border-radius:3px;">
-                                <small style="color:#777; display:block; font-size:11px; margin-top:2px;">Leave empty to create a new Jira ticket</small>
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:12px; font-weight:bold; margin-bottom:4px; color:#333;">Epic</label>
-                                <select name="epic_key" style="min-width:200px; padding:6px 8px; border:1px solid #ccc; border-radius:3px;">
-                                    <option value="">None (No Epic)</option>
-                                    {}
-                                </select>
-                                <small style="color:#777; display:block; font-size:11px; margin-top:2px;">Optional parent epic in Jira</small>
-                            </div>
-                            <div>
-                                <label style="display:block; font-size:12px; font-weight:bold; margin-bottom:4px; color:#333;">Issue Type</label>
-                                <select name="issue_type" style="width:130px; padding:6px 8px; border:1px solid #ccc; border-radius:3px;">
-                                    <option value="Bug">Bug</option>
-                                    <option value="Task">Task</option>
-                                    <option value="Story">Story</option>
-                                </select>
-                                <small style="color:#777; display:block; font-size:11px; margin-top:2px;">Type if creating new</small>
-                            </div>
-                            <div>
-                                <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6; padding:7px 18px; font-weight:bold; border-radius:3px; cursor:pointer;">
-                                    <i class="fa fa-refresh"></i> Sync
-                                </button>
-                            </div>
-                        </div>
+                        <table class="form-table">
+                            <tr>
+                                <td class="label-col">Jira Ticket Number</td>
+                                <td class="input-col">
+                                    <input type="text" name="jira_key" placeholder="e.g. 123 or JBC-123" style="width:260px;">
+                                    <small style="color:#777; display:block; margin-top:2px;">Leave empty to create a new Jira ticket</small>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Epic</td>
+                                <td class="input-col">
+                                    <select name="epic_key" style="min-width:240px; width:auto;">
+                                        <option value="">None (No Epic)</option>
+                                        {}
+                                    </select>
+                                    <small style="color:#777; display:block; margin-top:2px;">Optional parent epic in Jira</small>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Issue Type</td>
+                                <td class="input-col">
+                                    <select name="issue_type" style="width:auto;">
+                                        <option value="Bug">Bug</option>
+                                        <option value="Task">Task</option>
+                                        <option value="Story">Story</option>
+                                    </select>
+                                    <small style="color:#777; display:block; margin-top:2px;">Type if creating a new Jira ticket</small>
+                                </td>
+                            </tr>
+                        </table>
+                        <button type="submit" class="btn btn-sm">Sync</button>
                     </form>
                 </div>
             </div>"#,
@@ -320,11 +316,9 @@ pub fn render_jira_section(
         )
     } else {
         r#"<div class="panel">
-            <div class="panel-header">
-                <span><i class="fa fa-ticket"></i> Jira Integration</span>
-            </div>
+            <div class="panel-header">Jira Integration</div>
             <div class="panel-body">
-                <span style="color:#777;">No Jira ticket linked to this issue.</span>
+                <p style="color:#666;">No Jira ticket linked to this issue.</p>
             </div>
         </div>"#
             .to_string()

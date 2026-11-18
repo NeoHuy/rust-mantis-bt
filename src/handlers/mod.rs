@@ -34,7 +34,7 @@ async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
 }
 
 pub fn build_router(db: Db) -> Router {
-    Router::new()
+    let app = Router::new()
         .route("/", get(root_handler))
         // Auth routes
         .route("/login", get(auth::login_page).post(auth::login_submit))
@@ -227,5 +227,8 @@ pub fn build_router(db: Db) -> Router {
                 .delete(api::rest_delete_issue),
         )
         .route("/api/rest/issues/:id/notes", post(api::rest_add_issue_note))
-        .with_state(db)
+        .with_state(db.clone());
+
+    let mcp_router = crate::mcp::router(db, crate::mcp::SessionManager::new());
+    app.merge(mcp_router)
 }

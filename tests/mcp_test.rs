@@ -389,3 +389,198 @@ fn test_mcp_tools_and_rbac_dispatch() {
     assert!(!res.is_error);
     assert!(res.content[0].text.contains("Secret private issue"));
 }
+
+#[tokio::test]
+async fn test_mcp_sse_and_messages_e2e() {
+    use axum::body::to_bytes;
+    use serde_json::json;
+
+    let db = Db::open_in_memory().unwrap();
+    let rep_id = db
+        .create_user("mcp_reporter", "MCP Reporter", "mcprep@test.com", "pass", 25, true, false)
+        .unwrap();
+
+    let (_token_id, raw_token) = db.create_api_token(rep_id, "MCP Test Token").unwrap();
+    let app = build_router(db.clone());
+
+    // 1. Unauthenticated GET /mcp/sse returns 401
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/mcp/sse")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 2. Invalid token returns 401
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/mcp/sse?token=bogus_token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 3. Valid token connects and returns SSE endpoint event
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/mcp/sse?token={}", raw_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
+
+    use http_body_util::BodyExt;
+    let mut body = res.into_body();
+    let frame = body.frame().await.unwrap().unwrap();
+    let data = frame.into_data().unwrap();
+    let sse_text = String::from_utf8_lossy(&data);
+    assert!(sse_text.contains("event: endpoint"));
+    assert!(sse_text.contains("/mcp/messages?session_id="));
+
+    // Extract session_id from SSE stream output
+    let session_prefix = "/mcp/messages?session_id=";
+    let start_idx = sse_text.find(session_prefix).unwrap() + session_prefix.len();
+    let end_idx = sse_text[start_idx..]
+        .find(|c: char| c.is_whitespace() || c == '\n' || c == '\r')
+        .map(|offset| start_idx + offset)
+        .unwrap_or(sse_text.len());
+    let session_id = &sse_text[start_idx..end_idx];
+    assert!(!session_id.is_empty());
+
+    // 4. POST /mcp/messages with bogus session_id returns 404
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/messages?session_id=invalid-session")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 5. POST initialize
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/mcp/messages?session_id={}", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": { "name": "test-client", "version": "1.0" }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let init_bytes = to_bytes(res.into_body(), 1024 * 16).await.unwrap();
+    let init_json: serde_json::Value = serde_json::from_slice(&init_bytes).unwrap();
+    assert_eq!(init_json["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(init_json["result"]["serverInfo"]["name"], "rust-mantis-bt");
+
+    // 6. POST tools/list
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/mcp/messages?session_id={}", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/list"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let tools_bytes = to_bytes(res.into_body(), 1024 * 16).await.unwrap();
+    let tools_json: serde_json::Value = serde_json::from_slice(&tools_bytes).unwrap();
+    let tools_arr = tools_json["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools_arr.len(), 8);
+
+    // 7. POST tools/call for whoami
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/mcp/messages?session_id={}", session_id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "whoami",
+                            "arguments": {}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let call_bytes = to_bytes(res.into_body(), 1024 * 16).await.unwrap();
+    let call_json: serde_json::Value = serde_json::from_slice(&call_bytes).unwrap();
+    let call_text = call_json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(call_text.contains("mcp_reporter"));
+
+    // 8. Header Authorization: Bearer also works
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/mcp/sse")
+                .header("authorization", format!("Bearer {}", raw_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}

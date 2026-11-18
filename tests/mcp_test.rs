@@ -37,11 +37,27 @@ async fn test_token_governance_and_admin_oversight() {
     // Default admin already created (id=1, administrator/root, level=90)
     // Create Reporter user (level=25)
     let reporter_id = db
-        .create_user("reporter_user", "Reporter User", "reporter@test.com", "password123", 25, true, false)
+        .create_user(
+            "reporter_user",
+            "Reporter User",
+            "reporter@test.com",
+            "password123",
+            25,
+            true,
+            false,
+        )
         .unwrap();
     // Create Viewer user (level=10)
     let _viewer_id = db
-        .create_user("viewer_user", "Viewer User", "viewer@test.com", "password123", 10, true, false)
+        .create_user(
+            "viewer_user",
+            "Viewer User",
+            "viewer@test.com",
+            "password123",
+            10,
+            true,
+            false,
+        )
         .unwrap();
 
     let app = build_router(db.clone());
@@ -95,7 +111,9 @@ async fn test_token_governance_and_admin_oversight() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), 1024 * 64).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 64)
+        .await
+        .unwrap();
     let body_str = String::from_utf8_lossy(&body);
     assert!(!body_str.contains("System-Wide API Tokens"));
 
@@ -122,7 +140,9 @@ async fn test_token_governance_and_admin_oversight() {
 
     // 5. Admin lists all system tokens via Db
     let all_tokens = db.list_all_api_tokens().unwrap();
-    assert!(all_tokens.iter().any(|(t, username, _)| t.id == token_id && username == "reporter_user"));
+    assert!(all_tokens
+        .iter()
+        .any(|(t, username, _)| t.id == token_id && username == "reporter_user"));
 
     // 6. Admin visits api_tokens_page and sees System-Wide API Tokens table
     let res = app
@@ -138,7 +158,9 @@ async fn test_token_governance_and_admin_oversight() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(res.into_body(), 1024 * 64).await.unwrap();
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 64)
+        .await
+        .unwrap();
     let body_str = String::from_utf8_lossy(&body);
     assert!(body_str.contains("System-Wide API Tokens (Administrator View)"));
     assert!(body_str.contains("reporter_user"));
@@ -166,8 +188,26 @@ async fn test_token_governance_and_admin_oversight() {
 #[test]
 fn test_cli_token_creation() {
     let db = Db::open_in_memory().unwrap();
-    db.create_user("reporter_user", "Reporter User", "rep@test.com", "pass", 25, true, false).unwrap();
-    db.create_user("viewer_user", "Viewer User", "view@test.com", "pass", 10, true, false).unwrap();
+    db.create_user(
+        "reporter_user",
+        "Reporter User",
+        "rep@test.com",
+        "pass",
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+    db.create_user(
+        "viewer_user",
+        "Viewer User",
+        "view@test.com",
+        "pass",
+        10,
+        true,
+        false,
+    )
+    .unwrap();
 
     // 1. Normal server start (no create-token arg) returns Ok(None)
     let res = rust_mantis_bt::handle_cli_command(&db, &["mantis".to_string()]);
@@ -176,7 +216,12 @@ fn test_cli_token_creation() {
     // 2. Non-existent user returns Err
     let res = rust_mantis_bt::handle_cli_command(
         &db,
-        &["mantis".to_string(), "create-token".to_string(), "--user".to_string(), "ghost".to_string()],
+        &[
+            "mantis".to_string(),
+            "create-token".to_string(),
+            "--user".to_string(),
+            "ghost".to_string(),
+        ],
     );
     assert!(res.is_err());
     assert!(res.unwrap_err().contains("not found"));
@@ -184,10 +229,17 @@ fn test_cli_token_creation() {
     // 3. Viewer user (< 25) returns Err
     let res = rust_mantis_bt::handle_cli_command(
         &db,
-        &["mantis".to_string(), "create-token".to_string(), "--user".to_string(), "viewer_user".to_string()],
+        &[
+            "mantis".to_string(),
+            "create-token".to_string(),
+            "--user".to_string(),
+            "viewer_user".to_string(),
+        ],
     );
     assert!(res.is_err());
-    assert!(res.unwrap_err().contains("Reporter (25) or higher is required"));
+    assert!(res
+        .unwrap_err()
+        .contains("Reporter (25) or higher is required"));
 
     // 4. Reporter user (>= 25) returns Ok(Some(output))
     let res = rust_mantis_bt::handle_cli_command(
@@ -220,30 +272,92 @@ fn test_mcp_tools_and_rbac_dispatch() {
 
     let db = Db::open_in_memory().unwrap();
     let dev_id = db
-        .create_user("dev_user", "Developer", "dev@test.com", "pass", 55, true, false)
+        .create_user(
+            "dev_user",
+            "Developer",
+            "dev@test.com",
+            "pass",
+            55,
+            true,
+            false,
+        )
         .unwrap();
     let dev_user = db.get_user_by_id(dev_id).unwrap().unwrap();
 
+    let mgr_id = db
+        .create_user(
+            "mgr_user",
+            "Manager",
+            "mgr@test.com",
+            "pass",
+            70,
+            true,
+            false,
+        )
+        .unwrap();
+    let mgr_user = db.get_user_by_id(mgr_id).unwrap().unwrap();
+
+    let updater_id = db
+        .create_user(
+            "updater_user",
+            "Updater",
+            "up@test.com",
+            "pass",
+            40,
+            true,
+            false,
+        )
+        .unwrap();
+    let updater_user = db.get_user_by_id(updater_id).unwrap().unwrap();
+
     let rep_id = db
-        .create_user("rep_user", "Reporter", "rep@test.com", "pass", 25, true, false)
+        .create_user(
+            "rep_user",
+            "Reporter",
+            "rep@test.com",
+            "pass",
+            25,
+            true,
+            false,
+        )
         .unwrap();
     let rep_user = db.get_user_by_id(rep_id).unwrap().unwrap();
 
     let rep2_id = db
-        .create_user("rep2_user", "Reporter 2", "rep2@test.com", "pass", 25, true, false)
+        .create_user(
+            "rep2_user",
+            "Reporter 2",
+            "rep2@test.com",
+            "pass",
+            25,
+            true,
+            false,
+        )
         .unwrap();
     let rep2_user = db.get_user_by_id(rep2_id).unwrap().unwrap();
 
     let view_id = db
-        .create_user("view_user", "Viewer", "view@test.com", "pass", 10, true, false)
+        .create_user(
+            "view_user",
+            "Viewer",
+            "view@test.com",
+            "pass",
+            10,
+            true,
+            false,
+        )
         .unwrap();
     let view_user = db.get_user_by_id(view_id).unwrap().unwrap();
 
     // Projects: 1 public (view_state=10), 1 private (view_state=50)
-    let pub_proj_id = db.create_project("Public Proj", 10, 10, "Public", true).unwrap();
+    let pub_proj_id = db
+        .create_project("Public Proj", 10, 10, "Public", true)
+        .unwrap();
     let cat_id = db.add_category(pub_proj_id, "General", 0).unwrap();
 
-    let priv_proj_id = db.create_project("Private Proj", 10, 50, "Private", true).unwrap();
+    let priv_proj_id = db
+        .create_project("Private Proj", 10, 50, "Private", true)
+        .unwrap();
     // Assign dev_user to private proj with level 55
     db.set_project_user(priv_proj_id, dev_id, 55).unwrap();
 
@@ -269,11 +383,21 @@ fn test_mcp_tools_and_rbac_dispatch() {
     assert!(res.content[0].text.contains("Private Proj"));
 
     // 3. get_project_metadata
-    let res = dispatch_tool_call(&db, &rep_user, "get_project_metadata", json!({ "project_id": pub_proj_id }));
+    let res = dispatch_tool_call(
+        &db,
+        &rep_user,
+        "get_project_metadata",
+        json!({ "project_id": pub_proj_id }),
+    );
     assert!(!res.is_error);
     assert!(res.content[0].text.contains("General"));
 
-    let res = dispatch_tool_call(&db, &rep_user, "get_project_metadata", json!({ "project_id": priv_proj_id }));
+    let res = dispatch_tool_call(
+        &db,
+        &rep_user,
+        "get_project_metadata",
+        json!({ "project_id": priv_proj_id }),
+    );
     assert!(res.is_error);
     assert!(res.content[0].text.contains("Permission Denied"));
 
@@ -291,7 +415,9 @@ fn test_mcp_tools_and_rbac_dispatch() {
         }),
     );
     assert!(res.is_error);
-    assert!(res.content[0].text.contains("Reporter (25) or higher access required"));
+    assert!(res.content[0]
+        .text
+        .contains("Reporter (25) or higher access required"));
 
     // Reporter succeeds
     let res = dispatch_tool_call(
@@ -357,6 +483,45 @@ fn test_mcp_tools_and_rbac_dispatch() {
     assert_eq!(updated_bug.status, 50);
     assert_eq!(updated_bug.handler_id, dev_id);
 
+    // Developer tries to close issue (status=90) without Manager level (70) -> Denied
+    let res = dispatch_tool_call(
+        &db,
+        &dev_user,
+        "update_issue",
+        json!({
+            "issue_id": issue_id,
+            "status": 90
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0].text.contains("Access level 70 required"));
+
+    // Manager can close issue (status=90) -> OK
+    let res = dispatch_tool_call(
+        &db,
+        &mgr_user,
+        "update_issue",
+        json!({
+            "issue_id": issue_id,
+            "status": 90
+        }),
+    );
+    assert!(!res.is_error);
+    let closed_bug = db.get_bug(issue_id).unwrap().unwrap();
+    assert_eq!(closed_bug.status, 90);
+
+    // Reopen to feedback (status=20) by developer -> OK
+    let res = dispatch_tool_call(
+        &db,
+        &dev_user,
+        "update_issue",
+        json!({
+            "issue_id": issue_id,
+            "status": 20
+        }),
+    );
+    assert!(!res.is_error);
+
     // 7. Private issue visibility
     let priv_issue_res = dispatch_tool_call(
         &db,
@@ -371,21 +536,52 @@ fn test_mcp_tools_and_rbac_dispatch() {
         }),
     );
     assert!(!priv_issue_res.is_error);
-    let parsed_priv: serde_json::Value = serde_json::from_str(&priv_issue_res.content[0].text).unwrap();
+    let parsed_priv: serde_json::Value =
+        serde_json::from_str(&priv_issue_res.content[0].text).unwrap();
     let priv_issue_id = parsed_priv["issue_id"].as_i64().unwrap();
 
     // Viewer gets denied on get_issue
-    let res = dispatch_tool_call(&db, &view_user, "get_issue", json!({ "issue_id": priv_issue_id }));
+    let res = dispatch_tool_call(
+        &db,
+        &view_user,
+        "get_issue",
+        json!({ "issue_id": priv_issue_id }),
+    );
     assert!(res.is_error);
     assert!(res.content[0].text.contains("Access Denied"));
 
+    // Updater (< 55 and not reporter) gets denied on update_issue for private issue
+    let res = dispatch_tool_call(
+        &db,
+        &updater_user,
+        "update_issue",
+        json!({
+            "issue_id": priv_issue_id,
+            "summary": "Hacked private summary"
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0]
+        .text
+        .contains("Access Denied to private issue"));
+
     // Viewer search_issues does NOT return priv_issue
-    let res = dispatch_tool_call(&db, &view_user, "search_issues", json!({ "project_id": pub_proj_id }));
+    let res = dispatch_tool_call(
+        &db,
+        &view_user,
+        "search_issues",
+        json!({ "project_id": pub_proj_id }),
+    );
     assert!(!res.is_error);
     assert!(!res.content[0].text.contains("Secret private issue"));
 
     // Developer can get_issue
-    let res = dispatch_tool_call(&db, &dev_user, "get_issue", json!({ "issue_id": priv_issue_id }));
+    let res = dispatch_tool_call(
+        &db,
+        &dev_user,
+        "get_issue",
+        json!({ "issue_id": priv_issue_id }),
+    );
     assert!(!res.is_error);
     assert!(res.content[0].text.contains("Secret private issue"));
 }
@@ -397,7 +593,15 @@ async fn test_mcp_sse_and_messages_e2e() {
 
     let db = Db::open_in_memory().unwrap();
     let rep_id = db
-        .create_user("mcp_reporter", "MCP Reporter", "mcprep@test.com", "pass", 25, true, false)
+        .create_user(
+            "mcp_reporter",
+            "MCP Reporter",
+            "mcprep@test.com",
+            "pass",
+            25,
+            true,
+            false,
+        )
         .unwrap();
 
     let (_token_id, raw_token) = db.create_api_token(rep_id, "MCP Test Token").unwrap();
@@ -512,6 +716,13 @@ async fn test_mcp_sse_and_messages_e2e() {
     let init_json: serde_json::Value = serde_json::from_slice(&init_bytes).unwrap();
     assert_eq!(init_json["result"]["protocolVersion"], "2024-11-05");
     assert_eq!(init_json["result"]["serverInfo"]["name"], "rust-mantis-bt");
+
+    // Verify SSE stream also received the message event!
+    let frame2 = body.frame().await.unwrap().unwrap();
+    let data2 = frame2.into_data().unwrap();
+    let sse_msg = String::from_utf8_lossy(&data2);
+    assert!(sse_msg.contains("event: message"));
+    assert!(sse_msg.contains(r#""protocolVersion":"2024-11-05""#));
 
     // 6. POST tools/list
     let res = app

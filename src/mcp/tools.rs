@@ -46,6 +46,8 @@ pub fn all_tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "project_id": { "type": "integer", "description": "Filter by project ID" },
                     "status": { "type": "integer", "description": "Filter by status (e.g. 10: new, 50: assigned, 80: resolved, 90: closed)" },
+                    "priority": { "type": "integer", "description": "Filter by priority (10: none, 20: low, 30: normal, 40: high, 50: urgent, 60: immediate)" },
+                    "severity": { "type": "integer", "description": "Filter by severity (10: feature, 20: trivial, 30: text, 40: tweak, 50: minor, 60: major, 70: crash, 80: block)" },
                     "handler_id": { "type": "integer", "description": "Filter by assigned user ID" },
                     "reporter_id": { "type": "integer", "description": "Filter by reporting user ID" },
                     "search": { "type": "string", "description": "Keyword search across summary and description" },
@@ -180,7 +182,9 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 ));
             }
 
-            let categories = db.list_categories_for_project(project_id).unwrap_or_default();
+            let categories = db
+                .list_categories_for_project(project_id)
+                .unwrap_or_default();
             let versions = db.list_versions(project_id).unwrap_or_default();
 
             let data = json!({
@@ -213,11 +217,23 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
 
             let filter = BugFilter {
                 project_id,
-                search: args.get("search").and_then(|v| v.as_str()).map(String::from),
-                status: args.get("status").and_then(|v| v.as_i64()).map(|s| s as i32),
+                search: args
+                    .get("search")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                status: args
+                    .get("status")
+                    .and_then(|v| v.as_i64())
+                    .map(|s| s as i32),
                 hide_status: None,
-                priority: args.get("priority").and_then(|v| v.as_i64()).map(|p| p as i32),
-                severity: args.get("severity").and_then(|v| v.as_i64()).map(|s| s as i32),
+                priority: args
+                    .get("priority")
+                    .and_then(|v| v.as_i64())
+                    .map(|p| p as i32),
+                severity: args
+                    .get("severity")
+                    .and_then(|v| v.as_i64())
+                    .map(|s| s as i32),
                 category_id: None,
                 reporter_id: args.get("reporter_id").and_then(|v| v.as_i64()),
                 handler_id: args.get("handler_id").and_then(|v| v.as_i64()),
@@ -339,7 +355,11 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
             };
             let description = match args.get("description").and_then(|v| v.as_str()) {
                 Some(d) if !d.trim().is_empty() => d.trim(),
-                _ => return CallToolResult::error("Missing or empty required parameter: description"),
+                _ => {
+                    return CallToolResult::error(
+                        "Missing or empty required parameter: description",
+                    )
+                }
             };
 
             let eff = db.effective_access_level(user, project_id).unwrap_or(0);
@@ -352,10 +372,22 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
 
             let priority = args.get("priority").and_then(|v| v.as_i64()).unwrap_or(30) as i32;
             let severity = args.get("severity").and_then(|v| v.as_i64()).unwrap_or(50) as i32;
-            let reproducibility = args.get("reproducibility").and_then(|v| v.as_i64()).unwrap_or(10) as i32;
-            let steps = args.get("steps_to_reproduce").and_then(|v| v.as_str()).unwrap_or("");
-            let add_info = args.get("additional_information").and_then(|v| v.as_str()).unwrap_or("");
-            let view_state = args.get("view_state").and_then(|v| v.as_i64()).unwrap_or(10) as i32;
+            let reproducibility = args
+                .get("reproducibility")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10) as i32;
+            let steps = args
+                .get("steps_to_reproduce")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let add_info = args
+                .get("additional_information")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let view_state = args
+                .get("view_state")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10) as i32;
 
             match db.create_bug(
                 project_id,
@@ -401,6 +433,13 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
             };
 
             let eff = db.effective_access_level(user, bug.project_id).unwrap_or(0);
+            if bug.view_state == 50 && eff < 55 && bug.reporter_id != user.id {
+                return CallToolResult::error(format!(
+                    "Access Denied to private issue #{}. Minimum Developer (55) required.",
+                    issue_id
+                ));
+            }
+
             let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == user.id);
             if !can_edit {
                 return CallToolResult::error(format!(
@@ -443,13 +482,32 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 }
             }
 
-            if let Some(st) = args.get("status").and_then(|v| v.as_i64()) {
+            if let Some(st) = args
+                .get("status")
+                .and_then(|v| v.as_i64())
+                .map(|s| s as i32)
+            {
+                let required_level = if st == 90 {
+                    70 // Close requires Manager (70+)
+                } else if st == 80 || bug.status >= 80 {
+                    55 // Resolve or reopen requires Developer (55+)
+                } else {
+                    40 // Status transitions require Updater (40+)
+                };
+
+                if eff < required_level {
+                    return CallToolResult::error(format!(
+                        "Permission Denied: Access level {} required for status transition to {} (your level: {})",
+                        required_level, st, eff
+                    ));
+                }
+
                 let res = args
                     .get("resolution")
                     .and_then(|v| v.as_i64())
                     .map(|r| r as i32)
                     .unwrap_or(bug.resolution);
-                if let Err(e) = db.change_bug_status(issue_id, user.id, st as i32, res, None) {
+                if let Err(e) = db.change_bug_status(issue_id, user.id, st, res, None) {
                     return CallToolResult::error(format!("Failed to update issue status: {}", e));
                 }
             }
@@ -485,13 +543,19 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 ));
             }
 
-            let view_state = args.get("view_state").and_then(|v| v.as_i64()).unwrap_or(10) as i32;
+            let view_state = args
+                .get("view_state")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(10) as i32;
             if view_state == 50 && eff < 55 {
                 return CallToolResult::error(
                     "Permission Denied: Developer (55) or higher required to create private notes",
                 );
             }
-            let time_tracking = args.get("time_tracking").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let time_tracking = args
+                .get("time_tracking")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as i32;
 
             match db.add_bugnote_with_time(issue_id, user.id, text, view_state, time_tracking) {
                 Ok(note_id) => {

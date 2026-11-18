@@ -91,7 +91,11 @@ impl ToolContent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CallToolResult {
     pub content: Vec<ToolContent>,
-    #[serde(rename = "isError", skip_serializing_if = "std::ops::Not::not", default)]
+    #[serde(
+        rename = "isError",
+        skip_serializing_if = "std::ops::Not::not",
+        default
+    )]
     pub is_error: bool,
 }
 
@@ -140,7 +144,8 @@ pub mod tests {
         assert!(s.contains(r#""result":{"status":"ok"}"#));
         assert!(!s.contains("error"));
 
-        let err = JsonRpcResponse::error(Some(json!(2)), error_codes::METHOD_NOT_FOUND, "Not found");
+        let err =
+            JsonRpcResponse::error(Some(json!(2)), error_codes::METHOD_NOT_FOUND, "Not found");
         let s_err = serde_json::to_string(&err).unwrap();
         assert!(s_err.contains(r#""code":-32601"#));
         assert!(s_err.contains(r#""message":"Not found""#));

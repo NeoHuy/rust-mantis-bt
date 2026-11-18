@@ -24,12 +24,13 @@ impl SessionManager {
         }
     }
 
-    pub async fn create_session(
-        &self,
-        user: User,
-    ) -> (String, mpsc::Receiver<Event>) {
+    pub async fn create_session(&self, user: User) -> (String, mpsc::Receiver<Event>) {
         let (tx, rx) = mpsc::channel(32);
-        let id = format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>());
+        let id = format!(
+            "{:016x}{:016x}",
+            rand::random::<u64>(),
+            rand::random::<u64>()
+        );
         let session = McpSession {
             id: id.clone(),
             user,

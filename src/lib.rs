@@ -25,7 +25,8 @@ pub fn handle_cli_command(db: &db::Db, args: &[String]) -> Result<Option<String>
                 i += 1;
             }
         }
-        let username = user_opt.ok_or_else(|| "Missing required flag --user <username>".to_string())?;
+        let username =
+            user_opt.ok_or_else(|| "Missing required flag --user <username>".to_string())?;
         let token_name = name_opt.unwrap_or_else(|| "CLI Token".to_string());
 
         let user = db

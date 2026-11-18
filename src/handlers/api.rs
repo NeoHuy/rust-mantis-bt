@@ -40,7 +40,10 @@ pub async fn api_tokens_page(
     Query(q): Query<FlashQuery>,
 ) -> Response {
     if ctx.user.access_level < 25 {
-        return forbidden_html(&ctx, "Reporter (25) or higher access level required to manage API tokens");
+        return forbidden_html(
+            &ctx,
+            "Reporter (25) or higher access level required to manage API tokens",
+        );
     }
 
     let tokens = db.list_api_tokens(ctx.user.id).unwrap_or_default();
@@ -211,7 +214,10 @@ pub async fn api_token_create(
     axum::Form(form): axum::Form<ApiTokenCreateForm>,
 ) -> Response {
     if ctx.user.access_level < 25 {
-        return forbidden_html(&ctx, "Reporter (25) or higher access level required to create API tokens");
+        return forbidden_html(
+            &ctx,
+            "Reporter (25) or higher access level required to create API tokens",
+        );
     }
 
     match db.create_api_token(ctx.user.id, &form.name) {
@@ -231,9 +237,6 @@ pub async fn api_token_revoke(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Response {
-    if ctx.user.access_level < 25 {
-        return forbidden_html(&ctx, "Reporter (25) or higher access level required");
-    }
     if ctx.user.access_level >= 90 {
         let _ = db.revoke_api_token_by_id(id);
     } else {

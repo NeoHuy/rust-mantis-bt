@@ -1,7 +1,5 @@
 use crate::db::Db;
-use crate::mcp::protocol::{
-    error_codes, JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION,
-};
+use crate::mcp::protocol::{error_codes, JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION};
 use crate::mcp::session::SessionManager;
 use crate::mcp::tools::{all_tool_definitions, dispatch_tool_call};
 use axum::extract::{Query, State};
@@ -73,6 +71,12 @@ pub async fn mcp_sse_handler(
         }
     };
 
+    // Lazily cleanup stale sessions older than 30 minutes
+    let _ = state
+        .session_manager
+        .cleanup_stale(std::time::Duration::from_secs(1800))
+        .await;
+
     let (session_id, rx) = state.session_manager.create_session(user).await;
 
     let initial_event = Event::default()
@@ -117,10 +121,13 @@ pub async fn mcp_messages_handler(
     let req = match body {
         Ok(Json(r)) => r,
         Err(_) => {
-            let err_resp = JsonRpcResponse::error(None, error_codes::PARSE_ERROR, "Invalid JSON-RPC request");
+            let err_resp =
+                JsonRpcResponse::error(None, error_codes::PARSE_ERROR, "Invalid JSON-RPC request");
             return (StatusCode::BAD_REQUEST, Json(err_resp)).into_response();
         }
     };
+
+    let is_notification = req.id.is_none();
 
     let resp = match req.method.as_str() {
         "initialize" => JsonRpcResponse::success(
@@ -137,7 +144,9 @@ pub async fn mcp_messages_handler(
             }),
         ),
 
-        "notifications/initialized" => JsonRpcResponse::success(req.id, json!({})),
+        "notifications/initialized" => {
+            return StatusCode::ACCEPTED.into_response();
+        }
 
         "ping" => JsonRpcResponse::success(req.id, json!({})),
 
@@ -161,6 +170,18 @@ pub async fn mcp_messages_handler(
             format!("Method '{}' not found", req.method),
         ),
     };
+
+    if is_notification {
+        return StatusCode::ACCEPTED.into_response();
+    }
+
+    // Deliver response to active SSE stream
+    if let Ok(json_str) = serde_json::to_string(&resp) {
+        let _ = state
+            .session_manager
+            .send_event(session_id, Event::default().event("message").data(json_str))
+            .await;
+    }
 
     (StatusCode::OK, Json(resp)).into_response()
 }

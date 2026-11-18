@@ -8,16 +8,48 @@ async fn spawn_mock_jira(
     status_code: StatusCode,
     body_json: serde_json::Value,
 ) -> (String, tokio::sync::oneshot::Sender<()>) {
-    let app = axum::Router::new().route(
-        "/rest/api/2/issue",
-        axum::routing::post(move || async move {
-            (
-                status_code,
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                serde_json::to_string(&body_json).unwrap(),
-            )
-        }),
-    );
+    let default_key = body_json
+        .get("key")
+        .and_then(|k| k.as_str())
+        .unwrap_or("PROJ-789")
+        .to_string();
+    let body_str = serde_json::to_string(&body_json).unwrap();
+    let app = axum::Router::new()
+        .route(
+            "/rest/api/2/issue",
+            axum::routing::post(move || {
+                let s = body_str.clone();
+                async move {
+                    (
+                        status_code,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        s,
+                    )
+                }
+            }),
+        )
+        .route(
+            "/rest/api/2/issue/:key",
+            axum::routing::get(move |axum::extract::Path(k): axum::extract::Path<String>| {
+                let resp_key = if k.is_empty() { default_key.clone() } else { k };
+                async move {
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        serde_json::to_string(&json!({
+                            "id": "10055",
+                            "key": resp_key,
+                            "fields": {
+                                "summary": "Mock Issue",
+                                "issuetype": {"name": "Bug"},
+                                "status": {"name": "To Do"}
+                            }
+                        }))
+                        .unwrap(),
+                    )
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -168,6 +200,7 @@ async fn test_jira_push_already_linked() {
         "ALREADY-1",
         "http://jira/browse/ALREADY-1",
         "Bug",
+        "",
         dev_id,
     )
     .unwrap();
@@ -470,8 +503,15 @@ async fn test_jira_link_cascade_on_bug_delete() {
         )
         .unwrap();
 
-    db.create_jira_link(bug_id, "DEL-1", "http://jira/browse/DEL-1", "Bug", dev_id)
-        .unwrap();
+    db.create_jira_link(
+        bug_id,
+        "DEL-1",
+        "http://jira/browse/DEL-1",
+        "Bug",
+        "",
+        dev_id,
+    )
+    .unwrap();
     assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_some());
 
     // Delete bug
@@ -505,7 +545,7 @@ async fn spawn_full_mock_jira() -> (String, tokio::sync::oneshot::Sender<()>) {
             "/rest/api/2/issue/:key",
             axum::routing::get(
                 |axum::extract::Path(key): axum::extract::Path<String>| async move {
-                    let status_name = if key == "JBC-DONE" {
+                    let status_name = if key == "JBC-88" {
                         "Done"
                     } else if key == "JBC-105" {
                         "To Do"
@@ -667,11 +707,11 @@ async fn test_jira_sync_refresh_existing_link_and_unlink() {
     db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "JBC")
         .unwrap();
 
-    // Create existing link pointing to JBC-DONE
-    db.create_jira_link_with_status(
+    // Create existing link pointing to JBC-88
+    db.create_jira_link(
         bug_id,
-        "JBC-DONE",
-        &format!("{}/browse/JBC-DONE", mock_url),
+        "JBC-88",
+        &format!("{}/browse/JBC-88", mock_url),
         "Task",
         "In Progress",
         dev_id,
@@ -724,7 +764,7 @@ async fn test_jira_sync_refresh_existing_link_and_unlink() {
     let notes = db.list_bugnotes(bug_id, 90).unwrap();
     assert!(notes
         .iter()
-        .any(|n| n.note.contains("Unlinked Jira issue JBC-DONE")));
+        .any(|n| n.note.contains("Unlinked Jira issue JBC-88")));
 }
 
 #[tokio::test]

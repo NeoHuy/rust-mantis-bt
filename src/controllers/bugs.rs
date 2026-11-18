@@ -763,10 +763,14 @@ pub async fn view_bug_page(
                 }
                 Err(_) => {
                     // Fallback to expired cache if available during transient Jira issues
-                    db.get_cached_jira_epics(pkey, i64::MAX)
+                    let fallback = db
+                        .get_cached_jira_epics(pkey, i64::MAX)
                         .ok()
                         .flatten()
-                        .unwrap_or_default()
+                        .unwrap_or_default();
+                    // Cache the fallback (or empty list) so subsequent page loads don't hang on network timeouts
+                    let _ = db.save_jira_epics_cache(pkey, &fallback);
+                    fallback
                 }
             }
         }

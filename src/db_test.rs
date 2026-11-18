@@ -1077,6 +1077,7 @@ fn test_jira_links_crud() {
             "PROJ-101",
             "https://jira.example.com/browse/PROJ-101",
             "Bug",
+            "In Progress",
             admin.id,
         )
         .unwrap();
@@ -1091,16 +1092,18 @@ fn test_jira_links_crud() {
     assert_eq!(link.jira_key, "PROJ-101");
     assert_eq!(link.jira_url, "https://jira.example.com/browse/PROJ-101");
     assert_eq!(link.issue_type, "Bug");
+    assert_eq!(link.jira_status, "In Progress");
     assert_eq!(link.created_by, admin.id);
 
-    // Duplicate create fails
+    // Duplicate create fails due to UNIQUE constraint on bug_id
     assert!(db
         .create_jira_link(
             bug_id,
             "PROJ-102",
             "https://jira.example.com/browse/PROJ-102",
             "Task",
-            admin.id
+            "To Do",
+            admin.id,
         )
         .is_err());
 
@@ -1322,10 +1325,6 @@ fn test_jira_epics_cache() {
     db.save_jira_epics_cache("JBC", &[]).unwrap();
     let updated = db.get_cached_jira_epics("JBC", 86400).unwrap().unwrap();
     assert_eq!(updated.len(), 0);
-
-    // Clear cache
-    db.clear_jira_epics_cache(Some("JBC")).unwrap();
-    assert!(db.get_cached_jira_epics("JBC", 86400).unwrap().is_none());
 }
 
 #[test]
@@ -1340,14 +1339,18 @@ fn test_jira_status_mappings() {
     assert_eq!(db.resolve_jira_status_to_mantis("In Review"), 20);
     assert_eq!(db.resolve_jira_status_to_mantis("Done"), 80);
 
-    // Save custom mappings
+    // Save custom mappings with case-insensitive duplicates
     let custom = vec![
         ("Backlog".to_string(), 10),
+        ("backlog".to_string(), 20), // Duplicate case-insensitive -> ignored
         ("In Dev".to_string(), 50),
         ("QA Passed".to_string(), 80),
         ("Live Released".to_string(), 90),
     ];
     db.save_jira_status_mappings(&custom).unwrap();
+
+    let saved = db.list_jira_status_mappings().unwrap();
+    assert_eq!(saved.len(), 4);
 
     assert_eq!(db.resolve_jira_status_to_mantis("Backlog"), 10);
     assert_eq!(db.resolve_jira_status_to_mantis("in dev"), 50); // case insensitive
@@ -1356,4 +1359,88 @@ fn test_jira_status_mappings() {
 
     // Unmapped fallback heuristic
     assert_eq!(db.resolve_jira_status_to_mantis("Resolved"), 80);
+}
+
+#[test]
+fn test_jira_sync_preserves_resolved_bugs_and_avoids_duplicate_notes() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_id(1).unwrap().unwrap();
+    let proj_id = db
+        .create_project("Sync Test", 10, 10, "desc", false)
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            1,
+            "Resolved Bug",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Mark bug as resolved (80)
+    db.change_bug_status(bug_id, admin.id, 80, 20, None)
+        .unwrap();
+    assert_eq!(db.get_bug(bug_id).unwrap().unwrap().status, 80);
+
+    // Initial sync link with Jira ticket having status "To Do" (which maps to 30)
+    db.record_jira_sync_success(
+        bug_id,
+        "PROJ-100",
+        "https://jira.example.com/browse/PROJ-100",
+        "Bug",
+        "To Do",
+        admin.id,
+        "administrator",
+        true,
+    )
+    .unwrap();
+
+    // Verify bug status was NOT downgraded from 80 back to 30
+    assert_eq!(db.get_bug(bug_id).unwrap().unwrap().status, 80);
+
+    // Verify exactly 1 note was added for initial link
+    let notes = db.list_bugnotes(bug_id, 90).unwrap();
+    assert_eq!(notes.len(), 1);
+
+    // Re-sync with exact same status & key
+    db.record_jira_sync_success(
+        bug_id,
+        "PROJ-100",
+        "https://jira.example.com/browse/PROJ-100",
+        "Bug",
+        "To Do",
+        admin.id,
+        "administrator",
+        false,
+    )
+    .unwrap();
+
+    // Verify no redundant note was added
+    let notes_after = db.list_bugnotes(bug_id, 90).unwrap();
+    assert_eq!(notes_after.len(), 1);
+
+    // Empty Jira status should NOT alter Mantis bug status
+    db.record_jira_sync_success(
+        bug_id,
+        "PROJ-100",
+        "https://jira.example.com/browse/PROJ-100",
+        "Bug",
+        "",
+        admin.id,
+        "administrator",
+        false,
+    )
+    .unwrap();
+    assert_eq!(db.get_bug(bug_id).unwrap().unwrap().status, 80);
 }

@@ -143,3 +143,37 @@ async fn test_create_issue_missing_credentials_fails_fast() {
         other => panic!("Expected ConfigError, got {:?}", other),
     }
 }
+
+#[test]
+fn test_is_valid_jira_key() {
+    assert!(is_valid_jira_key("PROJ-123"));
+    assert!(is_valid_jira_key("MY_PROJECT-1"));
+    assert!(is_valid_jira_key("A-9999"));
+
+    // Invalid keys (security / format rejection)
+    assert!(!is_valid_jira_key(""));
+    assert!(!is_valid_jira_key("PROJ"));
+    assert!(!is_valid_jira_key("PROJ-"));
+    assert!(!is_valid_jira_key("-123"));
+    assert!(!is_valid_jira_key("proj-123")); // Lowercase not allowed
+    assert!(!is_valid_jira_key("PROJ-12A"));
+    assert!(!is_valid_jira_key("../PROJ-123"));
+    assert!(!is_valid_jira_key("PROJ-123/evil"));
+    assert!(!is_valid_jira_key("PROJ-123?param=value"));
+    assert!(!is_valid_jira_key("PROJ-123#fragment"));
+}
+
+#[test]
+fn test_normalize_jira_key_security() {
+    assert_eq!(normalize_jira_key("123", "PROJ"), "PROJ-123");
+    assert_eq!(normalize_jira_key("PROJ-123", "OTHER"), "PROJ-123");
+    assert_eq!(
+        normalize_jira_key("https://jira.company.com/browse/KEY-42", "PROJ"),
+        "KEY-42"
+    );
+
+    // Injection / malformed attempts normalized to empty string
+    assert_eq!(normalize_jira_key("../../etc/passwd", "PROJ"), "");
+    assert_eq!(normalize_jira_key("KEY-123?admin=true", "PROJ"), "");
+    assert_eq!(normalize_jira_key("invalid key format", "PROJ"), "");
+}

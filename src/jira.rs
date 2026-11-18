@@ -283,6 +283,12 @@ impl JiraClient {
                 "Jira key cannot be empty".to_string(),
             ));
         }
+        if !is_valid_jira_key(trimmed_key) {
+            return Err(JiraError::ConfigError(format!(
+                "Invalid Jira issue key format: '{}'",
+                trimmed_key
+            )));
+        }
 
         let url = format!(
             "{}/rest/api/2/issue/{}?fields=summary,issuetype,status",
@@ -430,7 +436,7 @@ pub fn build_create_issue_payload(
 ) -> JiraIssueCreatePayload {
     let parent = epic_key
         .map(|k| k.trim())
-        .filter(|k| !k.is_empty())
+        .filter(|k| is_valid_jira_key(k))
         .map(|k| JiraParentField { key: k.to_string() });
 
     JiraIssueCreatePayload {
@@ -489,28 +495,53 @@ pub fn parse_search_epics_response(raw_json: &str) -> Result<Vec<JiraEpic>, Jira
         .collect())
 }
 
+pub fn is_valid_jira_key(key: &str) -> bool {
+    let parts: Vec<&str> = key.split('-').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+    let project = parts[0];
+    let num = parts[1];
+    if project.is_empty() || num.is_empty() {
+        return false;
+    }
+    let mut chars = project.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_uppercase() => {}
+        _ => return false,
+    }
+    if !chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_') {
+        return false;
+    }
+    num.chars().all(|c| c.is_ascii_digit())
+}
+
 pub fn normalize_jira_key(input: &str, default_project_key: &str) -> String {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return String::new();
     }
 
-    if let Some(idx) = trimmed.find("/browse/") {
+    let candidate = if let Some(idx) = trimmed.find("/browse/") {
         let after = &trimmed[idx + "/browse/".len()..];
         let key_part = after.split(['?', '#', '/']).next().unwrap_or("").trim();
-        if !key_part.is_empty() {
-            return key_part.to_uppercase();
-        }
-    }
-
-    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        key_part.to_uppercase()
+    } else if trimmed.chars().all(|c| c.is_ascii_digit()) {
         let prefix = default_project_key.trim().to_uppercase();
         if !prefix.is_empty() {
-            return format!("{}-{}", prefix, trimmed);
+            format!("{}-{}", prefix, trimmed)
+        } else {
+            trimmed.to_string()
         }
-    }
+    } else {
+        trimmed.to_uppercase()
+    };
 
-    trimmed.to_uppercase()
+    if is_valid_jira_key(&candidate) {
+        candidate
+    } else {
+        String::new()
+    }
 }
 
 pub fn map_jira_status_to_mantis(jira_status: &str) -> i32 {

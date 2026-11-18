@@ -147,22 +147,28 @@ pub async fn manage_jira_config(
         }
     }
 
-    let mut new_mappings = Vec::new();
-    for idx in status_indices {
-        let j_key = format!("status_jira_{}", idx);
-        let m_key = format!("status_mantis_{}", idx);
-        if let Some(j_val) = form.get(&j_key).map(|s| s.trim()) {
-            if !j_val.is_empty() {
-                let m_val = form
-                    .get(&m_key)
-                    .and_then(|s| s.trim().parse::<i32>().ok())
-                    .unwrap_or(10);
-                new_mappings.push((j_val.to_string(), m_val));
+    if !status_indices.is_empty() {
+        let mut new_mappings = Vec::new();
+        for idx in status_indices {
+            let j_key = format!("status_jira_{}", idx);
+            let m_key = format!("status_mantis_{}", idx);
+            if let Some(j_val) = form.get(&j_key).map(|s| s.trim()) {
+                if !j_val.is_empty() {
+                    let m_val = form
+                        .get(&m_key)
+                        .and_then(|s| s.trim().parse::<i32>().ok())
+                        .unwrap_or(10);
+                    new_mappings.push((j_val.to_string(), m_val));
+                }
             }
         }
-    }
-    if !new_mappings.is_empty() {
-        let _ = db.save_jira_status_mappings(&new_mappings);
+        if let Err(e) = db.save_jira_status_mappings(&new_mappings) {
+            return Redirect::to(&format!(
+                "/manage_jira_page?err=Failed+to+save+status+mappings:+{}",
+                url_encode(&e.to_string())
+            ))
+            .into_response();
+        }
     }
 
     Redirect::to("/manage_jira_page?msg=Jira+configuration+saved+successfully").into_response()
@@ -334,7 +340,17 @@ pub async fn sync_bug_with_jira(
     }
 
     let client = JiraClient::new();
-    let existing_link = db.get_jira_link_by_bug_id(bug_id).unwrap_or(None);
+    let existing_link = match db.get_jira_link_by_bug_id(bug_id) {
+        Ok(l) => l,
+        Err(e) => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Database+error:+{}",
+                bug_id,
+                url_encode(&e.to_string())
+            ))
+            .into_response();
+        }
+    };
 
     if let Some(existing) = existing_link {
         // Already linked -> Refresh status from Jira
@@ -350,10 +366,20 @@ pub async fn sync_bug_with_jira(
             }
         };
 
+        let updated_jira_url = if details.key != existing.jira_key && !config.base_url.is_empty() {
+            format!(
+                "{}/browse/{}",
+                config.base_url.trim().trim_end_matches('/'),
+                details.key
+            )
+        } else {
+            existing.jira_url
+        };
+
         if let Err(e) = db.record_jira_sync_success(
             bug_id,
             &details.key,
-            &existing.jira_url,
+            &updated_jira_url,
             &details.issue_type,
             &details.status,
             ctx.user.id,
@@ -378,9 +404,17 @@ pub async fn sync_bug_with_jira(
 
     // Not linked yet
     let raw_key = form_data.jira_key.as_deref().unwrap_or("").trim();
-    let normalized_key = crate::jira::normalize_jira_key(raw_key, &config.project_key);
+    if !raw_key.is_empty() {
+        let normalized_key = crate::jira::normalize_jira_key(raw_key, &config.project_key);
+        if normalized_key.is_empty() {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Invalid+Jira+issue+key+format:+{}",
+                bug_id,
+                url_encode(raw_key)
+            ))
+            .into_response();
+        }
 
-    if !normalized_key.is_empty() {
         // Link with existing ticket
         let details = match client.get_issue(&config, &normalized_key).await {
             Ok(d) => d,
@@ -415,77 +449,77 @@ pub async fn sync_bug_with_jira(
             .into_response();
         }
 
-        Redirect::to(&format!(
+        return Redirect::to(&format!(
             "/view_bug_page/{}?msg=Linked+to+Jira+issue+{}",
             bug_id,
             url_encode(&details.key)
         ))
-        .into_response()
-    } else {
-        // Create new ticket in Jira
-        let issue_type = form_data
-            .issue_type
-            .as_deref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&config.default_issue_type);
+        .into_response();
+    }
 
-        let epic_key = form_data
-            .epic_key
-            .as_deref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty());
+    // Create new ticket in Jira
+    let issue_type = form_data
+        .issue_type
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&config.default_issue_type);
 
-        let description = format!(
-            "{}\n\n---\nReported in MantisBT: Issue #{:07}\nSummary: {}\nReporter ID: {}\nPriority: {}",
-            bug_full.description, bug.id, bug.summary, bug.reporter_id, bug.priority
-        );
+    let epic_key = form_data
+        .epic_key
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
 
-        let jira_resp = match client
-            .create_issue(&config, &bug.summary, &description, issue_type, epic_key)
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                return Redirect::to(&format!(
-                    "/view_bug_page/{}?err=Jira+creation+failed:+{}",
-                    bug_id,
-                    url_encode(&sanitize_error_message(&e.to_string()))
-                ))
-                .into_response();
-            }
-        };
+    let description = format!(
+        "{}\n\n---\nReported in MantisBT: Issue #{:07}\nSummary: {}\nReporter ID: {}\nPriority: {}",
+        bug_full.description, bug.id, bug.summary, bug.reporter_id, bug.priority
+    );
 
-        let jira_status = match client.get_issue(&config, &jira_resp.key).await {
-            Ok(d) => d.status,
-            Err(_) => "To Do".to_string(),
-        };
-
-        if let Err(e) = db.record_jira_sync_success(
-            bug_id,
-            &jira_resp.key,
-            &jira_resp.browse_url,
-            issue_type,
-            &jira_status,
-            ctx.user.id,
-            &ctx.user.username,
-            true,
-        ) {
+    let jira_resp = match client
+        .create_issue(&config, &bug.summary, &description, issue_type, epic_key)
+        .await
+    {
+        Ok(resp) => resp,
+        Err(e) => {
             return Redirect::to(&format!(
-                "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
+                "/view_bug_page/{}?err=Jira+creation+failed:+{}",
                 bug_id,
-                url_encode(&sanitize_error_message(&e))
+                url_encode(&sanitize_error_message(&e.to_string()))
             ))
             .into_response();
         }
+    };
 
-        Redirect::to(&format!(
-            "/view_bug_page/{}?msg=Created+Jira+issue+{}",
+    let jira_status = match client.get_issue(&config, &jira_resp.key).await {
+        Ok(d) => d.status,
+        Err(_) => String::new(),
+    };
+
+    if let Err(e) = db.record_jira_sync_success(
+        bug_id,
+        &jira_resp.key,
+        &jira_resp.browse_url,
+        issue_type,
+        &jira_status,
+        ctx.user.id,
+        &ctx.user.username,
+        true,
+    ) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
             bug_id,
-            url_encode(&jira_resp.key)
+            url_encode(&sanitize_error_message(&e))
         ))
-        .into_response()
+        .into_response();
     }
+
+    Redirect::to(&format!(
+        "/view_bug_page/{}?msg=Created+Jira+issue+{}",
+        bug_id,
+        url_encode(&jira_resp.key)
+    ))
+    .into_response()
 }
 
 pub async fn unlink_bug_from_jira(

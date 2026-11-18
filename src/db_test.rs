@@ -1173,7 +1173,9 @@ fn test_jira_sync_success_updates_status_and_adds_history() {
 
     // Check bugnotes
     let notes = db.list_bugnotes(bug_id, 90).unwrap();
-    assert!(notes.iter().any(|n| n.note.contains("Unlinked Jira issue JBC-10")));
+    assert!(notes
+        .iter()
+        .any(|n| n.note.contains("Unlinked Jira issue JBC-10")));
 }
 
 #[test]

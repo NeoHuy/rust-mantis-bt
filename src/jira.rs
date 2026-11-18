@@ -279,7 +279,9 @@ impl JiraClient {
         }
         let trimmed_key = key.trim();
         if trimmed_key.is_empty() {
-            return Err(JiraError::ConfigError("Jira key cannot be empty".to_string()));
+            return Err(JiraError::ConfigError(
+                "Jira key cannot be empty".to_string(),
+            ));
         }
 
         let url = format!(
@@ -429,9 +431,7 @@ pub fn build_create_issue_payload(
     let parent = epic_key
         .map(|k| k.trim())
         .filter(|k| !k.is_empty())
-        .map(|k| JiraParentField {
-            key: k.to_string(),
-        });
+        .map(|k| JiraParentField { key: k.to_string() });
 
     JiraIssueCreatePayload {
         fields: JiraFields {
@@ -497,11 +497,7 @@ pub fn normalize_jira_key(input: &str, default_project_key: &str) -> String {
 
     if let Some(idx) = trimmed.find("/browse/") {
         let after = &trimmed[idx + "/browse/".len()..];
-        let key_part = after
-            .split(|c: char| c == '?' || c == '#' || c == '/')
-            .next()
-            .unwrap_or("")
-            .trim();
+        let key_part = after.split(['?', '#', '/']).next().unwrap_or("").trim();
         if !key_part.is_empty() {
             return key_part.to_uppercase();
         }

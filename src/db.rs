@@ -4324,6 +4324,7 @@ impl Db {
         Ok(affected > 0)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record_jira_sync_success(
         &self,
         bug_id: i64,
@@ -4479,14 +4480,7 @@ impl Db {
         username: &str,
     ) -> Result<(), String> {
         self.record_jira_sync_success(
-            bug_id,
-            jira_key,
-            jira_url,
-            issue_type,
-            "To Do",
-            user_id,
-            username,
-            true,
+            bug_id, jira_key, jira_url, issue_type, "To Do", user_id, username, true,
         )
     }
 

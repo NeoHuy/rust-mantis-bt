@@ -316,8 +316,7 @@ pub fn render_jira_section(
                     </form>
                 </div>
             </div>"#,
-            bug_id,
-            epic_options
+            bug_id, epic_options
         )
     } else {
         r#"<div class="panel">

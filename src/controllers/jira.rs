@@ -113,6 +113,16 @@ pub async fn manage_jira_config(
         None
     };
 
+    if enabled || !base_url.is_empty() {
+        if let Err(e) = crate::jira::validate_jira_url(base_url) {
+            return Redirect::to(&format!(
+                "/manage_jira_page?err=Failed+to+save+config:+{}",
+                url_encode(&sanitize_error_message(&e.to_string()))
+            ))
+            .into_response();
+        }
+    }
+
     if let Err(e) = db.save_jira_global_config(
         enabled,
         base_url,

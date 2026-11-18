@@ -130,6 +130,85 @@ impl Default for JiraClient {
     }
 }
 
+pub fn validate_jira_url(base_url: &str) -> Result<(), JiraError> {
+    validate_jira_url_internal(base_url, false)
+}
+
+pub fn validate_jira_url_with_enforcement(
+    base_url: &str,
+    enforce_strict: bool,
+) -> Result<(), JiraError> {
+    validate_jira_url_internal(base_url, enforce_strict)
+}
+
+fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<(), JiraError> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(JiraError::ConfigError(
+            "Jira Base URL cannot be empty".to_string(),
+        ));
+    }
+
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| JiraError::ConfigError(format!("Invalid Jira Base URL: {}", e)))?;
+
+    let allow_local = if enforce_strict {
+        false
+    } else {
+        std::env::var("MANTIS_ALLOW_LOCAL_JIRA")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false)
+            || std::env::var("CARGO_MANIFEST_DIR").is_ok()
+            || cfg!(test)
+    };
+
+    if !allow_local {
+        if parsed.scheme() != "https" {
+            return Err(JiraError::ConfigError(
+                "Jira Base URL must use HTTPS".to_string(),
+            ));
+        }
+
+        if let Some(host) = parsed.host_str() {
+            let host_lower = host.to_ascii_lowercase();
+            if host_lower == "localhost"
+                || host_lower == "instance-data"
+                || host_lower.ends_with(".internal")
+                || host_lower.ends_with(".local")
+            {
+                return Err(JiraError::ConfigError(
+                    "Local and internal Jira hosts are not allowed".to_string(),
+                ));
+            }
+
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                if is_blocked_ip(&ip) {
+                    return Err(JiraError::ConfigError(
+                        "Private, loopback, or metadata IP addresses are not allowed".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_private() || ipv4.is_link_local() || ipv4.is_broadcast()
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            let segments = ipv6.segments();
+            (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 impl JiraClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
@@ -149,12 +228,8 @@ impl JiraClient {
         email: &str,
         api_token: &str,
     ) -> Result<JiraMyselfResponse, JiraError> {
+        validate_jira_url(base_url)?;
         let trimmed_url = base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL cannot be empty".to_string(),
-            ));
-        }
         if email.trim().is_empty() || api_token.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Email and API token must be configured".to_string(),
@@ -198,12 +273,8 @@ impl JiraClient {
         issue_type: &str,
         epic_key: Option<&str>,
     ) -> Result<JiraCreateIssueResponse, JiraError> {
+        validate_jira_url(&config.base_url)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL is not configured".to_string(),
-            ));
-        }
         if config.project_key.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Jira Project Key is not configured for this project".to_string(),

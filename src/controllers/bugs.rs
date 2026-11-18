@@ -108,6 +108,7 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
 }
 
 pub fn router() -> Router<Db> {
+    let upload_limit = (max_file_size() + 2 * 1024 * 1024).max(10 * 1024 * 1024);
     Router::new()
         .route("/view_all_bug_page", get(view_all_bug_page))
         .route("/view_bug_page/:id", get(view_bug_page))
@@ -127,7 +128,7 @@ pub fn router() -> Router<Db> {
         )
         .route(
             "/bug_file_add/:bug_id",
-            post(bug_file_add).layer(DefaultBodyLimit::disable()),
+            post(bug_file_add).layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/file/bug/:id/:filename", get(bug_file_download))
         .route("/bug_file_delete/:id", post(bug_file_delete))

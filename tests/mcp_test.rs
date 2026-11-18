@@ -212,3 +212,180 @@ fn test_cli_token_creation() {
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0].name, "Terminal Token");
 }
+
+#[test]
+fn test_mcp_tools_and_rbac_dispatch() {
+    use rust_mantis_bt::mcp::tools::{all_tool_definitions, dispatch_tool_call};
+    use serde_json::json;
+
+    let db = Db::open_in_memory().unwrap();
+    let dev_id = db
+        .create_user("dev_user", "Developer", "dev@test.com", "pass", 55, true, false)
+        .unwrap();
+    let dev_user = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    let rep_id = db
+        .create_user("rep_user", "Reporter", "rep@test.com", "pass", 25, true, false)
+        .unwrap();
+    let rep_user = db.get_user_by_id(rep_id).unwrap().unwrap();
+
+    let rep2_id = db
+        .create_user("rep2_user", "Reporter 2", "rep2@test.com", "pass", 25, true, false)
+        .unwrap();
+    let rep2_user = db.get_user_by_id(rep2_id).unwrap().unwrap();
+
+    let view_id = db
+        .create_user("view_user", "Viewer", "view@test.com", "pass", 10, true, false)
+        .unwrap();
+    let view_user = db.get_user_by_id(view_id).unwrap().unwrap();
+
+    // Projects: 1 public (view_state=10), 1 private (view_state=50)
+    let pub_proj_id = db.create_project("Public Proj", 10, 10, "Public", true).unwrap();
+    let cat_id = db.add_category(pub_proj_id, "General", 0).unwrap();
+
+    let priv_proj_id = db.create_project("Private Proj", 10, 50, "Private", true).unwrap();
+    // Assign dev_user to private proj with level 55
+    db.set_project_user(priv_proj_id, dev_id, 55).unwrap();
+
+    // Verify all 8 tool definitions
+    let tools = all_tool_definitions();
+    assert_eq!(tools.len(), 8);
+
+    // 1. whoami
+    let res = dispatch_tool_call(&db, &rep_user, "whoami", json!({}));
+    assert!(!res.is_error);
+    assert!(res.content[0].text.contains("rep_user"));
+    assert!(res.content[0].text.contains("25"));
+
+    // 2. list_projects
+    let res = dispatch_tool_call(&db, &rep_user, "list_projects", json!({}));
+    assert!(!res.is_error);
+    assert!(res.content[0].text.contains("Public Proj"));
+    assert!(!res.content[0].text.contains("Private Proj"));
+
+    let res = dispatch_tool_call(&db, &dev_user, "list_projects", json!({}));
+    assert!(!res.is_error);
+    assert!(res.content[0].text.contains("Public Proj"));
+    assert!(res.content[0].text.contains("Private Proj"));
+
+    // 3. get_project_metadata
+    let res = dispatch_tool_call(&db, &rep_user, "get_project_metadata", json!({ "project_id": pub_proj_id }));
+    assert!(!res.is_error);
+    assert!(res.content[0].text.contains("General"));
+
+    let res = dispatch_tool_call(&db, &rep_user, "get_project_metadata", json!({ "project_id": priv_proj_id }));
+    assert!(res.is_error);
+    assert!(res.content[0].text.contains("Permission Denied"));
+
+    // 4. create_issue
+    // Viewer fails
+    let res = dispatch_tool_call(
+        &db,
+        &view_user,
+        "create_issue",
+        json!({
+            "project_id": pub_proj_id,
+            "category_id": cat_id,
+            "summary": "Bug by viewer",
+            "description": "Desc"
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0].text.contains("Reporter (25) or higher access required"));
+
+    // Reporter succeeds
+    let res = dispatch_tool_call(
+        &db,
+        &rep_user,
+        "create_issue",
+        json!({
+            "project_id": pub_proj_id,
+            "category_id": cat_id,
+            "summary": "Bug by reporter",
+            "description": "Desc"
+        }),
+    );
+    assert!(!res.is_error);
+    let parsed: serde_json::Value = serde_json::from_str(&res.content[0].text).unwrap();
+    let issue_id = parsed["issue_id"].as_i64().unwrap();
+
+    let created_bug = db.get_bug(issue_id).unwrap().unwrap();
+    assert_eq!(created_bug.reporter_id, rep_user.id);
+
+    // 5. add_issue_note
+    let res = dispatch_tool_call(
+        &db,
+        &rep_user,
+        "add_issue_note",
+        json!({
+            "issue_id": issue_id,
+            "text": "Note from reporter"
+        }),
+    );
+    assert!(!res.is_error);
+    let notes = db.list_bugnotes(issue_id, 90).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].reporter_id, rep_user.id);
+
+    // 6. update_issue
+    // Different reporter (rep2_user) tries to update -> Permission Denied
+    let res = dispatch_tool_call(
+        &db,
+        &rep2_user,
+        "update_issue",
+        json!({
+            "issue_id": issue_id,
+            "status": 50
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0].text.contains("Permission Denied"));
+
+    // Developer updates issue and assigns handler -> OK
+    let res = dispatch_tool_call(
+        &db,
+        &dev_user,
+        "update_issue",
+        json!({
+            "issue_id": issue_id,
+            "status": 50,
+            "handler_id": dev_id
+        }),
+    );
+    assert!(!res.is_error);
+    let updated_bug = db.get_bug(issue_id).unwrap().unwrap();
+    assert_eq!(updated_bug.status, 50);
+    assert_eq!(updated_bug.handler_id, dev_id);
+
+    // 7. Private issue visibility
+    let priv_issue_res = dispatch_tool_call(
+        &db,
+        &dev_user,
+        "create_issue",
+        json!({
+            "project_id": pub_proj_id,
+            "category_id": cat_id,
+            "summary": "Secret private issue",
+            "description": "Secret details",
+            "view_state": 50
+        }),
+    );
+    assert!(!priv_issue_res.is_error);
+    let parsed_priv: serde_json::Value = serde_json::from_str(&priv_issue_res.content[0].text).unwrap();
+    let priv_issue_id = parsed_priv["issue_id"].as_i64().unwrap();
+
+    // Viewer gets denied on get_issue
+    let res = dispatch_tool_call(&db, &view_user, "get_issue", json!({ "issue_id": priv_issue_id }));
+    assert!(res.is_error);
+    assert!(res.content[0].text.contains("Access Denied"));
+
+    // Viewer search_issues does NOT return priv_issue
+    let res = dispatch_tool_call(&db, &view_user, "search_issues", json!({ "project_id": pub_proj_id }));
+    assert!(!res.is_error);
+    assert!(!res.content[0].text.contains("Secret private issue"));
+
+    // Developer can get_issue
+    let res = dispatch_tool_call(&db, &dev_user, "get_issue", json!({ "issue_id": priv_issue_id }));
+    assert!(!res.is_error);
+    assert!(res.content[0].text.contains("Secret private issue"));
+}

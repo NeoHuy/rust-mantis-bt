@@ -530,7 +530,7 @@ async fn spawn_full_mock_jira() -> (String, tokio::sync::oneshot::Sender<()>) {
             ),
         )
         .route(
-            "/rest/api/2/search",
+            "/rest/api/3/search/jql",
             axum::routing::get(|| async {
                 let res = json!({
                     "issues": [

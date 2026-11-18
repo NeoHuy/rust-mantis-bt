@@ -350,7 +350,7 @@ impl JiraClient {
             "project = \"{}\" AND issuetype in ('Epic', 'epic') ORDER BY key DESC",
             config.project_key.trim()
         );
-        let url = format!("{}/rest/api/2/search", trimmed_url);
+        let url = format!("{}/rest/api/3/search/jql", trimmed_url);
         let resp = self
             .client
             .get(&url)

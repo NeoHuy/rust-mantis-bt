@@ -125,7 +125,7 @@ async fn test_admin_jira_save_config() {
 #[tokio::test]
 async fn test_admin_jira_refresh_epics_permissions_and_success() {
     let app_jira = axum::Router::new().route(
-        "/rest/api/2/search",
+        "/rest/api/3/search/jql",
         axum::routing::get(|| async {
             let res = serde_json::json!({
                 "issues": [

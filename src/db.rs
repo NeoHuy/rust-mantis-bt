@@ -4005,11 +4005,45 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_all_api_tokens(&self) -> rusqlite::Result<Vec<(ApiToken, String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.user_id, t.name, t.hash, t.date_created, t.date_used,
+                    COALESCE(u.username, ''), COALESCE(u.realname, '')
+             FROM mantis_api_token_table t
+             LEFT JOIN mantis_user_table u ON t.user_id = u.id
+             ORDER BY t.date_created DESC, t.id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let token = ApiToken {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                name: row.get(2)?,
+                hash: row.get(3)?,
+                date_created: row.get(4)?,
+                date_used: row.get(5)?,
+            };
+            let username: String = row.get(6)?;
+            let realname: String = row.get(7)?;
+            Ok((token, username, realname))
+        })?;
+        rows.collect()
+    }
+
     pub fn revoke_api_token(&self, id: i64, user_id: i64) -> rusqlite::Result<bool> {
         let conn = self.conn();
         let rows = conn.execute(
             "DELETE FROM mantis_api_token_table WHERE id = ?1 AND user_id = ?2",
             params![id, user_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    pub fn revoke_api_token_by_id(&self, id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let rows = conn.execute(
+            "DELETE FROM mantis_api_token_table WHERE id = ?1",
+            params![id],
         )?;
         Ok(rows > 0)
     }

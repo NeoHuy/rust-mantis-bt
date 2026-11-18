@@ -39,6 +39,10 @@ pub async fn api_tokens_page(
     ctx: AuthContext,
     Query(q): Query<FlashQuery>,
 ) -> Response {
+    if ctx.user.access_level < 25 {
+        return forbidden_html(&ctx, "Reporter (25) or higher access level required to manage API tokens");
+    }
+
     let tokens = db.list_api_tokens(ctx.user.id).unwrap_or_default();
 
     let token_banner = match q.token.as_deref() {
@@ -88,6 +92,72 @@ pub async fn api_tokens_page(
         rows_html.push_str(r#"<tr><td colspan="5">No API tokens created yet.</td></tr>"#);
     }
 
+    let admin_table = if ctx.user.access_level >= 90 {
+        let all_tokens = db.list_all_api_tokens().unwrap_or_default();
+        let mut admin_rows = String::new();
+        for (t, username, realname) in &all_tokens {
+            let used_str = if t.date_used > 0 {
+                format!("Used ({})", format_timestamp(t.date_used))
+            } else {
+                "Never used".to_string()
+            };
+            let display_user = if realname.is_empty() {
+                html_escape(username)
+            } else {
+                format!("{} ({})", html_escape(realname), html_escape(username))
+            };
+            admin_rows.push_str(&format!(
+                r#"<tr>
+                    <td>{}</td>
+                    <td><strong>{}</strong></td>
+                    <td><strong>{}</strong></td>
+                    <td>{}</td>
+                    <td>{}</td>
+                    <td>
+                        <form method="POST" action="/api_token_revoke/{}" style="display:inline;">
+                            <button type="submit" class="btn btn-danger btn-sm">Revoke</button>
+                        </form>
+                    </td>
+                </tr>"#,
+                t.id,
+                display_user,
+                html_escape(&t.name),
+                format_timestamp(t.date_created),
+                used_str,
+                t.id
+            ));
+        }
+        if admin_rows.is_empty() {
+            admin_rows.push_str(r#"<tr><td colspan="6">No tokens found in the system.</td></tr>"#);
+        }
+        format!(
+            r#"<div class="panel" style="margin-top:20px;">
+                <div class="panel-header">System-Wide API Tokens (Administrator View) ({})</div>
+                <div class="panel-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Owner User</th>
+                                <th>Token Name</th>
+                                <th>Created</th>
+                                <th>Last Used</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
+            </div>"#,
+            all_tokens.len(),
+            admin_rows
+        )
+    } else {
+        String::new()
+    };
+
     let content = format!(
         r#"{}
         {}
@@ -118,11 +188,13 @@ pub async fn api_tokens_page(
                     </tbody>
                 </table>
             </div>
-        </div>"#,
+        </div>
+        {}"#,
         err_banner,
         token_banner,
         tokens.len(),
-        rows_html
+        rows_html,
+        admin_table
     );
 
     render_layout("API Tokens", &ctx, q.msg.as_deref(), &content).into_response()
@@ -138,6 +210,10 @@ pub async fn api_token_create(
     ctx: AuthContext,
     axum::Form(form): axum::Form<ApiTokenCreateForm>,
 ) -> Response {
+    if ctx.user.access_level < 25 {
+        return forbidden_html(&ctx, "Reporter (25) or higher access level required to create API tokens");
+    }
+
     match db.create_api_token(ctx.user.id, &form.name) {
         Ok((_id, raw_token)) => Redirect::to(&format!(
             "/api_tokens_page?msg=Token+created&token={}",
@@ -155,7 +231,14 @@ pub async fn api_token_revoke(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Response {
-    let _ = db.revoke_api_token(id, ctx.user.id);
+    if ctx.user.access_level < 25 {
+        return forbidden_html(&ctx, "Reporter (25) or higher access level required");
+    }
+    if ctx.user.access_level >= 90 {
+        let _ = db.revoke_api_token_by_id(id);
+    } else {
+        let _ = db.revoke_api_token(id, ctx.user.id);
+    }
     Redirect::to("/api_tokens_page?msg=Token+revoked").into_response()
 }
 

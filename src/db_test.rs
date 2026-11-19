@@ -1673,23 +1673,47 @@ fn test_email_templates_detailed() {
     assert_eq!(emails.len(), 1);
     assert_eq!(
         emails[0].subject,
-        format!("[Issue #{:07}] New: Null pointer in parser", bug_id)
+        format!("[Core System {:07}] New: Null pointer in parser", bug_id)
     );
     assert!(emails[0]
         .body
-        .contains("The following issue has been reported."));
-    assert!(emails[0].body.contains("Project:      Core System"));
+        .contains("The following issue has been SUBMITTED."));
     assert!(emails[0]
         .body
-        .contains("Summary:      Null pointer in parser"));
-    assert!(emails[0].body.contains("Reporter:     administrator"));
-    assert!(emails[0].body.contains("Status:       New (10)"));
+        .contains(&format!("/view_bug_page/{}", bug_id)));
+    assert!(emails[0]
+        .body
+        .contains("Reported By:                administrator"));
+    assert!(emails[0]
+        .body
+        .contains("Project:                    Core System"));
+    assert!(emails[0]
+        .body
+        .contains(&format!("Issue ID:                   {}", bug_id)));
+    assert!(emails[0]
+        .body
+        .contains("Category:                   General"));
+    assert!(emails[0]
+        .body
+        .contains("Reproducibility:            always"));
+    assert!(emails[0].body.contains("Severity:                   minor"));
+    assert!(emails[0]
+        .body
+        .contains("Priority:                   normal"));
+    assert!(emails[0].body.contains("Status:                     new"));
+    assert!(emails[0].body.contains("Date Submitted:             "));
+    assert!(emails[0].body.contains("Last Modified:              "));
+    assert!(emails[0]
+        .body
+        .contains("Summary:                    Null pointer in parser"));
     assert!(emails[0]
         .body
         .contains("Description:\nCrash on empty token"));
     assert!(emails[0]
         .body
         .contains("Steps to Reproduce:\n1. Open page\n2. Click filter"));
+    assert!(emails[0].body.contains("Issue History"));
+    assert!(emails[0].body.contains("New Issue"));
 
     db.flush_email_queue().unwrap();
 
@@ -1700,15 +1724,20 @@ fn test_email_templates_detailed() {
     assert_eq!(
         emails[0].subject,
         format!(
-            "[Issue #{:07}] Assigned to dev1: Null pointer in parser",
+            "[Core System {:07}] Assigned to dev1: Null pointer in parser",
             bug_id
         )
     );
     assert!(emails[0]
         .body
-        .contains("The following issue has been assigned to dev1"));
-    assert!(emails[0].body.contains("Assigned to:  dev1 (Dev One)"));
-    assert!(emails[0].body.contains("Assigned by:  administrator"));
+        .contains("The following issue has been ASSIGNED."));
+    assert!(emails[0]
+        .body
+        .contains("Assigned To:                dev1 (Dev One)"));
+    assert!(emails[0].body.contains("Assigned To              => dev1"));
+    assert!(emails[0]
+        .body
+        .contains("Status                   new => assigned"));
 
     db.flush_email_queue().unwrap();
 
@@ -1724,23 +1753,26 @@ fn test_email_templates_detailed() {
     assert_eq!(
         status_email.subject,
         format!(
-            "[Issue #{:07}] Status changed to Resolved: Null pointer in parser",
+            "[Core System {:07}] Status changed to Resolved: Null pointer in parser",
             bug_id
         )
     );
     assert!(status_email
         .body
-        .contains("The following issue status has been updated."));
+        .contains("The following issue has been RESOLVED."));
     assert!(status_email
         .body
-        .contains("Status:       Assigned (50) -> Resolved (80)"));
+        .contains("Status:                     resolved"));
     assert!(status_email
         .body
-        .contains("Resolution:   Open (10) -> Fixed (20)"));
-    assert!(status_email.body.contains("Updated by:   dev1 (Dev One)"));
+        .contains("Resolution:                 fixed"));
+    assert!(status_email.body.contains("Fixed in patch v1.2"));
     assert!(status_email
         .body
-        .contains("Note / Comment:\nFixed in patch v1.2"));
+        .contains("Status                   assigned => resolved"));
+    assert!(status_email
+        .body
+        .contains("Resolution               open => fixed"));
 
     db.flush_email_queue().unwrap();
 
@@ -1755,15 +1787,14 @@ fn test_email_templates_detailed() {
     assert_eq!(
         note_email.subject,
         format!(
-            "[Issue #{:07}] Note added by administrator: Null pointer in parser",
+            "[Core System {:07}] Note added by administrator: Null pointer in parser",
             bug_id
         )
     );
     assert!(note_email
         .body
-        .contains("A note has been added to the following issue."));
-    assert!(note_email.body.contains("Note Author:  administrator"));
-    assert!(note_email.body.contains("Note:\nPlease verify on staging"));
+        .contains("A NOTE has been added to this issue."));
+    assert!(note_email.body.contains("Please verify on staging"));
 
     db.flush_email_queue().unwrap();
 
@@ -1772,13 +1803,16 @@ fn test_email_templates_detailed() {
     let emails = db.list_queued_emails().unwrap();
     assert_eq!(
         emails[0].subject,
-        format!("[Issue #{:07}] Unassigned: Null pointer in parser", bug_id)
+        format!(
+            "[Core System {:07}] Unassigned: Null pointer in parser",
+            bug_id
+        )
     );
     assert!(emails[0]
         .body
-        .contains("The following issue has been unassigned."));
-    assert!(emails[0].body.contains("Previous:     dev1 (Dev One)"));
-    assert!(emails[0].body.contains("Unassigned by:administrator"));
+        .contains("The following issue has been UNASSIGNED."));
+    assert!(emails[0].body.contains("Assigned To:                \n"));
+    assert!(emails[0].body.contains("dev1 =>"));
 
     db.flush_email_queue().unwrap();
 
@@ -1791,11 +1825,13 @@ fn test_email_templates_detailed() {
     assert_eq!(
         emails[0].subject,
         format!(
-            "[Issue #{:07}] Assigned to plainuser: Null pointer in parser",
+            "[Core System {:07}] Assigned to plainuser: Null pointer in parser",
             bug_id
         )
     );
-    assert!(emails[0].body.contains("Assigned to:  plainuser\n"));
+    assert!(emails[0]
+        .body
+        .contains("Assigned To:                plainuser\n"));
 
     db.flush_email_queue().unwrap();
 

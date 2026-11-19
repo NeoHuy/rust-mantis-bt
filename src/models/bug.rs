@@ -223,6 +223,23 @@ impl BugReproducibility {
             Self::NA => "N/A",
         }
     }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Always => "Always",
+            Self::Sometimes => "Sometimes",
+            Self::Random => "Random",
+            Self::HaveNotTried => "Have Not Tried",
+            Self::UnableToReproduce => "Unable to Reproduce",
+            Self::NA => "N/A",
+        }
+    }
+
+    pub fn display_name_or(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

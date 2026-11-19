@@ -316,4 +316,8 @@ fn test_bug_enums_display_name() {
 
     assert_eq!(BugSeverity::display_name_or(50), "Minor");
     assert_eq!(BugSeverity::display_name_or(999), "999");
+
+    assert_eq!(BugReproducibility::Always.display_name(), "Always");
+    assert_eq!(BugReproducibility::display_name_or(10), "Always");
+    assert_eq!(BugReproducibility::display_name_or(999), "999");
 }

@@ -29,3 +29,21 @@ fn test_url_encode() {
         "foo%2Fbar%3Fkey%3Dval%26x%3D1"
     );
 }
+
+#[test]
+fn test_jira_sync_form_deserialization() {
+    let json = r#"{"jira_key":"JBC-101","epic_key":"JBC-10","issue_type":"Story"}"#;
+    let form: JiraSyncForm = serde_json::from_str(json).unwrap();
+    assert_eq!(form.jira_key.as_deref(), Some("JBC-101"));
+    assert_eq!(form.epic_key.as_deref(), Some("JBC-10"));
+    assert_eq!(form.issue_type.as_deref(), Some("Story"));
+}
+
+#[test]
+fn test_jira_sync_form_empty_defaults() {
+    let json = r#"{}"#;
+    let form: JiraSyncForm = serde_json::from_str(json).unwrap();
+    assert_eq!(form.jira_key, None);
+    assert_eq!(form.epic_key, None);
+    assert_eq!(form.issue_type, None);
+}

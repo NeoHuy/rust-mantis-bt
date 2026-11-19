@@ -65,7 +65,8 @@ pub fn router() -> Router<Db> {
 }
 
 pub fn build_router(db: Db) -> Router {
-    router().with_state(db)
+    let mcp_router = crate::mcp::router(db.clone(), crate::mcp::SessionManager::new());
+    router().with_state(db).merge(mcp_router)
 }
 
 #[cfg(test)]

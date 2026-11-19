@@ -693,9 +693,9 @@ pub async fn view_bug_page(
         }
 
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:4px; align-items:center;">
-                <select name="new_status" style="width:auto;">{}</select>
-                <select name="resolution" style="width:auto;">{}</select>
+            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
+                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
                 <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
                 <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
             </form>"#,
@@ -748,18 +748,48 @@ pub async fn view_bug_page(
                 project_key: String::new(),
             });
 
-    if jira_link.is_none() && jira_conf.enabled && eff >= 55 {
-        actions_html.push_str(&format!(
-            r#"<form method="POST" action="/view_bug_page/{}/jira_push" style="display:inline-flex; gap:4px; align-items:center;">
-                <select name="issue_type" style="width:auto;">
-                    <option value="Bug">Jira Bug</option>
-                    <option value="Task">Jira Task</option>
-                </select>
-                <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6;">Push to Jira</button>
-            </form>"#,
-            bug.id
-        ));
-    }
+    let epics = if jira_conf.enabled && eff >= 55 && jira_link.is_none() {
+        let pkey = jira_conf.project_key.trim();
+        if pkey.is_empty() {
+            vec![]
+        } else if let Ok(Some(cached)) = db.get_cached_jira_epics(pkey, 86400) {
+            cached
+        } else {
+            let client = crate::jira::JiraClient::new();
+            match client.list_epics(&jira_conf).await {
+                Ok(fetched) => {
+                    let _ = db.save_jira_epics_cache(pkey, &fetched);
+                    fetched
+                }
+                Err(_) => {
+                    // Fallback to expired cache if available during transient Jira issues
+                    let fallback = db
+                        .get_cached_jira_epics(pkey, i64::MAX)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    // Cache the fallback with a short 5-minute TTL
+                    // so transient errors don't lock out epics for a full 24 hours.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let _ = db.save_jira_epics_cache_with_ttl(pkey, &fallback, now, now + 300);
+                    fallback
+                }
+            }
+        }
+    } else {
+        vec![]
+    };
+    let jira_section_html = views::jira::render_jira_section(
+        &ctx,
+        bug.id,
+        jira_link.as_ref(),
+        &epics,
+        jira_conf.enabled,
+        eff,
+    );
 
     let mut tags_html = String::new();
     if bug_tags.is_empty() {
@@ -1043,6 +1073,7 @@ pub async fn view_bug_page(
         &note_form_html,
         &history_html,
         jira_link.as_ref(),
+        &jira_section_html,
         q.msg.as_deref(),
         q.err.as_deref(),
     )

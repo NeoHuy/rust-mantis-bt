@@ -28,7 +28,7 @@ fn dummy_ctx() -> AuthContext {
 #[test]
 fn test_render_api_tokens_page_empty() {
     let ctx = dummy_ctx();
-    let out = render_api_tokens_page(&ctx, &[], None, None, None);
+    let out = render_api_tokens_page(&ctx, &[], &[], None, None, None);
     let html = out.0;
     assert!(html.contains("My API Tokens (0)"));
     assert!(html.contains("No API tokens created yet."));
@@ -46,7 +46,7 @@ fn test_render_api_tokens_page_with_token_banner() {
         date_created: 1700000000,
         date_used: 1700000000,
     }];
-    let out = render_api_tokens_page(&ctx, &tokens, Some("secret_token_123"), None, None);
+    let out = render_api_tokens_page(&ctx, &tokens, &[], Some("secret_token_123"), None, None);
     let html = out.0;
     assert!(html.contains("New API Token Created!"));
     assert!(html.contains("secret_token_123"));

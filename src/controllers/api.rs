@@ -41,10 +41,24 @@ pub async fn api_tokens_page(
     ctx: AuthContext,
     Query(q): Query<FlashQuery>,
 ) -> Response {
+    if ctx.user.access_level < 25 {
+        return forbidden_html(
+            &ctx,
+            "Reporter (25) or higher access level required to manage API tokens",
+        );
+    }
+
     let tokens = db.list_api_tokens(ctx.user.id).unwrap_or_default();
+    let all_tokens = if ctx.user.access_level >= 90 {
+        db.list_all_api_tokens().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     views::api::render_api_tokens_page(
         &ctx,
         &tokens,
+        &all_tokens,
         q.token.as_deref(),
         q.msg.as_deref(),
         q.err.as_deref(),
@@ -62,6 +76,13 @@ pub async fn api_token_create(
     ctx: AuthContext,
     axum::Form(form): axum::Form<ApiTokenCreateForm>,
 ) -> Response {
+    if ctx.user.access_level < 25 {
+        return forbidden_html(
+            &ctx,
+            "Reporter (25) or higher access level required to create API tokens",
+        );
+    }
+
     match db.create_api_token(ctx.user.id, &form.name) {
         Ok((_id, raw_token)) => Redirect::to(&format!(
             "/api_tokens_page?msg=Token+created&token={}",
@@ -79,7 +100,11 @@ pub async fn api_token_revoke(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Response {
-    let _ = db.revoke_api_token(id, ctx.user.id);
+    if ctx.user.access_level >= 90 {
+        let _ = db.revoke_api_token_by_id(id);
+    } else {
+        let _ = db.revoke_api_token(id, ctx.user.id);
+    }
     Redirect::to("/api_tokens_page?msg=Token+revoked").into_response()
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::{JiraResolvedConfig, User};
+use crate::models::{JiraEpic, JiraLink, JiraResolvedConfig, User};
 
 fn dummy_ctx() -> AuthContext {
     let user = User {
@@ -37,12 +37,16 @@ fn test_render_manage_jira_page() {
         project_key: "GLOBAL".to_string(),
     };
     let mappings = vec![(10, "Billing Service".to_string(), "BILL".to_string())];
+    let cached_epics = vec![("BILL".to_string(), 3, 1700000000)];
+    let status_mappings = vec![("In Progress".to_string(), 50)];
 
     let out = render_manage_jira_page(
         &ctx,
         &config,
         &[],
         &mappings,
+        &cached_epics,
+        &status_mappings,
         Some("Configuration saved successfully"),
         None,
     );
@@ -55,6 +59,11 @@ fn test_render_manage_jira_page() {
     assert!(html.contains("BILL"));
     assert!(html.contains(r#"action="/manage_jira_config""#));
     assert!(html.contains(r#"action="/manage_jira_test""#));
+    assert!(html.contains(r#"action="/manage_jira_refresh_epics""#));
+    assert!(html.contains("Status Mapping (Jira Status"));
+    assert!(html.contains("In Progress"));
+    assert!(html.contains("Cached Jira Epics"));
+    assert!(html.contains("3 epic(s)"));
 }
 
 #[test]
@@ -74,10 +83,69 @@ fn test_render_manage_jira_page_with_error() {
         &config,
         &[],
         &[],
+        &[],
+        &[],
         None,
         Some("Jira connection failed"),
     );
     let html = out.0;
     assert!(html.contains("flash-error"));
     assert!(html.contains("Jira connection failed"));
+}
+
+#[test]
+fn test_render_jira_section_disabled() {
+    let ctx = dummy_ctx();
+    let html = render_jira_section(&ctx, 42, None, &[], false, 55);
+    assert!(html.is_empty());
+}
+
+#[test]
+fn test_render_jira_section_unlinked_developer() {
+    let ctx = dummy_ctx();
+    let epics = vec![JiraEpic {
+        key: "JBC-10".to_string(),
+        summary: "Auth Epic".to_string(),
+    }];
+    let html = render_jira_section(&ctx, 42, None, &epics, true, 55);
+    assert!(html.contains("Jira Integration"));
+    assert!(html.contains(r#"action="/view_bug_page/42/jira_sync""#));
+    assert!(html.contains(r#"name="jira_key""#));
+    assert!(html.contains(r#"name="epic_key""#));
+    assert!(html.contains("JBC-10 - Auth Epic"));
+    assert!(html.contains(r#"name="issue_type""#));
+    assert!(html.contains("Sync"));
+}
+
+#[test]
+fn test_render_jira_section_unlinked_viewer() {
+    let ctx = dummy_ctx();
+    let html = render_jira_section(&ctx, 42, None, &[], true, 10);
+    assert!(html.contains("Jira Integration"));
+    assert!(html.contains("No Jira ticket linked"));
+    assert!(!html.contains(r#"name="jira_key""#));
+}
+
+#[test]
+fn test_render_jira_section_linked() {
+    let ctx = dummy_ctx();
+    let link = JiraLink {
+        id: 1,
+        bug_id: 42,
+        jira_key: "JBC-101".to_string(),
+        jira_url: "https://jira.example.com/browse/JBC-101".to_string(),
+        issue_type: "Story".to_string(),
+        jira_status: "In Progress".to_string(),
+        created_by: 1,
+        created_at: 12345678,
+    };
+    let html = render_jira_section(&ctx, 42, Some(&link), &[], true, 55);
+    assert!(html.contains("Jira Integration"));
+    assert!(html.contains("JBC-101"));
+    assert!(html.contains("https://jira.example.com/browse/JBC-101"));
+    assert!(html.contains("Story"));
+    assert!(html.contains("In Progress"));
+    assert!(html.contains(r#"action="/view_bug_page/42/jira_sync""#));
+    assert!(html.contains(r#"action="/view_bug_page/42/jira_unlink""#));
+    assert!(html.contains("Unlink"));
 }

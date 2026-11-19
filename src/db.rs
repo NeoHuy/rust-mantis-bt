@@ -3,7 +3,7 @@ use crate::models::{
     Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig,
     NewsItem, PluginItem, Project, ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -39,7 +39,7 @@ impl Db {
     }
 
     pub fn migrate(&self) -> rusqlite::Result<()> {
-        let conn = self.conn();
+        let mut conn = self.conn();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS mantis_config_table (
                 config_id TEXT NOT NULL,
@@ -308,18 +308,159 @@ impl Db {
 
             CREATE TABLE IF NOT EXISTS mantis_jira_links_table (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bug_id INTEGER NOT NULL UNIQUE,
+                bug_id INTEGER NOT NULL,
                 jira_key TEXT NOT NULL,
                 jira_url TEXT NOT NULL,
                 issue_type TEXT NOT NULL DEFAULT 'Bug',
+                jira_status TEXT NOT NULL DEFAULT '',
                 created_by INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(bug_id) REFERENCES mantis_bug_table(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_jira_links_bug_id ON mantis_jira_links_table(bug_id);
-            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);",
+            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_epics_cache_table (
+                project_key TEXT PRIMARY KEY,
+                epics_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table (
+                jira_status TEXT PRIMARY KEY COLLATE NOCASE,
+                mantis_status INTEGER NOT NULL
+            );",
         )?;
+
+        // Idempotent migration for mantis_jira_epics_cache_table: ensure expires_at column exists
+        let has_expires_at = {
+            let mut stmt = conn.prepare("PRAGMA table_info(mantis_jira_epics_cache_table)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for name in rows.flatten() {
+                if name == "expires_at" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_expires_at {
+            conn.execute(
+                "ALTER TABLE mantis_jira_epics_cache_table ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        // Idempotent migration for mantis_jira_links_table: ensure unique index on bug_id exists
+        let has_unique_bug_id_idx: bool = {
+            let mut stmt = conn.prepare("PRAGMA index_list(mantis_jira_links_table)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                let unique: i64 = row.get(2)?;
+                Ok((name, unique))
+            })?;
+            let mut found = false;
+            for (name, unique) in rows.flatten() {
+                if (name == "idx_jira_links_bug_id_unique"
+                    || name.starts_with("sqlite_autoindex_mantis_jira_links_table"))
+                    && unique == 1
+                {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+
+        if !has_unique_bug_id_idx {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM mantis_jira_links_table WHERE id NOT IN (SELECT MAX(id) FROM mantis_jira_links_table GROUP BY bug_id)",
+                [],
+            )?;
+            tx.execute("DROP INDEX IF EXISTS idx_jira_links_bug_id", [])?;
+            tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_jira_links_bug_id_unique ON mantis_jira_links_table(bug_id)",
+                [],
+            )?;
+            tx.commit()?;
+        }
+
+        // Idempotent migration for mantis_jira_status_mapping_table: ensure COLLATE NOCASE
+        let needs_nocase_migration = {
+            let table_sql: Option<String> = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='mantis_jira_status_mapping_table'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match table_sql {
+                Some(sql) => !sql.to_uppercase().contains("NOCASE"),
+                None => false,
+            }
+        };
+
+        if needs_nocase_migration {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table_mig (
+                    jira_status TEXT PRIMARY KEY COLLATE NOCASE,
+                    mantis_status INTEGER NOT NULL
+                )",
+                [],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO mantis_jira_status_mapping_table_mig (jira_status, mantis_status)
+                 SELECT TRIM(jira_status), mantis_status FROM mantis_jira_status_mapping_table",
+                [],
+            )?;
+            tx.execute("DROP TABLE mantis_jira_status_mapping_table", [])?;
+            tx.execute(
+                "ALTER TABLE mantis_jira_status_mapping_table_mig RENAME TO mantis_jira_status_mapping_table",
+                [],
+            )?;
+            tx.commit()?;
+        }
+
+        // Seed default Jira status mappings if table is empty
+        let status_map_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mantis_jira_status_mapping_table",
+            [],
+            |row| row.get(0),
+        )?;
+        if status_map_count == 0 {
+            let defaults = [
+                ("To Do", 30),
+                ("Open", 30),
+                ("In Progress", 50),
+                ("In Review", 20),
+                ("Done", 80),
+                ("Closed", 90),
+            ];
+            for (j_status, m_status) in defaults {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                    params![j_status, m_status],
+                );
+            }
+        }
+
+        // Ensure jira_status column exists in mantis_jira_links_table for existing databases
+        let has_jira_status = conn
+            .prepare("SELECT jira_status FROM mantis_jira_links_table LIMIT 1")
+            .is_ok();
+        if !has_jira_status {
+            let _ = conn.execute(
+                "ALTER TABLE mantis_jira_links_table ADD COLUMN jira_status TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+        }
 
         // Default administrator seed if user table is empty
         let user_count: i64 =
@@ -4253,6 +4394,7 @@ impl Db {
         jira_key: &str,
         jira_url: &str,
         issue_type: &str,
+        jira_status: &str,
         user_id: i64,
     ) -> rusqlite::Result<i64> {
         let conn = self.conn();
@@ -4261,9 +4403,9 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
         conn.execute(
-            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -4271,8 +4413,8 @@ impl Db {
     pub fn get_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<Option<JiraLink>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, bug_id, jira_key, jira_url, issue_type, created_by, created_at
-             FROM mantis_jira_links_table WHERE bug_id = ?1",
+            "SELECT id, bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at
+             FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
         )?;
         let mut rows = stmt.query(params![bug_id])?;
         if let Some(row) = rows.next()? {
@@ -4282,12 +4424,40 @@ impl Db {
                 jira_key: row.get(2)?,
                 jira_url: row.get(3)?,
                 issue_type: row.get(4)?,
-                created_by: row.get(5)?,
-                created_at: row.get(6)?,
+                jira_status: row.get(5)?,
+                created_by: row.get(6)?,
+                created_at: row.get(7)?,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn claim_jira_link_pending(&self, bug_id: i64, user_id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let affected = conn.execute(
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, '__PENDING__', '', '', '', ?2, ?3)
+             ON CONFLICT(bug_id) DO UPDATE SET
+                 created_by = excluded.created_by,
+                 created_at = excluded.created_at
+             WHERE mantis_jira_links_table.jira_key = '__PENDING__' AND (excluded.created_at - mantis_jira_links_table.created_at) > 60",
+            params![bug_id, user_id, now],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn release_jira_link_pending(&self, bug_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key = '__PENDING__'",
+            params![bug_id],
+        )?;
+        Ok(())
     }
 
     pub fn delete_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<bool> {
@@ -4299,14 +4469,33 @@ impl Db {
         Ok(affected > 0)
     }
 
-    pub fn record_jira_push_success(
+    fn resolve_jira_status_internal(conn: &rusqlite::Connection, jira_status: &str) -> i32 {
+        let trimmed = jira_status.trim();
+        if trimmed.is_empty() {
+            return 0;
+        }
+        let mapped: Option<i32> = conn
+            .query_row(
+                "SELECT mantis_status FROM mantis_jira_status_mapping_table WHERE jira_status = ?1",
+                params![trimmed],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        mapped.unwrap_or_else(|| crate::jira::map_jira_status_to_mantis(trimmed))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_jira_sync_success(
         &self,
         bug_id: i64,
         jira_key: &str,
         jira_url: &str,
         issue_type: &str,
+        jira_status: &str,
         user_id: i64,
         username: &str,
+        is_new_link: bool,
     ) -> Result<(), String> {
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -4316,19 +4505,142 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        // 1. Insert jira link
+        // Query existing link to track changes and previous status
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT jira_key, jira_status FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
+                params![bug_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let (existing_key, existing_status) = match existing {
+            Some((k, s)) => (k, s),
+            None => (String::new(), String::new()),
+        };
+
+        // 1. Insert or update jira link via UPSERT to prevent concurrency duplicate inserts
         tx.execute(
-            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(bug_id) DO UPDATE SET
+                 jira_key = excluded.jira_key,
+                 jira_url = excluded.jira_url,
+                 issue_type = excluded.issue_type,
+                 jira_status = excluded.jira_status,
+                 created_by = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_by ELSE mantis_jira_links_table.created_by END,
+                 created_at = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_at ELSE mantis_jira_links_table.created_at END",
+            params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
         )
         .map_err(|e| e.to_string())?;
 
-        // 2. Insert bugnote text & bugnote
-        let note_text = format!(
-            "Created Jira issue [{}]({}) by {}.",
-            jira_key, jira_url, username
-        );
+        // 2. Map status to mantis and update bug if status changes
+        let old_status: i32 = tx
+            .query_row(
+                "SELECT status FROM mantis_bug_table WHERE id = ?1",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let trimmed_jira_status = jira_status.trim();
+        let mut status_changed = false;
+        if !trimmed_jira_status.is_empty() {
+            let mapped_status = Self::resolve_jira_status_internal(&tx, trimmed_jira_status);
+            // Prevent reopening/downgrading resolved or closed bugs (status >= 80) if mapped status is lower
+            let is_resolved_or_closed_downgrade = old_status >= 80 && mapped_status < old_status;
+            if !is_resolved_or_closed_downgrade && old_status != mapped_status {
+                tx.execute(
+                    "UPDATE mantis_bug_table SET status = ?1, last_updated = ?2 WHERE id = ?3",
+                    params![mapped_status, now, bug_id],
+                )
+                .map_err(|e| e.to_string())?;
+
+                tx.execute(
+                    "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
+                     VALUES (?1, ?2, ?3, 'status', ?4, ?5, 0)",
+                    params![user_id, bug_id, now, old_status.to_string(), mapped_status.to_string()],
+                )
+                .map_err(|e| e.to_string())?;
+
+                status_changed = true;
+            }
+        }
+
+        // 3. Insert bugnote ONLY if something changed or it's a new link
+        let key_changed = existing_key != jira_key;
+        let jira_status_changed = existing_status != jira_status;
+        let should_add_note = is_new_link || status_changed || key_changed || jira_status_changed;
+
+        if should_add_note {
+            let note_text = if is_new_link {
+                format!(
+                    "Linked to Jira issue [{}]({}) (Status: {}) by {}.",
+                    jira_key, jira_url, jira_status, username
+                )
+            } else {
+                format!(
+                    "Synced with Jira issue [{}]({}) (Status: {}) by {}.",
+                    jira_key, jira_url, jira_status, username
+                )
+            };
+
+            tx.execute(
+                "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
+                params![note_text],
+            )
+            .map_err(|e| e.to_string())?;
+            let text_id = tx.last_insert_rowid();
+
+            tx.execute(
+                "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+                 VALUES (?1, ?2, ?3, 10, ?4, ?4, 0, '', 0)",
+                params![bug_id, user_id, text_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_jira_link_with_note(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        username: &str,
+    ) -> Result<bool, String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let existing_key: Option<String> = tx
+            .query_row(
+                "SELECT jira_key FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let key_str = match existing_key {
+            Some(k) => k,
+            None => return Ok(false),
+        };
+
+        let affected = tx
+            .execute(
+                "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1",
+                params![bug_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let note_text = format!("Unlinked Jira issue {} by {}.", key_str, username);
         tx.execute(
             "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
             params![note_text],
@@ -4343,32 +4655,8 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
 
-        // 3. Update bug status to 30 (acknowledged) if currently 10
-        let current_status: i32 = tx
-            .query_row(
-                "SELECT status FROM mantis_bug_table WHERE id = ?1",
-                params![bug_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-
-        if current_status == 10 {
-            tx.execute(
-                "UPDATE mantis_bug_table SET status = 30, last_updated = ?1 WHERE id = ?2",
-                params![now, bug_id],
-            )
-            .map_err(|e| e.to_string())?;
-
-            tx.execute(
-                "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
-                 VALUES (?1, ?2, ?3, 'status', '10', '30', 0)",
-                params![user_id, bug_id, now],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(affected > 0)
     }
 
     pub fn get_jira_config(&self, project_id: i64) -> rusqlite::Result<JiraResolvedConfig> {
@@ -4434,6 +4722,146 @@ impl Db {
         jira_project_key: &str,
     ) -> rusqlite::Result<()> {
         self.set_config("jira_project_key", project_id, 0, jira_project_key)
+    }
+
+    pub fn save_jira_epics_cache(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+    ) -> rusqlite::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.save_jira_epics_cache_with_ttl(project_key, epics, now, now + 86400)
+    }
+
+    pub fn save_jira_epics_cache_with_timestamp(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+        updated_at: i64,
+    ) -> rusqlite::Result<()> {
+        self.save_jira_epics_cache_with_ttl(project_key, epics, updated_at, updated_at + 86400)
+    }
+
+    pub fn save_jira_epics_cache_with_ttl(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+        updated_at: i64,
+        expires_at: i64,
+    ) -> rusqlite::Result<()> {
+        let epics_json = serde_json::to_string(epics).unwrap_or_else(|_| "[]".to_string());
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_jira_epics_cache_table (project_key, epics_json, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_key) DO UPDATE SET epics_json = excluded.epics_json, updated_at = excluded.updated_at, expires_at = excluded.expires_at",
+            params![project_key, epics_json, updated_at, expires_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_cached_jira_epics(
+        &self,
+        project_key: &str,
+        max_age_secs: i64,
+    ) -> rusqlite::Result<Option<Vec<crate::models::JiraEpic>>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn();
+        let res: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT epics_json, updated_at, expires_at FROM mantis_jira_epics_cache_table WHERE project_key = ?1",
+                params![project_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        match res {
+            Some((json, updated_at, expires_at)) => {
+                let is_fresh = if expires_at > 0 {
+                    now < expires_at
+                } else {
+                    now.saturating_sub(updated_at) <= max_age_secs
+                };
+                if is_fresh || max_age_secs == i64::MAX {
+                    let epics: Vec<crate::models::JiraEpic> =
+                        serde_json::from_str(&json).unwrap_or_default();
+                    Ok(Some(epics))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_cached_jira_epics_summary(&self) -> rusqlite::Result<Vec<(String, usize, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT project_key, epics_json, updated_at FROM mantis_jira_epics_cache_table ORDER BY project_key ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            let updated_at: i64 = row.get(2)?;
+            let count = serde_json::from_str::<Vec<crate::models::JiraEpic>>(&json)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            Ok((key, count, updated_at))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_jira_status_mappings(&self) -> rusqlite::Result<Vec<(String, i32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT jira_status, mantis_status FROM mantis_jira_status_mapping_table ORDER BY mantis_status ASC, jira_status ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let j: String = row.get(0)?;
+            let m: i32 = row.get(1)?;
+            Ok((j, m))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn save_jira_status_mappings(&self, mappings: &[(String, i32)]) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM mantis_jira_status_mapping_table", [])?;
+        let mut seen = std::collections::HashSet::new();
+        for (j_status, m_status) in mappings {
+            let trimmed = j_status.trim();
+            if !trimmed.is_empty() {
+                let lower = trimmed.to_lowercase();
+                if seen.insert(lower) {
+                    tx.execute(
+                        "INSERT INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                        params![trimmed, m_status],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn resolve_jira_status_to_mantis(&self, jira_status: &str) -> i32 {
+        Self::resolve_jira_status_internal(&self.conn(), jira_status)
     }
 }
 

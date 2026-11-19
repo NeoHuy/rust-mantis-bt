@@ -258,3 +258,14 @@ fn test_custom_field_type_conversion_and_strings() {
     assert_eq!(CustomFieldType::Radio.as_str(), "radio");
     assert_eq!(CustomFieldType::Textarea.as_str(), "textarea");
 }
+
+#[test]
+fn test_jira_status_mapping_serialization() {
+    let mapping = JiraStatusMapping {
+        jira_status: "In Progress".to_string(),
+        mantis_status: 50,
+    };
+    let json = serde_json::to_string(&mapping).unwrap();
+    let deserialized: JiraStatusMapping = serde_json::from_str(&json).unwrap();
+    assert_eq!(mapping, deserialized);
+}

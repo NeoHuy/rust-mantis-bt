@@ -219,6 +219,18 @@ impl BugStatus {
             Self::Closed => "Closed",
         }
     }
+
+    pub fn display_name_or(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    pub fn display_with_code(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| format!("{} ({})", s.display_name(), v))
+            .unwrap_or_else(|| v.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +277,18 @@ impl BugPriority {
             Self::Urgent => "Urgent",
             Self::Immediate => "Immediate",
         }
+    }
+
+    pub fn display_name_or(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    pub fn display_with_code(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| format!("{} ({})", s.display_name(), v))
+            .unwrap_or_else(|| v.to_string())
     }
 }
 
@@ -320,6 +344,18 @@ impl BugSeverity {
             Self::Crash => "Crash",
             Self::Block => "Block",
         }
+    }
+
+    pub fn display_name_or(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    pub fn display_with_code(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| format!("{} ({})", s.display_name(), v))
+            .unwrap_or_else(|| v.to_string())
     }
 }
 
@@ -415,6 +451,18 @@ impl BugResolution {
             Self::Suspended => "Suspended",
             Self::WontFix => "Won't Fix",
         }
+    }
+
+    pub fn display_name_or(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| s.display_name().to_string())
+            .unwrap_or_else(|| v.to_string())
+    }
+
+    pub fn display_with_code(v: i32) -> String {
+        Self::from_i32(v)
+            .map(|s| format!("{} ({})", s.display_name(), v))
+            .unwrap_or_else(|| v.to_string())
     }
 }
 
@@ -831,5 +879,21 @@ mod tests {
         assert_eq!(BugSeverity::Feature.display_name(), "Feature");
         assert_eq!(BugSeverity::Minor.display_name(), "Minor");
         assert_eq!(BugSeverity::Major.display_name(), "Major");
+
+        // Fallbacks and code formatting
+        assert_eq!(BugStatus::display_name_or(80), "Resolved");
+        assert_eq!(BugStatus::display_name_or(999), "999");
+        assert_eq!(BugStatus::display_with_code(80), "Resolved (80)");
+        assert_eq!(BugStatus::display_with_code(999), "999");
+
+        assert_eq!(BugResolution::display_name_or(20), "Fixed");
+        assert_eq!(BugResolution::display_name_or(999), "999");
+        assert_eq!(BugResolution::display_with_code(20), "Fixed (20)");
+
+        assert_eq!(BugPriority::display_name_or(30), "Normal");
+        assert_eq!(BugPriority::display_name_or(999), "999");
+
+        assert_eq!(BugSeverity::display_name_or(50), "Minor");
+        assert_eq!(BugSeverity::display_name_or(999), "999");
     }
 }

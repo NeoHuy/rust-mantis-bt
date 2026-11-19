@@ -92,10 +92,10 @@ pub async fn mcp_sse_handler(
         }
     };
 
-    // Lazily cleanup stale sessions older than 30 minutes
+    // Lazily cleanup stale sessions: removes closed SSE connections and idle streams older than 24 hours
     let _ = state
         .session_manager
-        .cleanup_stale(std::time::Duration::from_secs(1800))
+        .cleanup_stale(std::time::Duration::from_secs(86400))
         .await;
 
     let (session_id, rx) = state.session_manager.create_session(token_id, user).await;

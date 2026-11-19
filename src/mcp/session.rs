@@ -130,7 +130,7 @@ impl SessionManager {
         map.remove(session_id).map(|s| s.user)
     }
 
-    pub async fn cleanup_stale(&self, _timeout: Duration) -> usize {
+    pub async fn cleanup_stale(&self, max_idle: Duration) -> usize {
         let mut map = self.sessions.write().await;
         let now = Instant::now();
         let initial_count = map.len();
@@ -138,8 +138,8 @@ impl SessionManager {
             if session.sender.is_closed() {
                 false
             } else {
-                // If stream is still open, keep it alive up to 24 hours of total idle time
-                now.duration_since(session.last_active) < Duration::from_secs(86400)
+                // If stream is still open, keep it alive up to max_idle
+                now.duration_since(session.last_active) < max_idle
             }
         });
         initial_count - map.len()

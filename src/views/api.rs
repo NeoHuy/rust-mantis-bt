@@ -7,6 +7,7 @@ use axum::response::Html;
 pub fn render_api_tokens_page(
     ctx: &AuthContext,
     tokens: &[ApiToken],
+    all_tokens: &[(ApiToken, String, String)],
     raw_token: Option<&str>,
     msg: Option<&str>,
     err: Option<&str>,
@@ -56,6 +57,71 @@ pub fn render_api_tokens_page(
         rows_html.push_str(r#"<tr><td colspan="5">No API tokens created yet.</td></tr>"#);
     }
 
+    let admin_table = if ctx.user.access_level >= 90 && !all_tokens.is_empty() {
+        let mut admin_rows = String::new();
+        for (t, username, realname) in all_tokens {
+            let used_str = if t.date_used > 0 {
+                format!("Used ({})", format_timestamp(t.date_used))
+            } else {
+                "Never used".to_string()
+            };
+            let display_user = if realname.is_empty() {
+                html_escape(username)
+            } else {
+                format!("{} ({})", html_escape(realname), html_escape(username))
+            };
+            admin_rows.push_str(&format!(
+                r#"<tr>
+                    <td>{}</td>
+                    <td><strong>{}</strong></td>
+                    <td><strong>{}</strong></td>
+                    <td>{}</td>
+                    <td>{}</td>
+                    <td>
+                        <form method="POST" action="/api_token_revoke/{}" style="display:inline;">
+                            <button type="submit" class="btn btn-danger btn-sm">Revoke</button>
+                        </form>
+                    </td>
+                </tr>"#,
+                t.id,
+                display_user,
+                html_escape(&t.name),
+                format_timestamp(t.date_created),
+                used_str,
+                t.id
+            ));
+        }
+        if admin_rows.is_empty() {
+            admin_rows.push_str(r#"<tr><td colspan="6">No tokens found in the system.</td></tr>"#);
+        }
+        format!(
+            r#"<div class="panel" style="margin-top:20px;">
+                <div class="panel-header">System-Wide API Tokens (Administrator View) ({})</div>
+                <div class="panel-body">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Owner User</th>
+                                <th>Token Name</th>
+                                <th>Created</th>
+                                <th>Last Used</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
+            </div>"#,
+            all_tokens.len(),
+            admin_rows
+        )
+    } else {
+        String::new()
+    };
+
     let content = format!(
         r#"{}
         {}
@@ -86,11 +152,13 @@ pub fn render_api_tokens_page(
                     </tbody>
                 </table>
             </div>
-        </div>"#,
+        </div>
+        {}"#,
         err_banner,
         token_banner,
         tokens.len(),
-        rows_html
+        rows_html,
+        admin_table
     );
 
     render_layout("API Tokens", ctx, msg, &content)

@@ -397,7 +397,7 @@ pub fn render_jira_section(
                 <div class="panel-header">Jira Integration</div>
                 <div class="panel-body">
                     <p style="margin-bottom:12px; color:#666;">No Jira ticket linked to this issue.</p>
-                    <form method="POST" action="/view_bug_page/{}/jira_sync">
+                    <form method="POST" action="/view_bug_page/{}/jira_sync" onsubmit="this.querySelector('button[type=submit]').disabled=true;">
                         <table class="form-table">
                             <tr>
                                 <td class="label-col">Jira Ticket Number</td>
@@ -428,7 +428,7 @@ pub fn render_jira_section(
                                 </td>
                             </tr>
                         </table>
-                        <button type="submit" class="btn btn-sm" onclick="this.disabled=true; this.form.submit();">Sync</button>
+                        <button type="submit" class="btn btn-sm">Sync</button>
                     </form>
                 </div>
             </div>"#,

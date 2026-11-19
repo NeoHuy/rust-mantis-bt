@@ -415,10 +415,31 @@ pub async fn sync_bug_with_jira(
             .into_response();
         }
 
+        // Claim pending reservation to prevent concurrent creation or linking
+        match db.claim_jira_link_pending(bug_id, ctx.user.id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err=A+Jira+operation+is+already+in+progress+for+this+issue",
+                    bug_id
+                ))
+                .into_response();
+            }
+            Err(e) => {
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err=Database+error:+{}",
+                    bug_id,
+                    url_encode(&sanitize_error_message(&e.to_string()))
+                ))
+                .into_response();
+            }
+        }
+
         // Link with existing ticket
         let details = match client.get_issue(&config, &normalized_key).await {
             Ok(d) => d,
             Err(e) => {
+                let _ = db.release_jira_link_pending(bug_id);
                 return Redirect::to(&format!(
                     "/view_bug_page/{}?err=Jira+link+failed:+{}",
                     bug_id,
@@ -441,6 +462,7 @@ pub async fn sync_bug_with_jira(
             &ctx.user.username,
             true,
         ) {
+            let _ = db.release_jira_link_pending(bug_id);
             return Redirect::to(&format!(
                 "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
                 bug_id,
@@ -459,15 +481,23 @@ pub async fn sync_bug_with_jira(
 
     // Create new ticket in Jira
     // Claim pending reservation to prevent concurrent creation (double-click)
-    if !db
-        .claim_jira_link_pending(bug_id, ctx.user.id)
-        .unwrap_or(false)
-    {
-        return Redirect::to(&format!(
-            "/view_bug_page/{}?err=A+Jira+operation+is+already+in+progress+for+this+issue",
-            bug_id
-        ))
-        .into_response();
+    match db.claim_jira_link_pending(bug_id, ctx.user.id) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=A+Jira+operation+is+already+in+progress+for+this+issue",
+                bug_id
+            ))
+            .into_response();
+        }
+        Err(e) => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Database+error:+{}",
+                bug_id,
+                url_encode(&sanitize_error_message(&e.to_string()))
+            ))
+            .into_response();
+        }
     }
 
     let issue_type = form_data

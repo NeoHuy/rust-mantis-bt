@@ -323,7 +323,8 @@ impl Db {
             CREATE TABLE IF NOT EXISTS mantis_jira_epics_cache_table (
                 project_key TEXT PRIMARY KEY,
                 epics_json TEXT NOT NULL,
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table (
@@ -331,6 +332,29 @@ impl Db {
                 mantis_status INTEGER NOT NULL
             );",
         )?;
+
+        // Idempotent migration for mantis_jira_epics_cache_table: ensure expires_at column exists
+        let has_expires_at = {
+            let mut stmt = conn.prepare("PRAGMA table_info(mantis_jira_epics_cache_table)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for name in rows.flatten() {
+                if name == "expires_at" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_expires_at {
+            conn.execute(
+                "ALTER TABLE mantis_jira_epics_cache_table ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
 
         // Idempotent migration for mantis_jira_links_table: ensure unique index on bug_id exists
         let has_unique_bug_id_idx: bool = {
@@ -354,15 +378,17 @@ impl Db {
         };
 
         if !has_unique_bug_id_idx {
-            let _ = conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "DELETE FROM mantis_jira_links_table WHERE id NOT IN (SELECT MAX(id) FROM mantis_jira_links_table GROUP BY bug_id)",
                 [],
-            );
-            let _ = conn.execute("DROP INDEX IF EXISTS idx_jira_links_bug_id", []);
-            conn.execute(
+            )?;
+            tx.execute("DROP INDEX IF EXISTS idx_jira_links_bug_id", [])?;
+            tx.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_jira_links_bug_id_unique ON mantis_jira_links_table(bug_id)",
                 [],
             )?;
+            tx.commit()?;
         }
 
         // Idempotent migration for mantis_jira_status_mapping_table: ensure COLLATE NOCASE
@@ -4503,8 +4529,8 @@ impl Db {
                  jira_url = excluded.jira_url,
                  issue_type = excluded.issue_type,
                  jira_status = excluded.jira_status,
-                 created_by = excluded.created_by,
-                 created_at = excluded.created_at",
+                 created_by = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_by ELSE mantis_jira_links_table.created_by END,
+                 created_at = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_at ELSE mantis_jira_links_table.created_at END",
             params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
         )
         .map_err(|e| e.to_string())?;
@@ -4707,7 +4733,7 @@ impl Db {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        self.save_jira_epics_cache_with_timestamp(project_key, epics, now)
+        self.save_jira_epics_cache_with_ttl(project_key, epics, now, now + 86400)
     }
 
     pub fn save_jira_epics_cache_with_timestamp(
@@ -4716,13 +4742,23 @@ impl Db {
         epics: &[crate::models::JiraEpic],
         updated_at: i64,
     ) -> rusqlite::Result<()> {
+        self.save_jira_epics_cache_with_ttl(project_key, epics, updated_at, updated_at + 86400)
+    }
+
+    pub fn save_jira_epics_cache_with_ttl(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+        updated_at: i64,
+        expires_at: i64,
+    ) -> rusqlite::Result<()> {
         let epics_json = serde_json::to_string(epics).unwrap_or_else(|_| "[]".to_string());
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO mantis_jira_epics_cache_table (project_key, epics_json, updated_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(project_key) DO UPDATE SET epics_json = excluded.epics_json, updated_at = excluded.updated_at",
-            params![project_key, epics_json, updated_at],
+            "INSERT INTO mantis_jira_epics_cache_table (project_key, epics_json, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_key) DO UPDATE SET epics_json = excluded.epics_json, updated_at = excluded.updated_at, expires_at = excluded.expires_at",
+            params![project_key, epics_json, updated_at, expires_at],
         )?;
         Ok(())
     }
@@ -4737,17 +4773,22 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
         let conn = self.conn();
-        let res: Option<(String, i64)> = conn
+        let res: Option<(String, i64, i64)> = conn
             .query_row(
-                "SELECT epics_json, updated_at FROM mantis_jira_epics_cache_table WHERE project_key = ?1",
+                "SELECT epics_json, updated_at, expires_at FROM mantis_jira_epics_cache_table WHERE project_key = ?1",
                 params![project_key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
 
         match res {
-            Some((json, updated_at)) => {
-                if now.saturating_sub(updated_at) <= max_age_secs {
+            Some((json, updated_at, expires_at)) => {
+                let is_fresh = if expires_at > 0 {
+                    now < expires_at
+                } else {
+                    now.saturating_sub(updated_at) <= max_age_secs
+                };
+                if is_fresh || max_age_secs == i64::MAX {
                     let epics: Vec<crate::models::JiraEpic> =
                         serde_json::from_str(&json).unwrap_or_default();
                     Ok(Some(epics))

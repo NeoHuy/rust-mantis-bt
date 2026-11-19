@@ -1325,6 +1325,27 @@ fn test_jira_epics_cache() {
     db.save_jira_epics_cache("JBC", &[]).unwrap();
     let updated = db.get_cached_jira_epics("JBC", 86400).unwrap().unwrap();
     assert_eq!(updated.len(), 0);
+
+    // Test TTL expiry
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    db.save_jira_epics_cache_with_ttl("JBC", &epics, now, now - 10)
+        .unwrap();
+    // Normal query should consider it expired
+    assert!(db.get_cached_jira_epics("JBC", 86400).unwrap().is_none());
+    // Fallback query (i64::MAX) should still retrieve it
+    assert_eq!(
+        db.get_cached_jira_epics("JBC", i64::MAX)
+            .unwrap()
+            .unwrap()
+            .len(),
+        2
+    );
+    // Summary still shows updated_at as now, not 24h ago
+    let summary2 = db.list_cached_jira_epics_summary().unwrap();
+    assert_eq!(summary2[0].2, now);
 }
 
 #[test]
@@ -1518,6 +1539,35 @@ fn test_jira_claim_pending_concurrency() {
 
     let link = db.get_jira_link_by_bug_id(bug_id).unwrap().unwrap();
     assert_eq!(link.jira_key, "PROJ-42");
+    assert_eq!(link.created_by, admin.id);
+    let orig_created_at = link.created_at;
+
+    // Resyncing by user 2 should update status and ticket info, but preserve created_by and created_at
+    let user2_id = db
+        .create_user(
+            "user2",
+            "User Two",
+            "u2@example.com",
+            "pass2",
+            70,
+            false,
+            false,
+        )
+        .unwrap();
+    db.record_jira_sync_success(
+        bug_id,
+        "PROJ-42",
+        "https://jira/PROJ-42",
+        "Bug",
+        "In Progress",
+        user2_id,
+        "user2",
+        false,
+    )
+    .unwrap();
+    let re_synced_link = db.get_jira_link_by_bug_id(bug_id).unwrap().unwrap();
+    assert_eq!(re_synced_link.created_by, admin.id);
+    assert_eq!(re_synced_link.created_at, orig_created_at);
 
     // Once fully linked, claiming pending returns false
     assert!(!db.claim_jira_link_pending(bug_id, admin.id).unwrap());

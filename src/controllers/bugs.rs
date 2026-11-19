@@ -693,9 +693,9 @@ pub async fn view_bug_page(
         }
 
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:4px; align-items:center;">
-                <select name="new_status" style="width:auto;">{}</select>
-                <select name="resolution" style="width:auto;">{}</select>
+            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
+                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
                 <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
                 <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
             </form>"#,
@@ -768,15 +768,13 @@ pub async fn view_bug_page(
                         .ok()
                         .flatten()
                         .unwrap_or_default();
-                    // Cache the fallback with a short 5-minute TTL (now - 86400 + 300)
+                    // Cache the fallback with a short 5-minute TTL
                     // so transient errors don't lock out epics for a full 24 hours.
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs() as i64;
-                    let short_updated_at = now - 86400 + 300;
-                    let _ =
-                        db.save_jira_epics_cache_with_timestamp(pkey, &fallback, short_updated_at);
+                    let _ = db.save_jira_epics_cache_with_ttl(pkey, &fallback, now, now + 300);
                     fallback
                 }
             }

@@ -458,6 +458,18 @@ pub async fn sync_bug_with_jira(
     }
 
     // Create new ticket in Jira
+    // Claim pending reservation to prevent concurrent creation (double-click)
+    if !db
+        .claim_jira_link_pending(bug_id, ctx.user.id)
+        .unwrap_or(false)
+    {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err=A+Jira+operation+is+already+in+progress+for+this+issue",
+            bug_id
+        ))
+        .into_response();
+    }
+
     let issue_type = form_data
         .issue_type
         .as_deref()
@@ -482,6 +494,7 @@ pub async fn sync_bug_with_jira(
     {
         Ok(resp) => resp,
         Err(e) => {
+            let _ = db.release_jira_link_pending(bug_id);
             return Redirect::to(&format!(
                 "/view_bug_page/{}?err=Jira+creation+failed:+{}",
                 bug_id,
@@ -506,6 +519,7 @@ pub async fn sync_bug_with_jira(
         &ctx.user.username,
         true,
     ) {
+        let _ = db.release_jira_link_pending(bug_id);
         return Redirect::to(&format!(
             "/view_bug_page/{}?err=Failed+to+save+Jira+link:+{}",
             bug_id,

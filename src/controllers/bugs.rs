@@ -768,8 +768,15 @@ pub async fn view_bug_page(
                         .ok()
                         .flatten()
                         .unwrap_or_default();
-                    // Cache the fallback (or empty list) so subsequent page loads don't hang on network timeouts
-                    let _ = db.save_jira_epics_cache(pkey, &fallback);
+                    // Cache the fallback with a short 5-minute TTL (now - 86400 + 300)
+                    // so transient errors don't lock out epics for a full 24 hours.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let short_updated_at = now - 86400 + 300;
+                    let _ =
+                        db.save_jira_epics_cache_with_timestamp(pkey, &fallback, short_updated_at);
                     fallback
                 }
             }

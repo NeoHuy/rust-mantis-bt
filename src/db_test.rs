@@ -1443,4 +1443,147 @@ fn test_jira_sync_preserves_resolved_bugs_and_avoids_duplicate_notes() {
     )
     .unwrap();
     assert_eq!(db.get_bug(bug_id).unwrap().unwrap().status, 80);
+
+    // Closed bug (90) should NOT move backwards to resolved (80) when syncing with "Done"
+    db.change_bug_status(bug_id, admin.id, 90, 20, None)
+        .unwrap();
+    assert_eq!(db.get_bug(bug_id).unwrap().unwrap().status, 90);
+
+    db.record_jira_sync_success(
+        bug_id,
+        "PROJ-100",
+        "https://jira.example.com/browse/PROJ-100",
+        "Bug",
+        "Done",
+        admin.id,
+        "administrator",
+        false,
+    )
+    .unwrap();
+    assert_eq!(db.get_bug(bug_id).unwrap().unwrap().status, 90);
+}
+
+#[test]
+fn test_jira_claim_pending_concurrency() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_id(1).unwrap().unwrap();
+    let proj_id = db
+        .create_project("Claim Project", 10, 10, "desc", false)
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            1,
+            "Claim Bug",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // First claim succeeds
+    assert!(db.claim_jira_link_pending(bug_id, admin.id).unwrap());
+
+    // Concurrent second claim for same bug fails immediately
+    assert!(!db.claim_jira_link_pending(bug_id, admin.id).unwrap());
+
+    // Pending link is hidden from standard get_jira_link_by_bug_id
+    assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
+
+    // Release pending link allows new claim
+    db.release_jira_link_pending(bug_id).unwrap();
+    assert!(db.claim_jira_link_pending(bug_id, admin.id).unwrap());
+
+    // Success sync overrides pending link
+    db.record_jira_sync_success(
+        bug_id,
+        "PROJ-42",
+        "https://jira/PROJ-42",
+        "Bug",
+        "Open",
+        admin.id,
+        "administrator",
+        true,
+    )
+    .unwrap();
+
+    let link = db.get_jira_link_by_bug_id(bug_id).unwrap().unwrap();
+    assert_eq!(link.jira_key, "PROJ-42");
+
+    // Once fully linked, claiming pending returns false
+    assert!(!db.claim_jira_link_pending(bug_id, admin.id).unwrap());
+}
+
+#[test]
+fn test_jira_db_schema_migration_from_old_schema() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    // Simulate old schema on develop before migration:
+    // 1. mantis_jira_links_table without UNIQUE on bug_id, and with non-unique idx_jira_links_bug_id
+    // 2. mantis_jira_status_mapping_table without COLLATE NOCASE
+    conn.execute_batch(
+        "CREATE TABLE mantis_user_table (id INTEGER PRIMARY KEY, username TEXT, access_level INTEGER);
+         INSERT INTO mantis_user_table VALUES (1, 'administrator', 90);
+         CREATE TABLE mantis_project_table (id INTEGER PRIMARY KEY, name TEXT);
+         CREATE TABLE mantis_bug_table (id INTEGER PRIMARY KEY, project_id INT, reporter_id INT, status INT, last_updated INT);
+         INSERT INTO mantis_bug_table VALUES (1, 1, 1, 50, 0);
+         CREATE TABLE mantis_bugnote_table (id INTEGER PRIMARY KEY, bug_id INT, reporter_id INT, bugnote_text_id INT, view_state INT, date_submitted INT, last_modified INT, note_type INT, note_attr TEXT, time_tracking INT);
+         CREATE TABLE mantis_bugnote_text_table (id INTEGER PRIMARY KEY, note TEXT);
+         CREATE TABLE mantis_bug_history_table (id INTEGER PRIMARY KEY, user_id INT, bug_id INT, date_modified INT, field_name TEXT, old_value TEXT, new_value TEXT, type INT);
+         CREATE TABLE mantis_jira_links_table (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             bug_id INTEGER NOT NULL,
+             jira_key TEXT NOT NULL,
+             jira_url TEXT NOT NULL,
+             issue_type TEXT NOT NULL DEFAULT 'Bug',
+             created_by INTEGER NOT NULL,
+             created_at INTEGER NOT NULL
+         );
+         CREATE INDEX idx_jira_links_bug_id ON mantis_jira_links_table(bug_id);
+         INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
+         VALUES (1, 'OLD-1', 'http://jira/OLD-1', 'Bug', 1, 100);
+         INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
+         VALUES (1, 'OLD-2', 'http://jira/OLD-2', 'Bug', 1, 200);
+
+         CREATE TABLE mantis_jira_status_mapping_table (
+             jira_status TEXT PRIMARY KEY,
+             mantis_status INTEGER NOT NULL
+         );
+         INSERT INTO mantis_jira_status_mapping_table VALUES ('Done', 80);"
+    ).unwrap();
+
+    let db = Db(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+    db.migrate().unwrap();
+
+    // Verify duplicates were purged and newest link remains
+    let link = db.get_jira_link_by_bug_id(1).unwrap().unwrap();
+    assert_eq!(link.jira_key, "OLD-2");
+
+    // Verify record_jira_sync_success UPSERT works without ON CONFLICT error
+    db.record_jira_sync_success(
+        1,
+        "NEW-1",
+        "http://jira/NEW-1",
+        "Bug",
+        "Done",
+        1,
+        "administrator",
+        false,
+    )
+    .unwrap();
+
+    let updated_link = db.get_jira_link_by_bug_id(1).unwrap().unwrap();
+    assert_eq!(updated_link.jira_key, "NEW-1");
+    assert_eq!(updated_link.jira_status, "Done");
+
+    // Verify COLLATE NOCASE works on migrated table
+    assert_eq!(db.resolve_jira_status_to_mantis("done"), 80);
 }

@@ -328,7 +328,7 @@ pub fn render_jira_section(
 
         let sync_btn = if eff >= 55 {
             format!(
-                r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;">
+                r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;" onsubmit="this.querySelector('button[type=submit]').disabled=true;">
                     <button type="submit" class="btn btn-sm">Sync with Jira</button>
                 </form>"#,
                 bug_id
@@ -428,7 +428,7 @@ pub fn render_jira_section(
                                 </td>
                             </tr>
                         </table>
-                        <button type="submit" class="btn btn-sm">Sync</button>
+                        <button type="submit" class="btn btn-sm" onclick="this.disabled=true; this.form.submit();">Sync</button>
                     </form>
                 </div>
             </div>"#,

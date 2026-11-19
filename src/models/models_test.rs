@@ -279,45 +279,12 @@ fn test_bug_enums_display_name() {
     assert_eq!(BugStatus::Assigned.display_name(), "Assigned");
     assert_eq!(BugStatus::Resolved.display_name(), "Resolved");
     assert_eq!(BugStatus::Closed.display_name(), "Closed");
-
-    assert_eq!(BugResolution::Open.display_name(), "Open");
-    assert_eq!(BugResolution::Fixed.display_name(), "Fixed");
-    assert_eq!(BugResolution::Reopened.display_name(), "Reopened");
-    assert_eq!(
-        BugResolution::UnableToReproduce.display_name(),
-        "Unable to Reproduce"
-    );
-    assert_eq!(BugResolution::NotFixable.display_name(), "Not Fixable");
-    assert_eq!(BugResolution::Duplicate.display_name(), "Duplicate");
-    assert_eq!(BugResolution::NotABug.display_name(), "Not a Bug");
-    assert_eq!(BugResolution::Suspended.display_name(), "Suspended");
-    assert_eq!(BugResolution::WontFix.display_name(), "Won't Fix");
-
-    assert_eq!(BugPriority::Low.display_name(), "Low");
-    assert_eq!(BugPriority::Normal.display_name(), "Normal");
-    assert_eq!(BugPriority::High.display_name(), "High");
-
-    assert_eq!(BugSeverity::Feature.display_name(), "Feature");
-    assert_eq!(BugSeverity::Minor.display_name(), "Minor");
-    assert_eq!(BugSeverity::Major.display_name(), "Major");
-
-    // Fallbacks and code formatting
     assert_eq!(BugStatus::display_name_or(80), "Resolved");
     assert_eq!(BugStatus::display_name_or(999), "999");
-    assert_eq!(BugStatus::display_with_code(80), "Resolved (80)");
-    assert_eq!(BugStatus::display_with_code(999), "999");
 
-    assert_eq!(BugResolution::display_name_or(20), "Fixed");
-    assert_eq!(BugResolution::display_name_or(999), "999");
-    assert_eq!(BugResolution::display_with_code(20), "Fixed (20)");
-
-    assert_eq!(BugPriority::display_name_or(30), "Normal");
-    assert_eq!(BugPriority::display_name_or(999), "999");
-
-    assert_eq!(BugSeverity::display_name_or(50), "Minor");
-    assert_eq!(BugSeverity::display_name_or(999), "999");
-
-    assert_eq!(BugReproducibility::Always.display_name(), "Always");
-    assert_eq!(BugReproducibility::display_name_or(10), "Always");
-    assert_eq!(BugReproducibility::display_name_or(999), "999");
+    assert_eq!(BugResolution::Open.as_str(), "open");
+    assert_eq!(BugResolution::Fixed.as_str(), "fixed");
+    assert_eq!(BugPriority::Normal.as_str(), "normal");
+    assert_eq!(BugSeverity::Minor.as_str(), "minor");
+    assert_eq!(BugReproducibility::Always.as_str(), "always");
 }

@@ -1894,3 +1894,134 @@ fn test_email_templates_detailed() {
     let emails = db.list_queued_emails().unwrap();
     assert_eq!(emails[0].subject, "HeaderInjection: Bad");
 }
+
+#[test]
+fn test_email_review_comments_improvements() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let dev1_id = db
+        .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
+        .unwrap();
+    let dev2_id = db
+        .create_user("dev2", "Dev Two", "dev2@example.com", "pw", 55, true, false)
+        .unwrap();
+    let reporter_id = db
+        .create_user(
+            "reporter1",
+            "Reporter One",
+            "rep1@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let proj_id = db
+        .create_project("Project Alpha", 10, 10, "Alpha proj", true)
+        .unwrap();
+
+    // 1. Previous handler notification on reassignment
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            reporter_id,
+            1,
+            "Reassignment Bug",
+            "Initial desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10, // public bug
+        )
+        .unwrap();
+    // Assign to dev1
+    db.assign_bug(bug_id, admin.id, dev1_id).unwrap();
+    db.flush_email_queue().unwrap();
+
+    // Now reassign to dev2
+    db.assign_bug(bug_id, admin.id, dev2_id).unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    // Previous handler (dev1@example.com), new handler (dev2@example.com), and reporter (rep1@example.com) should receive email!
+    assert!(recipients.contains(&"dev1@example.com"));
+    assert!(recipients.contains(&"dev2@example.com"));
+    assert!(recipients.contains(&"rep1@example.com"));
+    db.flush_email_queue().unwrap();
+
+    // 2. Private bug (view_state = 50) check: low access user (access 25) does NOT receive emails unless reporter or handler
+    let priv_bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            1,
+            "Top Secret Bug",
+            "Confidential",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50, // private bug
+        )
+        .unwrap();
+    // Monitor by reporter1 (access 25)
+    db.add_bug_monitor(priv_bug_id, reporter_id).unwrap();
+    // Monitor by dev1 (access 55)
+    db.add_bug_monitor(priv_bug_id, dev1_id).unwrap();
+    db.flush_email_queue().unwrap();
+
+    // Status change on private bug
+    db.change_bug_status(priv_bug_id, admin.id, 50, 10, None)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    // dev1 (access 55) and admin receive; reporter1 (access 25) must NOT receive because bug is private!
+    assert!(recipients.contains(&"dev1@example.com"));
+    assert!(!recipients.contains(&"rep1@example.com"));
+    db.flush_email_queue().unwrap();
+
+    // 3. Neutral subject if status unchanged
+    // A: Status same (50 -> 50), resolution changed (10 -> 20 fixed)
+    db.change_bug_status(bug_id, admin.id, 50, 20, None)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert!(emails[0]
+        .subject
+        .contains("Resolution changed to fixed: Reassignment Bug"));
+    db.flush_email_queue().unwrap();
+
+    // B: Status same (50 -> 50) and resolution same (20 -> 20)
+    db.change_bug_status(bug_id, admin.id, 50, 20, None)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert!(emails[0].subject.contains("Updated: Reassignment Bug"));
+    db.flush_email_queue().unwrap();
+
+    // 4. Private note exclusion from history in subsequent email
+    let note_id = db
+        .add_bugnote(bug_id, dev2_id, "Super secret dev note", 50)
+        .unwrap(); // view_state = 50
+    db.flush_email_queue().unwrap();
+
+    // Trigger another update (e.g. status change)
+    db.change_bug_status(bug_id, dev2_id, 80, 20, None).unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let email_body = &emails[0].body;
+    // Issue history in this email must NOT leak the private note
+    let history_note_ref = format!("{:07}", note_id);
+    assert!(
+        !email_body.contains(&history_note_ref),
+        "Email history must not reference private note ID"
+    );
+    assert!(!email_body.contains("Super secret dev note"));
+}

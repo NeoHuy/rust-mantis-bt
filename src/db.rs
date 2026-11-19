@@ -2118,11 +2118,10 @@ impl Db {
 
         let project_name = Self::helper_project_name(&conn, project_id);
         let action_header = "The following issue has been SUBMITTED.";
-        let body = Self::build_mantis_email_body(&conn, bug_id, action_header, None)
-            .map_err(|e| e.to_string())?;
-
-        let subject = format!("[{} {:07}] New: {}", project_name, bug_id, trimmed_summary);
-        self.notify_bug_event(&conn, bug_id, reporter_id, &subject, &body);
+        if let Ok(body) = Self::build_mantis_email_body(&conn, bug_id, action_header, None) {
+            let subject = format!("[{} {:07}] New: {}", project_name, bug_id, trimmed_summary);
+            self.notify_bug_event(&conn, bug_id, reporter_id, &subject, &body);
+        }
 
         Ok(bug_id)
     }
@@ -2518,11 +2517,34 @@ impl Db {
             .map(|u| u.username.as_str())
             .unwrap_or("(Unknown)");
 
-        let new_status_name = BugStatus::display_name_or(new_status);
-        let action_header = match new_status {
-            80 => "The following issue has been RESOLVED.",
-            90 => "The following issue has been CLOSED.",
-            _ => "The following issue has been UPDATED.",
+        let (action_header, subject) = if bug.status != new_status {
+            let new_status_name = BugStatus::display_name_or(new_status);
+            let action_header = match new_status {
+                80 => "The following issue has been RESOLVED.",
+                90 => "The following issue has been CLOSED.",
+                _ => "The following issue has been UPDATED.",
+            };
+            let subject = format!(
+                "[{} {:07}] Status changed to {}: {}",
+                project_name, bug_id, new_status_name, bug.summary
+            );
+            (action_header, subject)
+        } else if bug.resolution != resolution {
+            let res_name = BugResolution::from_i32(resolution)
+                .map(|r| r.as_str())
+                .unwrap_or("updated");
+            (
+                "The following issue has been UPDATED.",
+                format!(
+                    "[{} {:07}] Resolution changed to {}: {}",
+                    project_name, bug_id, res_name, bug.summary
+                ),
+            )
+        } else {
+            (
+                "The following issue has been UPDATED.",
+                format!("[{} {:07}] Updated: {}", project_name, bug_id, bug.summary),
+            )
         };
 
         let note_ctx = if let (Some(nid), Some(nt)) = (note_id_opt, note) {
@@ -2536,15 +2558,9 @@ impl Db {
             None
         };
 
-        let body = Self::build_mantis_email_body(&conn, bug_id, action_header, note_ctx)
-            .map_err(|e| e.to_string())?;
-
-        let subject = format!(
-            "[{} {:07}] Status changed to {}: {}",
-            project_name, bug_id, new_status_name, bug.summary
-        );
-
-        self.notify_bug_event(&conn, bug_id, user_id, &subject, &body);
+        if let Ok(body) = Self::build_mantis_email_body(&conn, bug_id, action_header, note_ctx) {
+            self.notify_bug_event(&conn, bug_id, user_id, &subject, &body);
+        }
 
         Ok(())
     }
@@ -2629,10 +2645,23 @@ impl Db {
             )
         };
 
-        let body = Self::build_mantis_email_body(&conn, bug_id, action_header, None)
-            .map_err(|e| e.to_string())?;
+        let prev_handler_id = bug.handler_id;
+        let extra_recipients = if prev_handler_id > 0 && prev_handler_id != handler_id {
+            vec![prev_handler_id]
+        } else {
+            vec![]
+        };
 
-        self.notify_bug_event(&conn, bug_id, user_id, &subject, &body);
+        if let Ok(body) = Self::build_mantis_email_body(&conn, bug_id, action_header, None) {
+            self.notify_bug_event_with_extra(
+                &conn,
+                bug_id,
+                user_id,
+                &extra_recipients,
+                &subject,
+                &body,
+            );
+        }
 
         Ok(())
     }
@@ -2719,8 +2748,8 @@ impl Db {
             db.notify_bug_event_filtered(
                 conn,
                 bug_id,
-                reporter_id,
                 min_access,
+                &[],
                 &format!(
                     "[{} {:07}] Note added by {}: {}",
                     project_name, bug_id, actor_name, bug_summary
@@ -4107,89 +4136,90 @@ impl Db {
         .unwrap_or_else(|_| "General".to_string())
     }
 
-    pub fn format_timestamp_display(ts: i64) -> String {
-        if ts <= 0 {
-            return "-".to_string();
-        }
-        let days = ts.div_euclid(86_400);
-        let secs_of_day = ts.rem_euclid(86_400);
-        let hour = secs_of_day / 3600;
-        let minute = (secs_of_day % 3600) / 60;
-
-        let z = days + 719_468;
-        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-        let doe = (z - era * 146_097) as u32;
-        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-        let y = yoe as i64 + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let m = if mp < 10 { mp + 3 } else { mp - 9 };
-        let y = if m <= 2 { y + 1 } else { y };
-
-        format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hour, minute)
+    fn format_transition<F>(old: &str, new: &str, label: F) -> String
+    where
+        F: Fn(i32) -> &'static str,
+    {
+        let old_name = old.parse::<i32>().ok().map(&label).unwrap_or(old);
+        let new_name = new.parse::<i32>().ok().map(&label).unwrap_or(new);
+        format!("{} => {}", old_name, new_name)
     }
 
-    fn format_history_field_change(conn: &Connection, h: &BugHistory) -> (String, String) {
+    fn format_history_field_change(
+        conn: &Connection,
+        h: &BugHistory,
+        user_cache: &mut HashMap<i64, String>,
+        cat_cache: &HashMap<i64, String>,
+    ) -> (String, String) {
         if h.type_ == 1 && (h.field_name.is_empty() || h.field_name == "new_bug") {
             return ("New Issue".to_string(), String::new());
         }
 
         match h.field_name.as_str() {
-            "status" => {
-                let old_name = h
-                    .old_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugStatus::from_i32)
-                    .map(|s| s.as_str())
-                    .unwrap_or(&h.old_value);
-                let new_name = h
-                    .new_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugStatus::from_i32)
-                    .map(|s| s.as_str())
-                    .unwrap_or(&h.new_value);
-                (
-                    "Status".to_string(),
-                    format!("{} => {}", old_name, new_name),
-                )
-            }
-            "resolution" => {
-                let old_name = h
-                    .old_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugResolution::from_i32)
-                    .map(|r| r.as_str())
-                    .unwrap_or(&h.old_value);
-                let new_name = h
-                    .new_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugResolution::from_i32)
-                    .map(|r| r.as_str())
-                    .unwrap_or(&h.new_value);
-                (
-                    "Resolution".to_string(),
-                    format!("{} => {}", old_name, new_name),
-                )
-            }
+            "status" => (
+                "Status".to_string(),
+                Self::format_transition(&h.old_value, &h.new_value, |v| {
+                    BugStatus::from_i32(v)
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown")
+                }),
+            ),
+            "resolution" => (
+                "Resolution".to_string(),
+                Self::format_transition(&h.old_value, &h.new_value, |v| {
+                    BugResolution::from_i32(v)
+                        .map(|r| r.as_str())
+                        .unwrap_or("unknown")
+                }),
+            ),
+            "priority" => (
+                "Priority".to_string(),
+                Self::format_transition(&h.old_value, &h.new_value, |v| {
+                    BugPriority::from_i32(v)
+                        .map(|p| p.as_str())
+                        .unwrap_or("unknown")
+                }),
+            ),
+            "severity" => (
+                "Severity".to_string(),
+                Self::format_transition(&h.old_value, &h.new_value, |v| {
+                    BugSeverity::from_i32(v)
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown")
+                }),
+            ),
+            "reproducibility" => (
+                "Reproducibility".to_string(),
+                Self::format_transition(&h.old_value, &h.new_value, |v| {
+                    BugReproducibility::from_i32(v)
+                        .map(|r| r.as_str())
+                        .unwrap_or("unknown")
+                }),
+            ),
             "handler_id" => {
                 let old_id = h.old_value.parse::<i64>().unwrap_or(0);
                 let new_id = h.new_value.parse::<i64>().unwrap_or(0);
                 let old_name = if old_id > 0 {
-                    Self::helper_user_by_id(conn, old_id)
-                        .map(|u| u.username)
-                        .unwrap_or_else(|| format!("user#{}", old_id))
+                    user_cache
+                        .entry(old_id)
+                        .or_insert_with(|| {
+                            Self::helper_user_by_id(conn, old_id)
+                                .map(|u| u.username)
+                                .unwrap_or_else(|| format!("user#{}", old_id))
+                        })
+                        .clone()
                 } else {
                     String::new()
                 };
                 let new_name = if new_id > 0 {
-                    Self::helper_user_by_id(conn, new_id)
-                        .map(|u| u.username)
-                        .unwrap_or_else(|| format!("user#{}", new_id))
+                    user_cache
+                        .entry(new_id)
+                        .or_insert_with(|| {
+                            Self::helper_user_by_id(conn, new_id)
+                                .map(|u| u.username)
+                                .unwrap_or_else(|| format!("user#{}", new_id))
+                        })
+                        .clone()
                 } else {
                     String::new()
                 };
@@ -4209,71 +4239,17 @@ impl Db {
                 let note_id = h.new_value.parse::<i64>().unwrap_or(0);
                 (format!("Note Added: {:07}", note_id), String::new())
             }
-            "priority" => {
-                let old_name = h
-                    .old_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugPriority::from_i32)
-                    .map(|p| p.as_str())
-                    .unwrap_or(&h.old_value);
-                let new_name = h
-                    .new_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugPriority::from_i32)
-                    .map(|p| p.as_str())
-                    .unwrap_or(&h.new_value);
-                (
-                    "Priority".to_string(),
-                    format!("{} => {}", old_name, new_name),
-                )
-            }
-            "severity" => {
-                let old_name = h
-                    .old_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugSeverity::from_i32)
-                    .map(|s| s.as_str())
-                    .unwrap_or(&h.old_value);
-                let new_name = h
-                    .new_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugSeverity::from_i32)
-                    .map(|s| s.as_str())
-                    .unwrap_or(&h.new_value);
-                (
-                    "Severity".to_string(),
-                    format!("{} => {}", old_name, new_name),
-                )
-            }
-            "reproducibility" => {
-                let old_name = h
-                    .old_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugReproducibility::from_i32)
-                    .map(|r| r.as_str())
-                    .unwrap_or(&h.old_value);
-                let new_name = h
-                    .new_value
-                    .parse::<i32>()
-                    .ok()
-                    .and_then(BugReproducibility::from_i32)
-                    .map(|r| r.as_str())
-                    .unwrap_or(&h.new_value);
-                (
-                    "Reproducibility".to_string(),
-                    format!("{} => {}", old_name, new_name),
-                )
-            }
             "category_id" => {
                 let old_id = h.old_value.parse::<i64>().unwrap_or(0);
                 let new_id = h.new_value.parse::<i64>().unwrap_or(0);
-                let old_cat = Self::helper_category_name(conn, old_id);
-                let new_cat = Self::helper_category_name(conn, new_id);
+                let old_cat = cat_cache
+                    .get(&old_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("General");
+                let new_cat = cat_cache
+                    .get(&new_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("General");
                 (
                     "Category".to_string(),
                     format!("{} => {}", old_cat, new_cat),
@@ -4294,6 +4270,64 @@ impl Db {
                 )
             }
         }
+    }
+
+    pub fn query_bug_history_for_email(
+        conn: &Connection,
+        bug_id: i64,
+        max_rows: usize,
+    ) -> rusqlite::Result<Vec<(BugHistory, String)>> {
+        // Query private note IDs for this bug so they are excluded from the email history table
+        let mut private_notes = HashSet::new();
+        if let Ok(mut note_stmt) = conn
+            .prepare("SELECT id FROM mantis_bugnote_table WHERE bug_id = ?1 AND view_state = 50")
+        {
+            if let Ok(note_rows) = note_stmt.query_map(params![bug_id], |row| row.get::<_, i64>(0))
+            {
+                for nid in note_rows.flatten() {
+                    private_notes.insert(nid);
+                }
+            }
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT h.id, h.user_id, h.bug_id, h.date_modified, h.field_name, h.old_value, h.new_value, h.type,
+                    COALESCE(u.username, '')
+             FROM mantis_bug_history_table h
+             LEFT JOIN mantis_user_table u ON h.user_id = u.id
+             WHERE h.bug_id = ?1
+             ORDER BY h.date_modified ASC, h.id ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![bug_id, max_rows as i64], |row| {
+            Ok((
+                BugHistory {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    bug_id: row.get(2)?,
+                    date_modified: row.get(3)?,
+                    field_name: row.get(4)?,
+                    old_value: row.get(5)?,
+                    new_value: row.get(6)?,
+                    type_: row.get(7)?,
+                },
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+
+        let mut result = Vec::new();
+        for item in rows.flatten() {
+            // Hide private note additions to prevent leaking private note IDs/activity
+            if item.0.field_name == "bugnote_added" {
+                if let Ok(nid) = item.0.new_value.parse::<i64>() {
+                    if private_notes.contains(&nid) {
+                        continue;
+                    }
+                }
+            }
+            result.push(item);
+        }
+        Ok(result)
     }
 
     pub fn build_mantis_email_body(
@@ -4354,8 +4388,8 @@ impl Db {
             .map(|r| r.as_str())
             .unwrap_or("open");
 
-        let date_submitted_str = Self::format_timestamp_display(bug.date_submitted);
-        let last_updated_str = Self::format_timestamp_display(bug.last_updated);
+        let date_submitted_str = crate::views::format_timestamp(bug.date_submitted);
+        let last_updated_str = crate::views::format_timestamp(bug.last_updated);
 
         let base_url = std::env::var("MANTIS_BASE_URL")
             .unwrap_or_else(|_| "http://localhost:3000".to_string());
@@ -4422,7 +4456,7 @@ impl Db {
 
         if let Some((note_id, author_name, note_date, note_text)) = current_note {
             let note_sep = "----------------------------------------------------------------------";
-            let date_str = Self::format_timestamp_display(note_date);
+            let date_str = crate::views::format_timestamp(note_date);
             body.push_str(SEP);
             body.push_str("\n\n");
             body.push_str(note_sep);
@@ -4434,8 +4468,24 @@ impl Db {
             body.push('\n');
         }
 
-        let history = Self::query_bug_history(conn, bug_id).unwrap_or_default();
+        let history = Self::query_bug_history_for_email(conn, bug_id, 100).unwrap_or_default();
         if !history.is_empty() {
+            // Pre-fetch categories for the project to avoid per-row queries
+            let mut cat_cache = HashMap::new();
+            if let Ok(mut cat_stmt) = conn
+                .prepare("SELECT id, name FROM mantis_category_table WHERE project_id IN (0, ?1)")
+            {
+                if let Ok(cat_rows) = cat_stmt.query_map(params![bug.project_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    for (cid, cname) in cat_rows.flatten() {
+                        cat_cache.insert(cid, cname);
+                    }
+                }
+            }
+
+            let mut user_cache = HashMap::new();
+
             body.push_str(SEP);
             body.push_str("\nIssue History\n");
             body.push_str(&format!(
@@ -4445,15 +4495,16 @@ impl Db {
             body.push_str(SEP);
             body.push('\n');
 
-            for h in history {
-                let h_user = Self::helper_user_by_id(conn, h.user_id);
-                let uname = h_user
-                    .as_ref()
-                    .map(|u| u.username.as_str())
-                    .unwrap_or("(Unknown)");
-                let date_str = Self::format_timestamp_display(h.date_modified);
+            for (h, username) in history {
+                let uname = if !username.is_empty() {
+                    &username
+                } else {
+                    "(Unknown)"
+                };
+                let date_str = crate::views::format_timestamp(h.date_modified);
 
-                let (field, change) = Self::format_history_field_change(conn, &h);
+                let (field, change) =
+                    Self::format_history_field_change(conn, &h, &mut user_cache, &cat_cache);
                 if change.is_empty() {
                     body.push_str(&format!("{:<17}{:<15}{}\n", date_str, uname, field));
                 } else {
@@ -4501,19 +4552,38 @@ impl Db {
         &self,
         conn: &Connection,
         bug_id: i64,
-        actor_id: i64,
+        _actor_id: i64,
         event_subject: &str,
         event_body: &str,
     ) {
-        self.notify_bug_event_filtered(conn, bug_id, actor_id, 0, event_subject, event_body);
+        self.notify_bug_event_filtered(conn, bug_id, 0, &[], event_subject, event_body);
+    }
+
+    pub fn notify_bug_event_with_extra(
+        &self,
+        conn: &Connection,
+        bug_id: i64,
+        _actor_id: i64,
+        extra_recipients: &[i64],
+        event_subject: &str,
+        event_body: &str,
+    ) {
+        self.notify_bug_event_filtered(
+            conn,
+            bug_id,
+            0,
+            extra_recipients,
+            event_subject,
+            event_body,
+        );
     }
 
     pub fn notify_bug_event_filtered(
         &self,
         conn: &Connection,
         bug_id: i64,
-        actor_id: i64,
         min_access: i32,
+        extra_recipients: &[i64],
         event_subject: &str,
         event_body: &str,
     ) {
@@ -4526,10 +4596,24 @@ impl Db {
             if u.enabled == 0 || u.email.trim().is_empty() {
                 return false;
             }
-            if min_access <= 10 || u.id == actor_id {
-                return true;
+            let eff_access =
+                Self::query_effective_access_level(conn, u, bug.project_id).unwrap_or(0);
+
+            // If the bug itself is private, only developer+ (access >= 55) or direct reporter/handler may receive
+            if bug.view_state == 50
+                && eff_access < 55
+                && u.id != bug.reporter_id
+                && u.id != bug.handler_id
+            {
+                return false;
             }
-            Self::query_effective_access_level(conn, u, bug.project_id).unwrap_or(0) >= min_access
+
+            // If the event or note requires minimum access (e.g. private note)
+            if min_access > 10 && eff_access < min_access {
+                return false;
+            }
+
+            true
         };
 
         let mut recipients = HashSet::new();
@@ -4542,6 +4626,17 @@ impl Db {
             if let Ok(Some(handler)) = Self::query_user_by_id(conn, bug.handler_id) {
                 if can_receive(&handler) {
                     recipients.insert(handler.email.trim().to_string());
+                }
+            }
+        }
+
+        // Include any extra recipients (such as previous handler during reassignment)
+        for &uid in extra_recipients {
+            if uid > 0 {
+                if let Ok(Some(extra_u)) = Self::query_user_by_id(conn, uid) {
+                    if can_receive(&extra_u) {
+                        recipients.insert(extra_u.email.trim().to_string());
+                    }
                 }
             }
         }
@@ -4560,9 +4655,7 @@ impl Db {
                     if trimmed.is_empty() {
                         continue;
                     }
-                    if min_access <= 10 || uid == actor_id {
-                        recipients.insert(trimmed.to_string());
-                    } else if let Ok(Some(u)) = Self::query_user_by_id(conn, uid) {
+                    if let Ok(Some(u)) = Self::query_user_by_id(conn, uid) {
                         if can_receive(&u) {
                             recipients.insert(trimmed.to_string());
                         }

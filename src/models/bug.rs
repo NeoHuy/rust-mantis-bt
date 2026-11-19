@@ -55,12 +55,6 @@ impl BugStatus {
             .map(|s| s.display_name().to_string())
             .unwrap_or_else(|| v.to_string())
     }
-
-    pub fn display_with_code(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| format!("{} ({})", s.display_name(), v))
-            .unwrap_or_else(|| v.to_string())
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,29 +90,6 @@ impl BugPriority {
             Self::Urgent => "urgent",
             Self::Immediate => "immediate",
         }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::None => "None",
-            Self::Low => "Low",
-            Self::Normal => "Normal",
-            Self::High => "High",
-            Self::Urgent => "Urgent",
-            Self::Immediate => "Immediate",
-        }
-    }
-
-    pub fn display_name_or(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_else(|| v.to_string())
-    }
-
-    pub fn display_with_code(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| format!("{} ({})", s.display_name(), v))
-            .unwrap_or_else(|| v.to_string())
     }
 }
 
@@ -162,31 +133,6 @@ impl BugSeverity {
             Self::Block => "block",
         }
     }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::Feature => "Feature",
-            Self::Trivial => "Trivial",
-            Self::Text => "Text",
-            Self::Tweak => "Tweak",
-            Self::Minor => "Minor",
-            Self::Major => "Major",
-            Self::Crash => "Crash",
-            Self::Block => "Block",
-        }
-    }
-
-    pub fn display_name_or(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_else(|| v.to_string())
-    }
-
-    pub fn display_with_code(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| format!("{} ({})", s.display_name(), v))
-            .unwrap_or_else(|| v.to_string())
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,23 +168,6 @@ impl BugReproducibility {
             Self::UnableToReproduce => "unable to reproduce",
             Self::NA => "N/A",
         }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::Always => "Always",
-            Self::Sometimes => "Sometimes",
-            Self::Random => "Random",
-            Self::HaveNotTried => "Have Not Tried",
-            Self::UnableToReproduce => "Unable to Reproduce",
-            Self::NA => "N/A",
-        }
-    }
-
-    pub fn display_name_or(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_else(|| v.to_string())
     }
 }
 
@@ -284,32 +213,6 @@ impl BugResolution {
             Self::Suspended => "suspended",
             Self::WontFix => "won't fix",
         }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::Open => "Open",
-            Self::Fixed => "Fixed",
-            Self::Reopened => "Reopened",
-            Self::UnableToReproduce => "Unable to Reproduce",
-            Self::NotFixable => "Not Fixable",
-            Self::Duplicate => "Duplicate",
-            Self::NotABug => "Not a Bug",
-            Self::Suspended => "Suspended",
-            Self::WontFix => "Won't Fix",
-        }
-    }
-
-    pub fn display_name_or(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_else(|| v.to_string())
-    }
-
-    pub fn display_with_code(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| format!("{} ({})", s.display_name(), v))
-            .unwrap_or_else(|| v.to_string())
     }
 }
 

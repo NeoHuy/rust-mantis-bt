@@ -72,18 +72,8 @@ cargo run -- create-token --user <username> --name "AI Assistant"
 ### 2. Configure Your AI Client
 
 #### A. Antigravity / Cursor / Windsurf / Roo-Code
-Add the server to your client's MCP configuration (e.g., in `mcp_servers` or settings):
+Add the server to your client's MCP configuration (e.g., in `mcp_servers` or settings) with the `Authorization` header:
 
-```json
-{
-  "mcpServers": {
-    "mantis": {
-      "url": "http://127.0.0.1:3000/mcp/sse?token=YOUR_API_TOKEN"
-    }
-  }
-}
-```
-*Alternatively, you can provide the token via an HTTP header if supported by the client:*
 ```json
 {
   "mcpServers": {
@@ -102,7 +92,7 @@ Add the following to your `claude_desktop_config.json`:
 - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
-Using `mcp-proxy`:
+Using `mcp-proxy` with the authorization header:
 ```json
 {
   "mcpServers": {
@@ -111,12 +101,16 @@ Using `mcp-proxy`:
       "args": [
         "-y",
         "mcp-proxy",
-        "http://127.0.0.1:3000/mcp/sse?token=YOUR_API_TOKEN"
+        "--headers",
+        "Authorization: Bearer YOUR_API_TOKEN",
+        "http://127.0.0.1:3000/mcp/sse"
       ]
     }
   }
 }
 ```
+
+> **Security Note:** Passing raw API tokens in the URL query parameter (`?token=...`) is disabled by default to prevent tokens from leaking into web proxy logs and server access logs. If needed for local testing, it can be enabled by setting `MANTIS_ALLOW_QUERY_TOKEN=1`.
 
 ---
 

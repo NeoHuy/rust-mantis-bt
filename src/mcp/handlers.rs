@@ -40,9 +40,11 @@ impl Drop for SessionDropGuard {
     fn drop(&mut self) {
         let sm = self.session_manager.clone();
         let sid = self.session_id.clone();
-        tokio::spawn(async move {
-            sm.remove_session(&sid).await;
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                sm.remove_session(&sid).await;
+            });
+        }
     }
 }
 
@@ -57,20 +59,26 @@ pub async fn mcp_sse_handler(
         .unwrap_or("");
 
     let bearer_token = crate::auth::extract_bearer_token(auth_header);
+    // Allow query parameter only when explicitly enabled in environment for development/testing
+    let allow_query = std::env::var("MANTIS_ALLOW_QUERY_TOKEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     let raw_token = if !bearer_token.is_empty() {
         bearer_token
-    } else if let Some(tok) = q.token.as_deref() {
-        tok.trim()
+    } else if allow_query {
+        q.token.as_deref().unwrap_or("").trim()
     } else {
         ""
     };
 
     if raw_token.is_empty() {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "API token required" })),
-        )
-            .into_response();
+        let err_msg = if q.token.is_some() && !allow_query {
+            "API token in query parameter is disabled for security. Use 'Authorization: Bearer <token>' header or set MANTIS_ALLOW_QUERY_TOKEN=1 for development."
+        } else {
+            "API token required via 'Authorization: Bearer <token>' header"
+        };
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": err_msg }))).into_response();
     }
 
     let (token_id, user) = match state.db.authenticate_api_token_full(raw_token) {

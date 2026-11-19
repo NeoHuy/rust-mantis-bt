@@ -547,6 +547,25 @@ fn test_mcp_tools_and_rbac_dispatch() {
     assert_eq!(updated_bug.status, 50);
     assert_eq!(updated_bug.handler_id, dev_id);
 
+    // Verify atomic RBAC: attempting to change priority + close issue without Manager level
+    // must fail AND must NOT apply the priority change (no partial updates!)
+    let prev_priority = updated_bug.priority;
+    let res = dispatch_tool_call(
+        &db,
+        &dev_user,
+        "update_issue",
+        json!({
+            "issue_id": issue_id,
+            "priority": 60,
+            "status": 90
+        }),
+    );
+    assert!(res.is_error);
+    assert!(res.content[0].text.contains("Access level 70 required"));
+    let bug_unchanged = db.get_bug(issue_id).unwrap().unwrap();
+    assert_eq!(bug_unchanged.priority, prev_priority);
+    assert_ne!(bug_unchanged.priority, 60);
+
     // Developer tries to close issue (status=90) without Manager level (70) -> Denied
     let res = dispatch_tool_call(
         &db,
@@ -684,13 +703,13 @@ async fn test_mcp_sse_and_messages_e2e() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
-    // 2. Invalid token returns 401
+    // 2. Query parameter token is rejected by default for security (returns 401)
     let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/mcp/sse?token=bogus_token")
+                .uri(format!("/mcp/sse?token={}", raw_token))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -698,13 +717,14 @@ async fn test_mcp_sse_and_messages_e2e() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
-    // 3. Valid token connects and returns SSE endpoint event
+    // 3. Valid token in Authorization: Bearer connects and returns SSE endpoint event
     let res = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/mcp/sse?token={}", raw_token))
+                .uri("/mcp/sse")
+                .header("authorization", format!("Bearer {}", raw_token))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -916,4 +936,20 @@ async fn test_mcp_sse_and_messages_e2e() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+    // 11. Dev flag MANTIS_ALLOW_QUERY_TOKEN allows ?token= when explicitly enabled
+    std::env::set_var("MANTIS_ALLOW_QUERY_TOKEN", "1");
+    let res_dev = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/mcp/sse?token={}", raw_tok2))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_dev.status(), StatusCode::OK);
+    std::env::remove_var("MANTIS_ALLOW_QUERY_TOKEN");
 }

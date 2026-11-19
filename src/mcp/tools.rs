@@ -464,6 +464,29 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 ));
             }
 
+            // Validate status transition permission BEFORE making any updates to prevent partial writes
+            let status_opt = args
+                .get("status")
+                .and_then(|v| v.as_i64())
+                .map(|s| s as i32);
+
+            if let Some(st) = status_opt {
+                let required_level = if st == 90 {
+                    70 // Close requires Manager (70+)
+                } else if st == 80 || bug.status >= 80 {
+                    55 // Resolve or reopen requires Developer (55+)
+                } else {
+                    40 // Status transitions require Updater (40+)
+                };
+
+                if eff < required_level {
+                    return CallToolResult::error(format!(
+                        "Permission Denied: Access level {} required for status transition to {} (your level: {})",
+                        required_level, st, eff
+                    ));
+                }
+            }
+
             let mut update = BugUpdate::default();
             let mut has_field_updates = false;
 
@@ -490,26 +513,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 }
             }
 
-            if let Some(st) = args
-                .get("status")
-                .and_then(|v| v.as_i64())
-                .map(|s| s as i32)
-            {
-                let required_level = if st == 90 {
-                    70 // Close requires Manager (70+)
-                } else if st == 80 || bug.status >= 80 {
-                    55 // Resolve or reopen requires Developer (55+)
-                } else {
-                    40 // Status transitions require Updater (40+)
-                };
-
-                if eff < required_level {
-                    return CallToolResult::error(format!(
-                        "Permission Denied: Access level {} required for status transition to {} (your level: {})",
-                        required_level, st, eff
-                    ));
-                }
-
+            if let Some(st) = status_opt {
                 let res = args
                     .get("resolution")
                     .and_then(|v| v.as_i64())

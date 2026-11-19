@@ -130,11 +130,18 @@ impl SessionManager {
         map.remove(session_id).map(|s| s.user)
     }
 
-    pub async fn cleanup_stale(&self, timeout: Duration) -> usize {
+    pub async fn cleanup_stale(&self, _timeout: Duration) -> usize {
         let mut map = self.sessions.write().await;
         let now = Instant::now();
         let initial_count = map.len();
-        map.retain(|_, session| now.duration_since(session.last_active) < timeout);
+        map.retain(|_, session| {
+            if session.sender.is_closed() {
+                false
+            } else {
+                // If stream is still open, keep it alive up to 24 hours of total idle time
+                now.duration_since(session.last_active) < Duration::from_secs(86400)
+            }
+        });
         initial_count - map.len()
     }
 
@@ -198,16 +205,16 @@ pub mod tests {
     async fn test_session_cleanup_stale() {
         let manager = SessionManager::new();
         let user = dummy_user(20, "bob");
-        let (session_id, _rx) = manager.create_session(2, user).await;
+        let (session_id, rx) = manager.create_session(2, user).await;
 
-        // Cleanup with 1 hour timeout shouldn't remove it
+        // Cleanup while SSE connection is active shouldn't remove it even after time passes
         let cleaned = manager.cleanup_stale(Duration::from_secs(3600)).await;
         assert_eq!(cleaned, 0);
         assert_eq!(manager.count().await, 1);
 
-        // Cleanup with 0 timeout removes stale session
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        let cleaned = manager.cleanup_stale(Duration::from_millis(1)).await;
+        // When the client disconnects (SSE receiver dropped), cleanup_stale detects is_closed and evicts it
+        drop(rx);
+        let cleaned = manager.cleanup_stale(Duration::from_secs(0)).await;
         assert_eq!(cleaned, 1);
         assert_eq!(manager.count().await, 0);
         assert!(manager.get_user(&session_id).await.is_none());

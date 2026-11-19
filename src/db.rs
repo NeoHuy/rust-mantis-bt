@@ -1,10 +1,10 @@
 use crate::models::{
     ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugPriority, BugRelationship,
     BugResolution, BugSeverity, BugStatus, BugTag, BugUpdate, Bugnote, Category, CustomField,
-    CustomFieldValue, EmailMessage, NewsItem, PluginItem, Project, ProjectVersion, SavedFilter,
-    Tag, TimeTrackingEntry, User,
+    CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig, NewsItem, PluginItem, Project,
+    ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -40,7 +40,7 @@ impl Db {
     }
 
     pub fn migrate(&self) -> rusqlite::Result<()> {
-        let conn = self.conn();
+        let mut conn = self.conn();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS mantis_config_table (
                 config_id TEXT NOT NULL,
@@ -305,8 +305,163 @@ impl Db {
                 enabled INTEGER NOT NULL DEFAULT 1,
                 protected INTEGER NOT NULL DEFAULT 0,
                 priority INTEGER NOT NULL DEFAULT 3
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_links_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bug_id INTEGER NOT NULL,
+                jira_key TEXT NOT NULL,
+                jira_url TEXT NOT NULL,
+                issue_type TEXT NOT NULL DEFAULT 'Bug',
+                jira_status TEXT NOT NULL DEFAULT '',
+                created_by INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY(bug_id) REFERENCES mantis_bug_table(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_epics_cache_table (
+                project_key TEXT PRIMARY KEY,
+                epics_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table (
+                jira_status TEXT PRIMARY KEY COLLATE NOCASE,
+                mantis_status INTEGER NOT NULL
             );",
         )?;
+
+        // Idempotent migration for mantis_jira_epics_cache_table: ensure expires_at column exists
+        let has_expires_at = {
+            let mut stmt = conn.prepare("PRAGMA table_info(mantis_jira_epics_cache_table)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for name in rows.flatten() {
+                if name == "expires_at" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_expires_at {
+            conn.execute(
+                "ALTER TABLE mantis_jira_epics_cache_table ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        // Idempotent migration for mantis_jira_links_table: ensure unique index on bug_id exists
+        let has_unique_bug_id_idx: bool = {
+            let mut stmt = conn.prepare("PRAGMA index_list(mantis_jira_links_table)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                let unique: i64 = row.get(2)?;
+                Ok((name, unique))
+            })?;
+            let mut found = false;
+            for (name, unique) in rows.flatten() {
+                if (name == "idx_jira_links_bug_id_unique"
+                    || name.starts_with("sqlite_autoindex_mantis_jira_links_table"))
+                    && unique == 1
+                {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+
+        if !has_unique_bug_id_idx {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM mantis_jira_links_table WHERE id NOT IN (SELECT MAX(id) FROM mantis_jira_links_table GROUP BY bug_id)",
+                [],
+            )?;
+            tx.execute("DROP INDEX IF EXISTS idx_jira_links_bug_id", [])?;
+            tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_jira_links_bug_id_unique ON mantis_jira_links_table(bug_id)",
+                [],
+            )?;
+            tx.commit()?;
+        }
+
+        // Idempotent migration for mantis_jira_status_mapping_table: ensure COLLATE NOCASE
+        let needs_nocase_migration = {
+            let table_sql: Option<String> = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='mantis_jira_status_mapping_table'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match table_sql {
+                Some(sql) => !sql.to_uppercase().contains("NOCASE"),
+                None => false,
+            }
+        };
+
+        if needs_nocase_migration {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table_mig (
+                    jira_status TEXT PRIMARY KEY COLLATE NOCASE,
+                    mantis_status INTEGER NOT NULL
+                )",
+                [],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO mantis_jira_status_mapping_table_mig (jira_status, mantis_status)
+                 SELECT TRIM(jira_status), mantis_status FROM mantis_jira_status_mapping_table",
+                [],
+            )?;
+            tx.execute("DROP TABLE mantis_jira_status_mapping_table", [])?;
+            tx.execute(
+                "ALTER TABLE mantis_jira_status_mapping_table_mig RENAME TO mantis_jira_status_mapping_table",
+                [],
+            )?;
+            tx.commit()?;
+        }
+
+        // Seed default Jira status mappings if table is empty
+        let status_map_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mantis_jira_status_mapping_table",
+            [],
+            |row| row.get(0),
+        )?;
+        if status_map_count == 0 {
+            let defaults = [
+                ("To Do", 30),
+                ("Open", 30),
+                ("In Progress", 50),
+                ("In Review", 20),
+                ("Done", 80),
+                ("Closed", 90),
+            ];
+            for (j_status, m_status) in defaults {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                    params![j_status, m_status],
+                );
+            }
+        }
+
+        // Ensure jira_status column exists in mantis_jira_links_table for existing databases
+        let has_jira_status = conn
+            .prepare("SELECT jira_status FROM mantis_jira_links_table LIMIT 1")
+            .is_ok();
+        if !has_jira_status {
+            let _ = conn.execute(
+                "ALTER TABLE mantis_jira_links_table ADD COLUMN jira_status TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+        }
 
         // Default administrator seed if user table is empty
         let user_count: i64 =
@@ -407,6 +562,132 @@ impl Db {
     pub fn get_user_by_id(&self, id: i64) -> rusqlite::Result<Option<User>> {
         let conn = self.conn();
         Self::query_user_by_id(&conn, id)
+    }
+
+    pub fn get_user_by_email(&self, email: &str) -> rusqlite::Result<Option<User>> {
+        let trimmed = email.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, username, realname, email, password, enabled, protected, access_level,
+                    login_count, lost_password_request_count, failed_login_count, cookie_string,
+                    last_visit, date_created
+             FROM mantis_user_table
+             WHERE LOWER(email) = LOWER(?1)",
+        )?;
+        let mut rows = stmt.query(params![trimmed])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(User {
+                id: row.get(0)?,
+                username: row.get(1)?,
+                realname: row.get(2)?,
+                email: row.get(3)?,
+                password: row.get(4)?,
+                enabled: row.get(5)?,
+                protected: row.get(6)?,
+                access_level: row.get(7)?,
+                login_count: row.get(8)?,
+                lost_password_request_count: row.get(9)?,
+                failed_login_count: row.get(10)?,
+                cookie_string: row.get(11)?,
+                last_visit: row.get(12)?,
+                date_created: row.get(13)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn is_signup_allowed(&self) -> bool {
+        match self.get_config("allow_signup", 0, 0) {
+            Ok(Some(val)) => {
+                let v = val.trim().to_ascii_lowercase();
+                !(v == "0" || v == "false" || v == "off" || v == "no")
+            }
+            _ => true,
+        }
+    }
+
+    pub fn signup_user(
+        &self,
+        username: &str,
+        realname: &str,
+        email: &str,
+        password: &str,
+    ) -> Result<User, String> {
+        if !self.is_signup_allowed() {
+            return Err("User registration is currently disabled.".to_string());
+        }
+
+        let trimmed_username = username.trim();
+        if trimmed_username.is_empty() {
+            return Err("Username cannot be empty.".to_string());
+        }
+        if trimmed_username.len() > 32 {
+            return Err("Username cannot exceed 32 characters.".to_string());
+        }
+        if !trimmed_username
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+        {
+            return Err("Username contains invalid characters. Only letters, numbers, '.', '_' and '-' are allowed.".to_string());
+        }
+
+        // Check if username already exists (case-insensitive)
+        let conn = self.conn();
+        let username_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM mantis_user_table WHERE LOWER(username) = LOWER(?1)",
+                params![trimmed_username],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|cnt| cnt > 0)
+            .unwrap_or(false);
+        drop(conn);
+
+        if username_exists {
+            return Err("Username is already taken.".to_string());
+        }
+
+        let trimmed_email = email.trim();
+        if trimmed_email.is_empty() {
+            return Err("Email cannot be empty.".to_string());
+        }
+        if !trimmed_email.contains('@') || !trimmed_email.contains('.') {
+            return Err("Invalid email address format.".to_string());
+        }
+
+        // Check if email already exists
+        if let Ok(Some(_)) = self.get_user_by_email(trimmed_email) {
+            return Err("Email address is already in use.".to_string());
+        }
+
+        if password.len() < 6 {
+            return Err("Password must be at least 6 characters long.".to_string());
+        }
+
+        let default_access_level = self
+            .get_config("default_new_account_access_level", 0, 0)
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(25); // Reporter = 25
+
+        let user_id = self.create_user(
+            trimmed_username,
+            realname.trim(),
+            trimmed_email,
+            password,
+            default_access_level,
+            true,
+            false,
+        )?;
+
+        self.get_user_by_id(user_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Failed to retrieve newly created user.".to_string())
     }
 
     fn query_user_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<User>> {
@@ -4282,6 +4563,31 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_all_api_tokens(&self) -> rusqlite::Result<Vec<(ApiToken, String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.user_id, t.name, t.hash, t.date_created, t.date_used,
+                    COALESCE(u.username, ''), COALESCE(u.realname, '')
+             FROM mantis_api_token_table t
+             LEFT JOIN mantis_user_table u ON t.user_id = u.id
+             ORDER BY t.date_created DESC, t.id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let token = ApiToken {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                name: row.get(2)?,
+                hash: row.get(3)?,
+                date_created: row.get(4)?,
+                date_used: row.get(5)?,
+            };
+            let username: String = row.get(6)?;
+            let realname: String = row.get(7)?;
+            Ok((token, username, realname))
+        })?;
+        rows.collect()
+    }
+
     pub fn revoke_api_token(&self, id: i64, user_id: i64) -> rusqlite::Result<bool> {
         let conn = self.conn();
         let rows = conn.execute(
@@ -4291,7 +4597,23 @@ impl Db {
         Ok(rows > 0)
     }
 
+    pub fn revoke_api_token_by_id(&self, id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let rows = conn.execute(
+            "DELETE FROM mantis_api_token_table WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(rows > 0)
+    }
+
     pub fn authenticate_api_token(&self, raw_token: &str) -> rusqlite::Result<Option<User>> {
+        Ok(self.authenticate_api_token_full(raw_token)?.map(|(_, u)| u))
+    }
+
+    pub fn authenticate_api_token_full(
+        &self,
+        raw_token: &str,
+    ) -> rusqlite::Result<Option<(i64, User)>> {
         let trimmed = raw_token.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -4327,7 +4649,7 @@ impl Db {
             params![now, token_id],
         );
 
-        Ok(Some(user))
+        Ok(Some((token_id, user)))
     }
 
     pub fn list_plugins(&self) -> rusqlite::Result<Vec<PluginItem>> {
@@ -4381,1284 +4703,486 @@ impl Db {
         .unwrap_or(0)
             != 0
     }
+
+    // ─── Jira Integration (`mantis_jira_links_table`) ────────────────────────
+
+    pub fn create_jira_link(
+        &self,
+        bug_id: i64,
+        jira_key: &str,
+        jira_url: &str,
+        issue_type: &str,
+        jira_status: &str,
+        user_id: i64,
+    ) -> rusqlite::Result<i64> {
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<Option<JiraLink>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at
+             FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
+        )?;
+        let mut rows = stmt.query(params![bug_id])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(JiraLink {
+                id: row.get(0)?,
+                bug_id: row.get(1)?,
+                jira_key: row.get(2)?,
+                jira_url: row.get(3)?,
+                issue_type: row.get(4)?,
+                jira_status: row.get(5)?,
+                created_by: row.get(6)?,
+                created_at: row.get(7)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn claim_jira_link_pending(&self, bug_id: i64, user_id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let affected = conn.execute(
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, '__PENDING__', '', '', '', ?2, ?3)
+             ON CONFLICT(bug_id) DO UPDATE SET
+                 created_by = excluded.created_by,
+                 created_at = excluded.created_at
+             WHERE mantis_jira_links_table.jira_key = '__PENDING__' AND (excluded.created_at - mantis_jira_links_table.created_at) > 60",
+            params![bug_id, user_id, now],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn release_jira_link_pending(&self, bug_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key = '__PENDING__'",
+            params![bug_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let affected = conn.execute(
+            "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1",
+            params![bug_id],
+        )?;
+        Ok(affected > 0)
+    }
+
+    fn resolve_jira_status_internal(conn: &rusqlite::Connection, jira_status: &str) -> i32 {
+        let trimmed = jira_status.trim();
+        if trimmed.is_empty() {
+            return 0;
+        }
+        let mapped: Option<i32> = conn
+            .query_row(
+                "SELECT mantis_status FROM mantis_jira_status_mapping_table WHERE jira_status = ?1",
+                params![trimmed],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        mapped.unwrap_or_else(|| crate::jira::map_jira_status_to_mantis(trimmed))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_jira_sync_success(
+        &self,
+        bug_id: i64,
+        jira_key: &str,
+        jira_url: &str,
+        issue_type: &str,
+        jira_status: &str,
+        user_id: i64,
+        username: &str,
+        is_new_link: bool,
+    ) -> Result<(), String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Query existing link to track changes and previous status
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT jira_key, jira_status FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
+                params![bug_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let (existing_key, existing_status) = match existing {
+            Some((k, s)) => (k, s),
+            None => (String::new(), String::new()),
+        };
+
+        // 1. Insert or update jira link via UPSERT to prevent concurrency duplicate inserts
+        tx.execute(
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(bug_id) DO UPDATE SET
+                 jira_key = excluded.jira_key,
+                 jira_url = excluded.jira_url,
+                 issue_type = excluded.issue_type,
+                 jira_status = excluded.jira_status,
+                 created_by = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_by ELSE mantis_jira_links_table.created_by END,
+                 created_at = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_at ELSE mantis_jira_links_table.created_at END",
+            params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 2. Map status to mantis and update bug if status changes
+        let old_status: i32 = tx
+            .query_row(
+                "SELECT status FROM mantis_bug_table WHERE id = ?1",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let trimmed_jira_status = jira_status.trim();
+        let mut status_changed = false;
+        if !trimmed_jira_status.is_empty() {
+            let mapped_status = Self::resolve_jira_status_internal(&tx, trimmed_jira_status);
+            // Prevent reopening/downgrading resolved or closed bugs (status >= 80) if mapped status is lower
+            let is_resolved_or_closed_downgrade = old_status >= 80 && mapped_status < old_status;
+            if !is_resolved_or_closed_downgrade && old_status != mapped_status {
+                tx.execute(
+                    "UPDATE mantis_bug_table SET status = ?1, last_updated = ?2 WHERE id = ?3",
+                    params![mapped_status, now, bug_id],
+                )
+                .map_err(|e| e.to_string())?;
+
+                tx.execute(
+                    "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
+                     VALUES (?1, ?2, ?3, 'status', ?4, ?5, 0)",
+                    params![user_id, bug_id, now, old_status.to_string(), mapped_status.to_string()],
+                )
+                .map_err(|e| e.to_string())?;
+
+                status_changed = true;
+            }
+        }
+
+        // 3. Insert bugnote ONLY if something changed or it's a new link
+        let key_changed = existing_key != jira_key;
+        let jira_status_changed = existing_status != jira_status;
+        let should_add_note = is_new_link || status_changed || key_changed || jira_status_changed;
+
+        if should_add_note {
+            let note_text = if is_new_link {
+                format!(
+                    "Linked to Jira issue [{}]({}) (Status: {}) by {}.",
+                    jira_key, jira_url, jira_status, username
+                )
+            } else {
+                format!(
+                    "Synced with Jira issue [{}]({}) (Status: {}) by {}.",
+                    jira_key, jira_url, jira_status, username
+                )
+            };
+
+            tx.execute(
+                "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
+                params![note_text],
+            )
+            .map_err(|e| e.to_string())?;
+            let text_id = tx.last_insert_rowid();
+
+            tx.execute(
+                "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+                 VALUES (?1, ?2, ?3, 10, ?4, ?4, 0, '', 0)",
+                params![bug_id, user_id, text_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_jira_link_with_note(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        username: &str,
+    ) -> Result<bool, String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let existing_key: Option<String> = tx
+            .query_row(
+                "SELECT jira_key FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let key_str = match existing_key {
+            Some(k) => k,
+            None => return Ok(false),
+        };
+
+        let affected = tx
+            .execute(
+                "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1",
+                params![bug_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let note_text = format!("Unlinked Jira issue {} by {}.", key_str, username);
+        tx.execute(
+            "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
+            params![note_text],
+        )
+        .map_err(|e| e.to_string())?;
+        let text_id = tx.last_insert_rowid();
+
+        tx.execute(
+            "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+             VALUES (?1, ?2, ?3, 10, ?4, ?4, 0, '', 0)",
+            params![bug_id, user_id, text_id, now],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(affected > 0)
+    }
+
+    pub fn get_jira_config(&self, project_id: i64) -> rusqlite::Result<JiraResolvedConfig> {
+        let enabled_val = self
+            .get_config("jira_enabled", 0, 0)?
+            .unwrap_or_else(|| "0".to_string());
+        let enabled = enabled_val == "1" || enabled_val.eq_ignore_ascii_case("true");
+        let base_url = self.get_config("jira_base_url", 0, 0)?.unwrap_or_default();
+        let email = self.get_config("jira_email", 0, 0)?.unwrap_or_default();
+        let api_token = self.get_config("jira_api_token", 0, 0)?.unwrap_or_default();
+        let default_issue_type = self
+            .get_config("jira_default_issue_type", 0, 0)?
+            .unwrap_or_else(|| "Bug".to_string());
+        let default_project_key = self
+            .get_config("jira_default_project_key", 0, 0)?
+            .unwrap_or_default();
+
+        let mut project_key = String::new();
+        if project_id > 0 {
+            if let Some(pk) = self.get_config("jira_project_key", project_id, 0)? {
+                project_key = pk;
+            }
+        }
+        if project_key.is_empty() {
+            project_key = default_project_key;
+        }
+
+        Ok(JiraResolvedConfig {
+            enabled,
+            base_url,
+            email,
+            api_token,
+            default_issue_type,
+            project_key,
+        })
+    }
+
+    pub fn save_jira_global_config(
+        &self,
+        enabled: bool,
+        base_url: &str,
+        email: &str,
+        api_token: Option<&str>,
+        default_issue_type: &str,
+        default_project_key: &str,
+    ) -> rusqlite::Result<()> {
+        self.set_config("jira_enabled", 0, 0, if enabled { "1" } else { "0" })?;
+        self.set_config("jira_base_url", 0, 0, base_url)?;
+        self.set_config("jira_email", 0, 0, email)?;
+        if let Some(tok) = api_token {
+            if !tok.is_empty() {
+                self.set_config("jira_api_token", 0, 0, tok)?;
+            }
+        }
+        self.set_config("jira_default_issue_type", 0, 0, default_issue_type)?;
+        self.set_config("jira_default_project_key", 0, 0, default_project_key)?;
+        Ok(())
+    }
+
+    pub fn set_jira_project_mapping(
+        &self,
+        project_id: i64,
+        jira_project_key: &str,
+    ) -> rusqlite::Result<()> {
+        self.set_config("jira_project_key", project_id, 0, jira_project_key)
+    }
+
+    pub fn save_jira_epics_cache(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+    ) -> rusqlite::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.save_jira_epics_cache_with_ttl(project_key, epics, now, now + 86400)
+    }
+
+    pub fn save_jira_epics_cache_with_timestamp(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+        updated_at: i64,
+    ) -> rusqlite::Result<()> {
+        self.save_jira_epics_cache_with_ttl(project_key, epics, updated_at, updated_at + 86400)
+    }
+
+    pub fn save_jira_epics_cache_with_ttl(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+        updated_at: i64,
+        expires_at: i64,
+    ) -> rusqlite::Result<()> {
+        let epics_json = serde_json::to_string(epics).unwrap_or_else(|_| "[]".to_string());
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_jira_epics_cache_table (project_key, epics_json, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_key) DO UPDATE SET epics_json = excluded.epics_json, updated_at = excluded.updated_at, expires_at = excluded.expires_at",
+            params![project_key, epics_json, updated_at, expires_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_cached_jira_epics(
+        &self,
+        project_key: &str,
+        max_age_secs: i64,
+    ) -> rusqlite::Result<Option<Vec<crate::models::JiraEpic>>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn();
+        let res: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT epics_json, updated_at, expires_at FROM mantis_jira_epics_cache_table WHERE project_key = ?1",
+                params![project_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        match res {
+            Some((json, updated_at, expires_at)) => {
+                let is_fresh = if expires_at > 0 {
+                    now < expires_at
+                } else {
+                    now.saturating_sub(updated_at) <= max_age_secs
+                };
+                if is_fresh || max_age_secs == i64::MAX {
+                    let epics: Vec<crate::models::JiraEpic> =
+                        serde_json::from_str(&json).unwrap_or_default();
+                    Ok(Some(epics))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_cached_jira_epics_summary(&self) -> rusqlite::Result<Vec<(String, usize, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT project_key, epics_json, updated_at FROM mantis_jira_epics_cache_table ORDER BY project_key ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            let updated_at: i64 = row.get(2)?;
+            let count = serde_json::from_str::<Vec<crate::models::JiraEpic>>(&json)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            Ok((key, count, updated_at))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_jira_status_mappings(&self) -> rusqlite::Result<Vec<(String, i32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT jira_status, mantis_status FROM mantis_jira_status_mapping_table ORDER BY mantis_status ASC, jira_status ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let j: String = row.get(0)?;
+            let m: i32 = row.get(1)?;
+            Ok((j, m))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn save_jira_status_mappings(&self, mappings: &[(String, i32)]) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM mantis_jira_status_mapping_table", [])?;
+        let mut seen = std::collections::HashSet::new();
+        for (j_status, m_status) in mappings {
+            let trimmed = j_status.trim();
+            if !trimmed.is_empty() {
+                let lower = trimmed.to_lowercase();
+                if seen.insert(lower) {
+                    tx.execute(
+                        "INSERT INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                        params![trimmed, m_status],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn resolve_jira_status_to_mantis(&self, jira_status: &str) -> i32 {
+        Self::resolve_jira_status_internal(&self.conn(), jira_status)
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bootstrap_creates_tables_and_default_seed() {
-        let db = Db::open_in_memory().unwrap();
-        let admin = db
-            .get_user_by_username("administrator")
-            .unwrap()
-            .expect("default admin");
-        assert_eq!(admin.access_level, 90);
-        assert_eq!(admin.enabled, 1);
-
-        let cats = db.list_categories_for_project(0).unwrap();
-        assert_eq!(cats.len(), 1);
-        assert_eq!(cats[0].name, "General");
-        assert_eq!(cats[0].project_id, 0);
-
-        db.set_config("window_title", 0, 0, "Rust MantisBT")
-            .unwrap();
-        assert_eq!(
-            db.get_config("window_title", 0, 0).unwrap().as_deref(),
-            Some("Rust MantisBT")
-        );
-    }
-
-    #[test]
-    fn test_user_lookup_helpers() {
-        let db = Db::open_in_memory().unwrap();
-        let admin_by_name = db.get_user_by_username("administrator").unwrap().unwrap();
-        let admin_by_id = db.get_user_by_id(admin_by_name.id).unwrap().unwrap();
-        assert_eq!(admin_by_name.id, admin_by_id.id);
-
-        let admin_by_cookie = db
-            .get_user_by_cookie(&admin_by_name.cookie_string)
-            .unwrap()
-            .unwrap();
-        assert_eq!(admin_by_name.id, admin_by_cookie.id);
-
-        assert!(db.get_user_by_username("nonexistent").unwrap().is_none());
-        assert!(db.get_user_by_id(9999).unwrap().is_none());
-        assert!(db.get_user_by_cookie("invalid_cookie").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_config_hierarchical_fallback() {
-        let db = Db::open_in_memory().unwrap();
-
-        // 1. Global config
-        db.set_config("theme", 0, 0, "default").unwrap();
-        assert_eq!(
-            db.get_config("theme", 0, 0).unwrap().as_deref(),
-            Some("default")
-        );
-        assert_eq!(
-            db.get_config("theme", 10, 20).unwrap().as_deref(),
-            Some("default")
-        );
-
-        // 2. Project config override
-        db.set_config("theme", 10, 0, "project_blue").unwrap();
-        assert_eq!(
-            db.get_config("theme", 10, 20).unwrap().as_deref(),
-            Some("project_blue")
-        );
-        assert_eq!(
-            db.get_config("theme", 0, 0).unwrap().as_deref(),
-            Some("default")
-        );
-
-        // 3. User config override
-        db.set_config("theme", 10, 20, "user_dark").unwrap();
-        assert_eq!(
-            db.get_config("theme", 10, 20).unwrap().as_deref(),
-            Some("user_dark")
-        );
-
-        // 4. Global user config override (0, user_id)
-        db.set_config("language", 0, 20, "french").unwrap();
-        assert_eq!(
-            db.get_config("language", 10, 20).unwrap().as_deref(),
-            Some("french")
-        );
-        assert_eq!(db.get_config("language", 10, 30).unwrap().as_deref(), None);
-    }
-
-    #[test]
-    fn test_category_inheritance() {
-        let db = Db::open_in_memory().unwrap();
-        let conn = db.conn();
-
-        // Create Project 1 (inherit_global = 1)
-        conn.execute(
-            "INSERT INTO mantis_project_table (id, name, inherit_global) VALUES (1, 'Project Alpha', 1)",
-            [],
-        ).unwrap();
-        // Add project-specific category for Project 1
-        conn.execute(
-            "INSERT INTO mantis_category_table (project_id, user_id, name) VALUES (1, 0, 'Alpha Features')",
-            [],
-        ).unwrap();
-
-        // Project 1 categories should include 'General' (global) and 'Alpha Features'
-        drop(conn);
-        let cats1 = db.list_categories_for_project(1).unwrap();
-        let cat_names1: Vec<&str> = cats1.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(cat_names1, vec!["Alpha Features", "General"]);
-
-        // Create Project 2 (child of Project 1, inherit_parent = 1)
-        let conn = db.conn();
-        conn.execute(
-            "INSERT INTO mantis_project_table (id, name, inherit_global) VALUES (2, 'Project Alpha Sub', 0)",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO mantis_project_hierarchy_table (child_id, parent_id, inherit_parent) VALUES (2, 1, 1)",
-            [],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO mantis_category_table (project_id, user_id, name) VALUES (2, 0, 'Sub Category')",
-            [],
-        ).unwrap();
-
-        drop(conn);
-        let cats2 = db.list_categories_for_project(2).unwrap();
-        let cat_names2: Vec<&str> = cats2.iter().map(|c| c.name.as_str()).collect();
-        // Since project 2 has inherit_parent = 1, it should inherit Project 1's categories
-        assert!(cat_names2.contains(&"Sub Category"));
-        assert!(cat_names2.contains(&"Alpha Features"));
-    }
-
-    #[test]
-    fn test_db_open_file_based() {
-        let tmp_dir = std::env::temp_dir();
-        let db_path = tmp_dir.join(format!("mantis_test_{}.db", rand::random::<u64>()));
-        let db_str = db_path.to_str().unwrap();
-
-        {
-            let db = Db::open(db_str).unwrap();
-            let admin = db
-                .get_user_by_username("administrator")
-                .unwrap()
-                .expect("admin exists");
-            assert_eq!(admin.access_level, 90);
-        }
-
-        // Reopen existing db
-        {
-            let db = Db::open(db_str).unwrap();
-            let admin = db
-                .get_user_by_username("administrator")
-                .unwrap()
-                .expect("admin exists");
-            assert_eq!(admin.access_level, 90);
-        }
-
-        let _ = std::fs::remove_file(db_path);
-    }
-
-    #[test]
-    fn test_effective_access_and_private_projects() {
-        let db = Db::open_in_memory().unwrap();
-        let pub_id = db
-            .create_project("PublicProj", 10, 10, "desc", true)
-            .unwrap();
-        let priv_id = db
-            .create_project("PrivateProj", 10, 50, "desc", true)
-            .unwrap();
-
-        let rep_id = db
-            .create_user("alice", "Alice", "a@x.com", "pw", 25, true, false)
-            .unwrap();
-        let mgr_id = db
-            .create_user("bob", "Bob", "b@x.com", "pw", 70, true, false)
-            .unwrap();
-        let alice = db.get_user_by_id(rep_id).unwrap().unwrap();
-        let bob = db.get_user_by_id(mgr_id).unwrap().unwrap();
-
-        assert_eq!(db.effective_access_level(&alice, pub_id).unwrap(), 25);
-        assert_eq!(db.effective_access_level(&alice, priv_id).unwrap(), 0);
-        assert_eq!(db.effective_access_level(&bob, priv_id).unwrap(), 70);
-
-        // Grant Alice Developer (55) on PrivateProj
-        db.set_project_user(priv_id, alice.id, 55).unwrap();
-        assert_eq!(db.effective_access_level(&alice, priv_id).unwrap(), 55);
-
-        // Disabled project returns 0 even with explicit override
-        db.update_project(priv_id, "PrivateProj", 10, false, 50, "desc", true)
-            .unwrap();
-        assert_eq!(db.effective_access_level(&alice, priv_id).unwrap(), 0);
-        assert_eq!(db.effective_access_level(&bob, priv_id).unwrap(), 0);
-    }
-
-    #[test]
-    fn test_hierarchy_cycle_prevention_and_category_inheritance() {
-        let db = Db::open_in_memory().unwrap();
-        let p1 = db.create_project("Parent", 10, 10, "", true).unwrap();
-        let p2 = db.create_project("Child", 10, 10, "", false).unwrap();
-
-        db.add_subproject(p1, p2, true).unwrap();
-        // Self-parent and reverse cycle must fail
-        assert!(db.add_subproject(p1, p1, true).is_err());
-        assert!(db.add_subproject(p2, p1, true).is_err());
-
-        db.add_category(p1, "Backend", 0).unwrap();
-        db.add_category(p2, "UI", 0).unwrap();
-
-        // Child inherits from Parent (which inherits Global 'General')
-        let child_cats = db.list_effective_categories(p2).unwrap();
-        let names: Vec<_> = child_cats.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"General"));
-        assert!(names.contains(&"Backend"));
-        assert!(names.contains(&"UI"));
-    }
-
-    #[test]
-    fn test_project_crud_and_validation() {
-        let db = Db::open_in_memory().unwrap();
-
-        // Empty project name fails
-        assert!(db.create_project("  ", 10, 10, "desc", true).is_err());
-
-        // Create project successfully
-        let pid = db
-            .create_project("Project Alpha", 10, 10, "First project", true)
-            .unwrap();
-        assert!(pid > 0);
-
-        // Duplicate name fails
-        assert!(db
-            .create_project("Project Alpha", 10, 10, "Duplicate", true)
-            .is_err());
-
-        // Get by ID
-        let proj = db.get_project_by_id(pid).unwrap().unwrap();
-        assert_eq!(proj.id, pid);
-        assert_eq!(proj.name, "Project Alpha");
-        assert_eq!(proj.status, 10);
-        assert_eq!(proj.enabled, 1);
-        assert_eq!(proj.view_state, 10);
-        assert_eq!(proj.description, "First project");
-        assert_eq!(proj.inherit_global, 1);
-
-        // Update project
-        assert!(db
-            .update_project(
-                pid,
-                "Project Alpha Updated",
-                30,
-                false,
-                50,
-                "Updated desc",
-                false
-            )
-            .is_ok());
-        let updated = db.get_project_by_id(pid).unwrap().unwrap();
-        assert_eq!(updated.name, "Project Alpha Updated");
-        assert_eq!(updated.status, 30);
-        assert_eq!(updated.enabled, 0);
-        assert_eq!(updated.view_state, 50);
-        assert_eq!(updated.description, "Updated desc");
-        assert_eq!(updated.inherit_global, 0);
-
-        // Update nonexistent project fails
-        assert!(db
-            .update_project(9999, "Nonexistent", 10, true, 10, "", true)
-            .is_err());
-        // Update with empty name fails
-        assert!(db.update_project(pid, "", 10, true, 10, "", true).is_err());
-
-        // Add a project-specific category and verify delete_project cleans it up
-        let p_cat = db.add_category(pid, "Project-Specific Cat", 0).unwrap();
-        assert!(db.get_category_by_id(p_cat).unwrap().is_some());
-
-        // Delete project
-        assert!(db.delete_project(pid).is_ok());
-        assert!(db.get_project_by_id(pid).unwrap().is_none());
-        assert!(db.delete_project(pid).is_err());
-
-        // Verify project-specific category was deleted
-        assert!(db.get_category_by_id(p_cat).unwrap().is_none());
-        // Verify global category General (project_id = 0) is still intact
-        let global_cats = db.list_effective_categories(0).unwrap();
-        assert!(global_cats.iter().any(|c| c.name == "General"));
-    }
-
-    #[test]
-    fn test_subproject_hierarchy_multi_level_cycle_prevention() {
-        let db = Db::open_in_memory().unwrap();
-        let p1 = db.create_project("A", 10, 10, "", true).unwrap();
-        let p2 = db.create_project("B", 10, 10, "", true).unwrap();
-        let p3 = db.create_project("C", 10, 10, "", true).unwrap();
-
-        // A -> B -> C
-        db.add_subproject(p1, p2, true).unwrap();
-        db.add_subproject(p2, p3, true).unwrap();
-
-        // Adding C -> A would form A -> B -> C -> A cycle, must fail
-        assert!(db.add_subproject(p3, p1, true).is_err());
-
-        // Adding nonexistent project fails
-        assert!(db.add_subproject(p1, 9999, true).is_err());
-        assert!(db.add_subproject(9999, p1, true).is_err());
-
-        // Remove subproject
-        assert!(db.remove_subproject(p2, p3).is_ok());
-        // After removing B -> C, C -> A is now allowed!
-        assert!(db.add_subproject(p3, p1, true).is_ok());
-    }
-
-    #[test]
-    fn test_project_user_management_and_overrides() {
-        let db = Db::open_in_memory().unwrap();
-        let pid = db.create_project("SecuredProj", 10, 50, "", true).unwrap();
-        let uid = db
-            .create_user("charlie", "Charlie", "c@x.com", "pw", 10, true, false)
-            .unwrap();
-        let user = db.get_user_by_id(uid).unwrap().unwrap();
-
-        // Initially Viewer (10) has no access to private project
-        assert_eq!(db.effective_access_level(&user, pid).unwrap(), 0);
-
-        // Assign Developer (55)
-        assert!(db.set_project_user(pid, uid, 55).is_ok());
-        assert_eq!(db.effective_access_level(&user, pid).unwrap(), 55);
-
-        // Update to Manager (70)
-        assert!(db.set_project_user(pid, uid, 70).is_ok());
-        assert_eq!(db.effective_access_level(&user, pid).unwrap(), 70);
-
-        // Remove user from project
-        assert!(db.remove_project_user(pid, uid).is_ok());
-        assert_eq!(db.effective_access_level(&user, pid).unwrap(), 0);
-
-        // Nonexistent project or user fails
-        assert!(db.set_project_user(9999, uid, 55).is_err());
-        assert!(db.set_project_user(pid, 9999, 55).is_err());
-    }
-
-    #[test]
-    fn test_effective_access_level_rules() {
-        let db = Db::open_in_memory().unwrap();
-        let pub_id = db.create_project("Pub", 10, 10, "", true).unwrap();
-        let priv_id = db.create_project("Priv", 10, 50, "", true).unwrap();
-        let disabled_id = db.create_project("Disabled", 10, 10, "", true).unwrap();
-        db.update_project(disabled_id, "Disabled", 10, false, 10, "", true)
-            .unwrap();
-
-        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
-        let dev_id = db
-            .create_user("dev", "Dev", "d@x.com", "pw", 55, true, false)
-            .unwrap();
-        let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
-        let mgr_id = db
-            .create_user("mgr", "Mgr", "m@x.com", "pw", 70, true, false)
-            .unwrap();
-        let mgr = db.get_user_by_id(mgr_id).unwrap().unwrap();
-
-        // Rule 1: project_id == 0 returns user.access_level
-        assert_eq!(db.effective_access_level(&admin, 0).unwrap(), 90);
-        assert_eq!(db.effective_access_level(&dev, 0).unwrap(), 55);
-        assert_eq!(db.effective_access_level(&mgr, 0).unwrap(), 70);
-
-        // Rule 2: Administrator always gets 90
-        assert_eq!(db.effective_access_level(&admin, pub_id).unwrap(), 90);
-        assert_eq!(db.effective_access_level(&admin, priv_id).unwrap(), 90);
-        assert_eq!(db.effective_access_level(&admin, disabled_id).unwrap(), 90);
-
-        // Disabled project returns 0 for non-administrator
-        assert_eq!(db.effective_access_level(&dev, disabled_id).unwrap(), 0);
-        assert_eq!(db.effective_access_level(&mgr, disabled_id).unwrap(), 0);
-
-        // Nonexistent project returns 0 for non-administrator
-        assert_eq!(db.effective_access_level(&dev, 99999).unwrap(), 0);
-
-        // auth module wrapper
-        assert_eq!(
-            crate::auth::effective_access_level(&db, &dev, pub_id).unwrap(),
-            55
-        );
-    }
-
-    #[test]
-    fn test_list_visible_projects_and_depths() {
-        let db = Db::open_in_memory().unwrap();
-        // Create tree:
-        // P_Parent (Public)
-        //   -> P_Child (Public)
-        //        -> P_Grandchild (Public)
-        // P_Private (Private)
-        //   -> P_PrivateSub (Public)
-        let p_parent = db.create_project("Proj Parent", 10, 10, "", true).unwrap();
-        let p_child = db.create_project("Proj Child", 10, 10, "", true).unwrap();
-        let p_grandchild = db
-            .create_project("Proj Grandchild", 10, 10, "", true)
-            .unwrap();
-        db.add_subproject(p_parent, p_child, true).unwrap();
-        db.add_subproject(p_child, p_grandchild, true).unwrap();
-
-        let p_priv = db.create_project("Proj Priv", 10, 50, "", true).unwrap();
-        let p_priv_sub = db
-            .create_project("Proj Priv Sub", 10, 10, "", true)
-            .unwrap();
-        db.add_subproject(p_priv, p_priv_sub, true).unwrap();
-
-        let rep_id = db
-            .create_user("rep", "Rep", "r@x.com", "pw", 25, true, false)
-            .unwrap();
-        let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
-
-        let visible = db.list_visible_projects(&rep).unwrap();
-        let vis_tuples: Vec<(&str, usize)> =
-            visible.iter().map(|(p, d)| (p.name.as_str(), *d)).collect();
-
-        // P_Parent (0) -> P_Child (1) -> P_Grandchild (2)
-        // P_Priv is hidden from rep, so P_Priv_Sub becomes root (depth 0)
-        assert!(vis_tuples.contains(&("Proj Parent", 0)));
-        assert!(vis_tuples.contains(&("Proj Child", 1)));
-        assert!(vis_tuples.contains(&("Proj Grandchild", 2)));
-        assert!(vis_tuples.contains(&("Proj Priv Sub", 0)));
-        assert!(!vis_tuples.iter().any(|(n, _)| *n == "Proj Priv"));
-
-        // Admin sees all, including P_Priv at depth 0 and P_Priv_Sub at depth 1
-        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
-        let admin_visible = db.list_visible_projects(&admin).unwrap();
-        let admin_tuples: Vec<(&str, usize)> = admin_visible
-            .iter()
-            .map(|(p, d)| (p.name.as_str(), *d))
-            .collect();
-        assert!(admin_tuples.contains(&("Proj Priv", 0)));
-        assert!(admin_tuples.contains(&("Proj Priv Sub", 1)));
-    }
-
-    #[test]
-    fn test_category_crud_operations() {
-        let db = Db::open_in_memory().unwrap();
-        let pid = db.create_project("CatProj", 10, 10, "", true).unwrap();
-
-        // Empty category name fails
-        assert!(db.add_category(pid, "  ", 0).is_err());
-
-        // Add category
-        let cid = db.add_category(pid, "Database", 0).unwrap();
-        assert!(cid > 0);
-
-        // Duplicate category in same project fails
-        assert!(db.add_category(pid, "Database", 0).is_err());
-
-        // Update category
-        assert!(db.update_category(cid, "Database Engine", 0).is_ok());
-        // Update nonexistent category fails
-        assert!(db.update_category(9999, "None", 0).is_err());
-
-        // Delete category
-        assert!(db.delete_category(cid).is_ok());
-        // Delete nonexistent category fails
-        assert!(db.delete_category(cid).is_err());
-    }
-
-    #[test]
-    fn test_version_crud_and_ordering() {
-        let db = Db::open_in_memory().unwrap();
-        let pid = db.create_project("VerProj", 10, 10, "", true).unwrap();
-
-        // Empty version fails
-        assert!(db.add_version(pid, "   ", "desc", true, false).is_err());
-
-        // Add versions
-        let v1 = db
-            .add_version(pid, "1.0.0", "First release", true, false)
-            .unwrap();
-        let v2 = db
-            .add_version(pid, "2.0.0", "Major update", false, false)
-            .unwrap();
-        assert!(v1 > 0);
-        assert!(v2 > 0);
-
-        // Duplicate version in same project fails
-        assert!(db.add_version(pid, "1.0.0", "Dup", true, false).is_err());
-
-        // List versions
-        let versions = db.list_versions(pid).unwrap();
-        assert_eq!(versions.len(), 2);
-        let ver_names: Vec<&str> = versions.iter().map(|v| v.version.as_str()).collect();
-        assert!(ver_names.contains(&"1.0.0"));
-        assert!(ver_names.contains(&"2.0.0"));
-
-        // Update version
-        assert!(db
-            .update_version(v2, "2.0.0-rc1", "Release candidate", true, false)
-            .is_ok());
-        let updated_versions = db.list_versions(pid).unwrap();
-        assert!(updated_versions.iter().any(|v| v.version == "2.0.0-rc1"));
-
-        // Update nonexistent fails
-        assert!(db.update_version(9999, "none", "", true, false).is_err());
-
-        // Delete version
-        assert!(db.delete_version(v1).is_ok());
-        assert_eq!(db.list_versions(pid).unwrap().len(), 1);
-        // Delete nonexistent fails
-        assert!(db.delete_version(v1).is_err());
-    }
-
-    #[test]
-    fn test_bug_schema_bootstrap_and_crud() {
-        let db = Db::open_in_memory().unwrap();
-        let proj_id = db.create_project("TestProj", 10, 10, "", true).unwrap();
-        let uid = db
-            .create_user("alice", "Alice", "a@x.com", "pw", 25, true, false)
-            .unwrap();
-
-        let bug_id = db
-            .create_bug(
-                proj_id,
-                uid,
-                1,
-                "Test summary",
-                "Description here",
-                "Steps",
-                "Additional",
-                30,
-                50,
-                70,
-                "1.0",
-                "",
-                "",
-                "",
-                10,
-            )
-            .unwrap();
-        assert!(bug_id > 0);
-
-        let bug = db.get_bug(bug_id).unwrap().expect("bug exists");
-        assert_eq!(bug.summary, "Test summary");
-        assert_eq!(bug.status, 10); // new
-        assert_eq!(bug.priority, 30); // normal
-        assert_eq!(bug.severity, 50); // minor
-
-        let full = db.get_bug_full(bug_id).unwrap().expect("full bug");
-        assert_eq!(full.description, "Description here");
-        assert_eq!(full.steps_to_reproduce, "Steps");
-
-        let bugs = db.list_bugs(proj_id, 10, 0, 25).unwrap();
-        assert_eq!(bugs.len(), 1);
-
-        // Private bug filtering at SQL level
-        let priv_bug_id = db
-            .create_bug(
-                proj_id,
-                uid,
-                1,
-                "Secret bug",
-                "Private",
-                "",
-                "",
-                30,
-                50,
-                70,
-                "",
-                "",
-                "",
-                "",
-                50,
-            )
-            .unwrap();
-        assert!(priv_bug_id > 0);
-        // Viewer (10) only sees public bug
-        assert_eq!(db.list_bugs(proj_id, 10, 0, 25).unwrap().len(), 1);
-        // Developer (55) sees both
-        assert_eq!(db.list_bugs(proj_id, 55, 0, 25).unwrap().len(), 2);
-
-        // Update bug fields & verify history only records changed fields
-        let changed = db
-            .update_bug_fields(
-                bug_id,
-                uid,
-                BugUpdate {
-                    summary: Some("Updated summary".to_string()),
-                    priority: Some(30), // unchanged!
-                    severity: Some(60), // changed 50 -> 60
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        assert_eq!(changed.len(), 2);
-        assert!(changed.iter().any(|h| h.field_name == "summary"
-            && h.old_value == "Test summary"
-            && h.new_value == "Updated summary"));
-        assert!(changed
-            .iter()
-            .any(|h| h.field_name == "severity" && h.old_value == "50" && h.new_value == "60"));
-
-        db.delete_bug(bug_id).unwrap();
-        assert!(db.get_bug(bug_id).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_bug_status_workflow_and_history() {
-        let db = Db::open_in_memory().unwrap();
-        let proj_id = db.create_project("P", 10, 10, "", true).unwrap();
-        let uid = db
-            .create_user("dev", "Dev", "d@x.com", "pw", 55, true, false)
-            .unwrap();
-        let bug_id = db
-            .create_bug(
-                proj_id, uid, 1, "Summary", "Desc", "", "", 30, 50, 70, "", "", "", "", 10,
-            )
-            .unwrap();
-
-        // new -> resolved (with note)
-        db.change_bug_status(bug_id, uid, 80, 20, Some("Fixed it"))
-            .unwrap();
-        let bug = db.get_bug(bug_id).unwrap().unwrap();
-        assert_eq!(bug.status, 80);
-        assert_eq!(bug.resolution, 20);
-
-        let history = db.list_bug_history(bug_id).unwrap();
-        let status_change = history.iter().find(|h| h.field_name == "status").unwrap();
-        assert_eq!(status_change.old_value, "10");
-        assert_eq!(status_change.new_value, "80");
-
-        let notes = db.list_bugnotes(bug_id, 55).unwrap();
-        assert_eq!(notes.len(), 1);
-        assert_eq!(notes[0].note, "Fixed it");
-
-        // Private note filtering
-        db.add_bugnote(bug_id, uid, "Private internal note", 50)
-            .unwrap();
-        assert_eq!(db.list_bugnotes(bug_id, 25).unwrap().len(), 1);
-        assert_eq!(db.list_bugnotes(bug_id, 55).unwrap().len(), 2);
-
-        // closed -> cannot go to resolved directly
-        db.change_bug_status(bug_id, uid, 90, 20, None).unwrap();
-        assert!(db.change_bug_status(bug_id, uid, 80, 20, None).is_err());
-        // closed -> feedback (20) is allowed
-        assert!(db.change_bug_status(bug_id, uid, 20, 30, None).is_ok());
-    }
-
-    #[test]
-    fn test_bug_relationships_and_duplicate_reverse() {
-        let db = Db::open_in_memory().unwrap();
-        let proj_id = db.create_project("P", 10, 10, "", true).unwrap();
-        let uid = db
-            .create_user("dev", "Dev", "d@x.com", "pw", 55, true, false)
-            .unwrap();
-        let b1 = db
-            .create_bug(
-                proj_id, uid, 1, "Bug 1", "", "", "", 30, 50, 70, "", "", "", "", 10,
-            )
-            .unwrap();
-        let b2 = db
-            .create_bug(
-                proj_id, uid, 1, "Bug 2", "", "", "", 30, 50, 70, "", "", "", "", 10,
-            )
-            .unwrap();
-
-        // add duplicate_of relationship -> reverse must be auto-created
-        db.add_bug_relationship(b2, b1, 1).unwrap(); // b2 is duplicate_of b1
-        let rels = db.list_bug_relationships(b1).unwrap();
-        assert!(rels
-            .iter()
-            .any(|r| r.relationship_type == 2 && r.destination_bug_id == b2)); // b1 has_duplicate b2
-        assert_eq!(db.get_bug(b2).unwrap().unwrap().duplicate_id, b1);
-
-        // Deleting one side deletes both sides
-        let rel_on_b1 = rels[0].id;
-        db.delete_bug_relationship(rel_on_b1).unwrap();
-        assert!(db.list_bug_relationships(b1).unwrap().is_empty());
-        assert!(db.list_bug_relationships(b2).unwrap().is_empty());
-        assert_eq!(db.get_bug(b2).unwrap().unwrap().duplicate_id, 0);
-
-        // add related_to -> no reverse auto-created
-        db.add_bug_relationship(b1, b2, 0).unwrap();
-        let rels2 = db.list_bug_relationships(b2).unwrap();
-        assert!(!rels2
-            .iter()
-            .any(|r| r.source_bug_id == b2 && r.relationship_type == 0));
-    }
-
-    #[test]
-    fn test_bug_file_attachment_inline_and_cascade() {
-        let db = Db::open_in_memory().unwrap();
-        let proj_id = db.create_project("P", 10, 10, "", true).unwrap();
-        let uid = db
-            .create_user("rep", "Rep", "r@x.com", "pw", 25, true, false)
-            .unwrap();
-        let bug_id = db
-            .create_bug(
-                proj_id, uid, 1, "Bug", "", "", "", 30, 50, 70, "", "", "", "", 10,
-            )
-            .unwrap();
-
-        let content = b"hello file".to_vec();
-        let fid = db
-            .add_bug_file(bug_id, uid, "test.txt", "text/plain", content.clone(), "")
-            .unwrap();
-        assert!(fid > 0);
-
-        let files = db.list_bug_files(bug_id).unwrap();
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].filename, "test.txt");
-        assert_eq!(files[0].filesize, 10);
-
-        let (_, fetched) = db.get_bug_file(fid, "").unwrap().unwrap();
-        assert_eq!(fetched, content);
-
-        db.delete_bug_file(fid, "").unwrap();
-        assert!(db.list_bug_files(bug_id).unwrap().is_empty());
-
-        // Cascade: deleting the bug removes all attachments
-        let fid2 = db
-            .add_bug_file(bug_id, uid, "test2.txt", "text/plain", b"data".to_vec(), "")
-            .unwrap();
-        assert!(fid2 > 0);
-        db.delete_bug(bug_id).unwrap();
-        assert!(db.get_bug_file(fid2, "").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_tags_custom_fields_filters_search_and_monitors() {
-        let db = Db::open_in_memory().unwrap();
-        let proj_id = db.create_project("Proj3", 10, 10, "", true).unwrap();
-        let uid = db
-            .create_user("dev3", "Dev 3", "d3@x.com", "pw", 55, true, false)
-            .unwrap();
-        let user = db.get_user_by_id(uid).unwrap().unwrap();
-
-        let b1 = db
-            .create_bug(
-                proj_id,
-                uid,
-                1,
-                "Memory leak in parser",
-                "Heap grows unbounded",
-                "",
-                "",
-                40,
-                60,
-                10,
-                "1.0",
-                "",
-                "",
-                "",
-                10,
-            )
-            .unwrap();
-        let b2 = db
-            .create_bug(
-                proj_id,
-                uid,
-                1,
-                "UI button alignment",
-                "CSS flex issue",
-                "",
-                "",
-                20,
-                20,
-                10,
-                "1.0",
-                "",
-                "",
-                "",
-                10,
-            )
-            .unwrap();
-
-        // 1. Tags
-        let tag_id = db
-            .create_tag(uid, "memory", "Memory related issues")
-            .unwrap();
-        db.attach_tag_to_bug(b1, tag_id, uid).unwrap();
-        let b1_tags = db.list_bug_tags(b1).unwrap();
-        assert_eq!(b1_tags.len(), 1);
-        assert_eq!(b1_tags[0].tag_name, "memory");
-
-        // 2. Custom Fields
-        let cf_id = db
-            .create_custom_field(
-                "Environment URL",
-                0,
-                "",
-                "https://staging.local",
-                "",
-                3,
-                100,
-                false,
-                false,
-                true,
-                true,
-            )
-            .unwrap();
-        db.link_custom_field_to_project(cf_id, proj_id, 1).unwrap();
-
-        // Default value returned before explicit set
-        let cf_vals = db.get_custom_field_values_for_bug(b1).unwrap();
-        assert_eq!(cf_vals.len(), 1);
-        assert_eq!(cf_vals[0].value, "https://staging.local");
-
-        // Min length validation
-        assert!(db.set_custom_field_value(cf_id, b1, uid, "ab").is_err());
-        db.set_custom_field_value(cf_id, b1, uid, "https://prod.example.com")
-            .unwrap();
-        let cf_vals2 = db.get_custom_field_values_for_bug(b1).unwrap();
-        assert_eq!(cf_vals2[0].value, "https://prod.example.com");
-
-        // History recorded for custom field change
-        let hist = db.list_bug_history(b1).unwrap();
-        assert!(hist.iter().any(
-            |h| h.field_name == "Environment URL" && h.new_value == "https://prod.example.com"
-        ));
-
-        // 3. Monitors
-        db.add_bug_monitor(b2, uid).unwrap();
-        assert_eq!(db.list_bug_monitors(b2).unwrap().len(), 1);
-
-        // 4. Full-text Search & Filtering
-        let by_kw = db
-            .filter_bugs(
-                &BugFilter {
-                    project_id: Some(proj_id),
-                    search: Some("unbounded".to_string()),
-                    ..Default::default()
-                },
-                &user,
-            )
-            .unwrap();
-        assert_eq!(by_kw.len(), 1);
-        assert_eq!(by_kw[0].id, b1);
-
-        let by_tag = db
-            .filter_bugs(
-                &BugFilter {
-                    project_id: Some(proj_id),
-                    tag_id: Some(tag_id),
-                    ..Default::default()
-                },
-                &user,
-            )
-            .unwrap();
-        assert_eq!(by_tag.len(), 1);
-        assert_eq!(by_tag[0].id, b1);
-
-        let by_monitor = db
-            .filter_bugs(
-                &BugFilter {
-                    project_id: Some(proj_id),
-                    monitored_by: Some(uid),
-                    ..Default::default()
-                },
-                &user,
-            )
-            .unwrap();
-        assert_eq!(by_monitor.len(), 1);
-        assert_eq!(by_monitor[0].id, b2);
-
-        // 5. Saved Filters
-        let filter_id = db
-            .save_filter(
-                uid,
-                proj_id,
-                true,
-                "High Priority Memory",
-                &BugFilter {
-                    project_id: Some(proj_id),
-                    tag_id: Some(tag_id),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let visible = db.list_visible_filters(uid, proj_id).unwrap();
-        assert_eq!(visible.len(), 1);
-        let (sf, bf) = db.get_filter(filter_id).unwrap().unwrap();
-        assert_eq!(sf.name, "High Priority Memory");
-        assert_eq!(bf.tag_id, Some(tag_id));
-    }
-
-    #[test]
-    fn test_email_queue_time_tracking_and_news() {
-        let db = Db::open_in_memory().unwrap();
-        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
-        let dev_id = db
-            .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
-            .unwrap();
-        let watcher_id = db
-            .create_user(
-                "watcher",
-                "Watcher",
-                "watcher@example.com",
-                "pw",
-                25,
-                true,
-                false,
-            )
-            .unwrap();
-        let proj_id = db.create_project("Core", 10, 10, "desc", true).unwrap();
-
-        // 1. Creating bug queues email to reporter (admin: root@localhost)
-        let bug_id = db
-            .create_bug(
-                proj_id,
-                admin.id,
-                1,
-                "Null pointer in parser",
-                "Crash on empty token",
-                "",
-                "",
-                30,
-                50,
-                10,
-                "1.0",
-                "",
-                "",
-                "",
-                10,
-            )
-            .unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        assert_eq!(emails.len(), 1);
-        assert_eq!(emails[0].email, "root@localhost");
-        assert!(emails[0].subject.contains("Null pointer in parser"));
-
-        // Flush queue
-        assert_eq!(db.flush_email_queue().unwrap(), 1);
-        assert!(db.list_queued_emails().unwrap().is_empty());
-
-        // 2. Add monitor + assign to dev1 -> queues emails to reporter, handler, and monitor
-        db.add_bug_monitor(bug_id, watcher_id).unwrap();
-        db.assign_bug(bug_id, admin.id, dev_id).unwrap();
-        let emails2 = db.list_queued_emails().unwrap();
-        let addrs: Vec<&str> = emails2.iter().map(|e| e.email.as_str()).collect();
-        assert!(addrs.contains(&"root@localhost"));
-        assert!(addrs.contains(&"dev1@example.com"));
-        assert!(addrs.contains(&"watcher@example.com"));
-
-        // 3. Time tracking via bugnote
-        db.add_bugnote_with_time(bug_id, dev_id, "Investigated and fixed", 10, 95)
-            .unwrap();
-        let entries = db.list_time_tracking(proj_id).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].minutes, 95);
-        assert_eq!(entries[0].username, "dev1");
-
-        // History recorded for time_tracking
-        let hist = db.list_bug_history(bug_id).unwrap();
-        assert!(hist
-            .iter()
-            .any(|h| h.field_name == "time_tracking" && h.new_value == "95"));
-
-        // 4. Project News & visibility
-        let n_pub = db
-            .create_news(
-                proj_id,
-                admin.id,
-                "v1.0 Released",
-                "Release notes here",
-                true,
-                10,
-            )
-            .unwrap();
-        let _n_priv = db
-            .create_news(
-                proj_id,
-                admin.id,
-                "Internal Security Audit",
-                "Secret body",
-                false,
-                50,
-            )
-            .unwrap();
-
-        // Viewer (10) only sees public news
-        let viewer_news = db.list_news(proj_id, 10).unwrap();
-        assert_eq!(viewer_news.len(), 1);
-        assert_eq!(viewer_news[0].id, n_pub);
-
-        // Developer (55) sees both public and private news
-        let dev_news = db.list_news(proj_id, 55).unwrap();
-        assert_eq!(dev_news.len(), 2);
-    }
-
-    #[test]
-    fn test_api_tokens_and_plugin_system() {
-        let db = Db::open_in_memory().unwrap();
-        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
-
-        // 1. Create and authenticate API token
-        let (tok_id, raw_tok) = db.create_api_token(admin.id, "CI Pipeline").unwrap();
-        assert_eq!(raw_tok.len(), 64);
-
-        let tokens = db.list_api_tokens(admin.id).unwrap();
-        assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].name, "CI Pipeline");
-        assert_eq!(tokens[0].date_used, 0);
-        // Raw token is never stored in DB
-        assert_ne!(tokens[0].hash, raw_tok);
-
-        let authed = db.authenticate_api_token(&raw_tok).unwrap().unwrap();
-        assert_eq!(authed.id, admin.id);
-        assert!(db.list_api_tokens(admin.id).unwrap()[0].date_used > 0);
-
-        // Revoke token -> subsequent auth fails
-        assert!(db.revoke_api_token(tok_id, admin.id).unwrap());
-        assert!(db.authenticate_api_token(&raw_tok).unwrap().is_none());
-
-        // 2. Plugin system & protected plugin guard
-        let plugins = db.list_plugins().unwrap();
-        assert_eq!(plugins.len(), 2);
-        assert!(db.is_plugin_enabled("MantisCoreFormatting"));
-        assert!(db.is_plugin_enabled("EventAuditLog"));
-
-        // Protected plugin cannot be disabled
-        assert!(db
-            .set_plugin_enabled("MantisCoreFormatting", false)
-            .is_err());
-
-        // EventAuditLog increments plugin_event_audit_count when enabled
-        let proj_id = db.create_project("PluginProj", 10, 10, "", true).unwrap();
-        let bug_id = db
-            .create_bug(
-                proj_id,
-                admin.id,
-                1,
-                "Test plugin event",
-                "desc",
-                "",
-                "",
-                30,
-                50,
-                10,
-                "",
-                "",
-                "",
-                "",
-                10,
-            )
-            .unwrap();
-        assert_eq!(
-            db.get_config("plugin_event_audit_count", 0, 0)
-                .unwrap()
-                .as_deref(),
-            Some("1")
-        );
-
-        // Disable EventAuditLog -> subsequent events do not increment counter
-        db.set_plugin_enabled("EventAuditLog", false).unwrap();
-        assert!(!db.is_plugin_enabled("EventAuditLog"));
-        db.add_bugnote(bug_id, admin.id, "Note while plugin disabled", 10)
-            .unwrap();
-        assert_eq!(
-            db.get_config("plugin_event_audit_count", 0, 0)
-                .unwrap()
-                .as_deref(),
-            Some("1")
-        );
-    }
-
-    #[test]
-    fn test_email_templates_detailed() {
-        let db = Db::open_in_memory().unwrap();
-        let admin = db.get_user_by_username("administrator").unwrap().unwrap();
-        let dev_id = db
-            .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
-            .unwrap();
-        let proj_id = db
-            .create_project("Core System", 10, 10, "desc", true)
-            .unwrap();
-
-        // 1. Create bug -> New Issue email
-        let bug_id = db
-            .create_bug(
-                proj_id,
-                admin.id,
-                1,
-                "Null pointer in parser",
-                "Crash on empty token",
-                "1. Open page\n2. Click filter",
-                "",
-                30,
-                50,
-                10,
-                "1.0",
-                "",
-                "",
-                "",
-                10,
-            )
-            .unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        assert_eq!(emails.len(), 1);
-        assert_eq!(
-            emails[0].subject,
-            format!("[Issue #{:07}] New: Null pointer in parser", bug_id)
-        );
-        assert!(emails[0]
-            .body
-            .contains("The following issue has been reported."));
-        assert!(emails[0].body.contains("Project:      Core System"));
-        assert!(emails[0]
-            .body
-            .contains("Summary:      Null pointer in parser"));
-        assert!(emails[0].body.contains("Reporter:     administrator"));
-        assert!(emails[0].body.contains("Status:       New (10)"));
-        assert!(emails[0]
-            .body
-            .contains("Description:\nCrash on empty token"));
-        assert!(emails[0]
-            .body
-            .contains("Steps to Reproduce:\n1. Open page\n2. Click filter"));
-
-        db.flush_email_queue().unwrap();
-
-        // 2. Assign bug -> Assigned email
-        db.assign_bug(bug_id, admin.id, dev_id).unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        assert_eq!(emails.len(), 2); // reporter & handler
-        assert_eq!(
-            emails[0].subject,
-            format!(
-                "[Issue #{:07}] Assigned to dev1: Null pointer in parser",
-                bug_id
-            )
-        );
-        assert!(emails[0]
-            .body
-            .contains("The following issue has been assigned to dev1"));
-        assert!(emails[0].body.contains("Assigned to:  dev1 (Dev One)"));
-        assert!(emails[0].body.contains("Assigned by:  administrator"));
-
-        db.flush_email_queue().unwrap();
-
-        // 3. Status change -> Status Changed email (only 1 email per recipient, no duplicate note email)
-        db.change_bug_status(bug_id, dev_id, 80, 20, Some("Fixed in patch v1.2"))
-            .unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        assert_eq!(emails.len(), 2); // reporter & handler, neither receives duplicate note email
-        assert!(emails
-            .iter()
-            .all(|e| e.subject.contains("Status changed to Resolved")));
-        let status_email = &emails[0];
-        assert_eq!(
-            status_email.subject,
-            format!(
-                "[Issue #{:07}] Status changed to Resolved: Null pointer in parser",
-                bug_id
-            )
-        );
-        assert!(status_email
-            .body
-            .contains("The following issue status has been updated."));
-        assert!(status_email
-            .body
-            .contains("Status:       Assigned (50) -> Resolved (80)"));
-        assert!(status_email
-            .body
-            .contains("Resolution:   Open (10) -> Fixed (20)"));
-        assert!(status_email.body.contains("Updated by:   dev1 (Dev One)"));
-        assert!(status_email
-            .body
-            .contains("Note / Comment:\nFixed in patch v1.2"));
-
-        db.flush_email_queue().unwrap();
-
-        // 4. Note added -> Note added email
-        db.add_bugnote(bug_id, admin.id, "Please verify on staging", 10)
-            .unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        let note_email = emails
-            .iter()
-            .find(|e| e.subject.contains("Note added"))
-            .expect("Note added email not found");
-        assert_eq!(
-            note_email.subject,
-            format!(
-                "[Issue #{:07}] Note added by administrator: Null pointer in parser",
-                bug_id
-            )
-        );
-        assert!(note_email
-            .body
-            .contains("A note has been added to the following issue."));
-        assert!(note_email.body.contains("Note Author:  administrator"));
-        assert!(note_email.body.contains("Note:\nPlease verify on staging"));
-
-        db.flush_email_queue().unwrap();
-
-        // 5. Unassigning issue (handler_id = 0)
-        db.assign_bug(bug_id, admin.id, 0).unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        assert_eq!(
-            emails[0].subject,
-            format!("[Issue #{:07}] Unassigned: Null pointer in parser", bug_id)
-        );
-        assert!(emails[0]
-            .body
-            .contains("The following issue has been unassigned."));
-        assert!(emails[0].body.contains("Previous:     dev1 (Dev One)"));
-        assert!(emails[0].body.contains("Unassigned by:administrator"));
-
-        db.flush_email_queue().unwrap();
-
-        // 6. User with empty realname (should format as username, no empty parentheses)
-        let plain_user_id = db
-            .create_user("plainuser", "", "plain@example.com", "pw", 55, true, false)
-            .unwrap();
-        db.assign_bug(bug_id, admin.id, plain_user_id).unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        assert_eq!(
-            emails[0].subject,
-            format!(
-                "[Issue #{:07}] Assigned to plainuser: Null pointer in parser",
-                bug_id
-            )
-        );
-        assert!(emails[0].body.contains("Assigned to:  plainuser\n"));
-
-        db.flush_email_queue().unwrap();
-
-        // 7. Private note permissions: reporter with access 25 must NOT receive private note email
-        let reporter_user_id = db
-            .create_user(
-                "lowreporter",
-                "Low Reporter",
-                "low@example.com",
-                "pw",
-                25,
-                true,
-                false,
-            )
-            .unwrap();
-        let priv_bug_id = db
-            .create_bug(
-                proj_id,
-                reporter_user_id,
-                1,
-                "Bug with private note",
-                "desc",
-                "",
-                "",
-                30,
-                50,
-                10,
-                "",
-                "",
-                "",
-                "",
-                10,
-            )
-            .unwrap();
-        db.assign_bug(priv_bug_id, admin.id, dev_id).unwrap();
-        db.flush_email_queue().unwrap();
-
-        // Add private note (view_state = 50)
-        db.add_bugnote(priv_bug_id, dev_id, "Secret internal discussion", 50)
-            .unwrap();
-        let emails = db.list_queued_emails().unwrap();
-        let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
-        // admin (90) and dev1 (55) can receive it, lowreporter (25) cannot!
-        assert!(!recipients.contains(&"low@example.com"));
-        assert!(recipients.contains(&"dev1@example.com"));
-
-        db.flush_email_queue().unwrap();
-
-        // 8. Subject header injection prevention: \r and \n are stripped
-        {
-            let conn = db.conn();
-            db.enqueue_email(
-                &conn,
-                "test@example.com",
-                "Header\r\nInjection: Bad",
-                "body",
-            )
-            .unwrap();
-        }
-        let emails = db.list_queued_emails().unwrap();
-        assert_eq!(emails[0].subject, "HeaderInjection: Bad");
-    }
-}
+#[path = "db_test.rs"]
+mod tests;

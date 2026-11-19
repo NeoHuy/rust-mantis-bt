@@ -271,16 +271,14 @@ fn test_jira_status_mapping_serialization() {
 }
 
 #[test]
-fn test_bug_enums_display_name() {
-    assert_eq!(BugStatus::New.display_name(), "New");
-    assert_eq!(BugStatus::Feedback.display_name(), "Feedback");
-    assert_eq!(BugStatus::Acknowledged.display_name(), "Acknowledged");
-    assert_eq!(BugStatus::Confirmed.display_name(), "Confirmed");
-    assert_eq!(BugStatus::Assigned.display_name(), "Assigned");
-    assert_eq!(BugStatus::Resolved.display_name(), "Resolved");
-    assert_eq!(BugStatus::Closed.display_name(), "Closed");
-    assert_eq!(BugStatus::display_name_or(80), "Resolved");
-    assert_eq!(BugStatus::display_name_or(999), "999");
+fn test_bug_enums_as_str() {
+    assert_eq!(BugStatus::New.as_str(), "new");
+    assert_eq!(BugStatus::Feedback.as_str(), "feedback");
+    assert_eq!(BugStatus::Acknowledged.as_str(), "acknowledged");
+    assert_eq!(BugStatus::Confirmed.as_str(), "confirmed");
+    assert_eq!(BugStatus::Assigned.as_str(), "assigned");
+    assert_eq!(BugStatus::Resolved.as_str(), "resolved");
+    assert_eq!(BugStatus::Closed.as_str(), "closed");
 
     assert_eq!(BugResolution::Open.as_str(), "open");
     assert_eq!(BugResolution::Fixed.as_str(), "fixed");

@@ -9,11 +9,28 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>);
+pub struct Db {
+    conn: Arc<Mutex<Connection>>,
+    base_url: Arc<String>,
+}
 
 impl Db {
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.0.lock().expect("db lock poisoned")
+        self.conn.lock().expect("db lock poisoned")
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn set_base_url(&mut self, url: impl Into<String>) {
+        self.base_url = Arc::new(url.into());
+    }
+
+    fn resolve_base_url() -> String {
+        let addr_str =
+            std::env::var("MANTIS_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+        std::env::var("MANTIS_BASE_URL").unwrap_or_else(|_| format!("http://{}", addr_str))
     }
 
     pub fn open(path: &str) -> rusqlite::Result<Self> {
@@ -23,7 +40,10 @@ impl Db {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self(Arc::new(Mutex::new(conn)));
+        let db = Self {
+            conn: Arc::new(Mutex::new(conn)),
+            base_url: Arc::new(Self::resolve_base_url()),
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -34,9 +54,32 @@ impl Db {
             "PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self(Arc::new(Mutex::new(conn)));
+        let db = Self {
+            conn: Arc::new(Mutex::new(conn)),
+            base_url: Arc::new(Self::resolve_base_url()),
+        };
         db.migrate()?;
         Ok(db)
+    }
+
+    pub fn from_conn(conn: Connection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+            base_url: Arc::new(Self::resolve_base_url()),
+        }
+    }
+
+    pub fn can_view_bug(user_id: i64, user_access: i32, bug: &Bug) -> bool {
+        if user_access < 10 {
+            return false;
+        }
+        if bug.view_state == 50 {
+            user_access >= 55
+                || user_id == bug.reporter_id
+                || (bug.handler_id > 0 && user_id == bug.handler_id)
+        } else {
+            true
+        }
     }
 
     pub fn migrate(&self) -> rusqlite::Result<()> {
@@ -688,6 +731,25 @@ impl Db {
         self.get_user_by_id(user_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Failed to retrieve newly created user.".to_string())
+    }
+
+    fn map_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
+        Ok(User {
+            id: row.get(0)?,
+            username: row.get(1)?,
+            realname: row.get(2)?,
+            email: row.get(3)?,
+            password: row.get(4)?,
+            enabled: row.get(5)?,
+            protected: row.get(6)?,
+            access_level: row.get(7)?,
+            login_count: row.get(8)?,
+            lost_password_request_count: row.get(9)?,
+            failed_login_count: row.get(10)?,
+            cookie_string: row.get(11)?,
+            last_visit: row.get(12)?,
+            date_created: row.get(13)?,
+        })
     }
 
     fn query_user_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<User>> {
@@ -2118,9 +2180,9 @@ impl Db {
 
         let project_name = Self::helper_project_name(&conn, project_id);
         let action_header = "The following issue has been SUBMITTED.";
-        if let Ok(body) = Self::build_mantis_email_body(&conn, bug_id, action_header, None) {
+        if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, None) {
             let subject = format!("[{} {:07}] New: {}", project_name, bug_id, trimmed_summary);
-            self.notify_bug_event(&conn, bug_id, reporter_id, &subject, &body);
+            self.notify_bug_event(&conn, bug_id, &subject, &body);
         }
 
         Ok(bug_id)
@@ -2518,7 +2580,7 @@ impl Db {
             .unwrap_or("(Unknown)");
 
         let (action_header, subject) = if bug.status != new_status {
-            let new_status_name = BugStatus::display_name_or(new_status);
+            let new_status_name = crate::views::bugs::status_label(new_status);
             let action_header = match new_status {
                 80 => "The following issue has been RESOLVED.",
                 90 => "The following issue has been CLOSED.",
@@ -2540,11 +2602,14 @@ impl Db {
                     project_name, bug_id, res_name, bug.summary
                 ),
             )
-        } else {
+        } else if note_id_opt.is_some() {
             (
                 "The following issue has been UPDATED.",
                 format!("[{} {:07}] Updated: {}", project_name, bug_id, bug.summary),
             )
+        } else {
+            // Nothing changed and no note added -> skip sending email
+            return Ok(());
         };
 
         let note_ctx = if let (Some(nid), Some(nt)) = (note_id_opt, note) {
@@ -2558,8 +2623,8 @@ impl Db {
             None
         };
 
-        if let Ok(body) = Self::build_mantis_email_body(&conn, bug_id, action_header, note_ctx) {
-            self.notify_bug_event(&conn, bug_id, user_id, &subject, &body);
+        if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, note_ctx) {
+            self.notify_bug_event(&conn, bug_id, &subject, &body);
         }
 
         Ok(())
@@ -2652,15 +2717,8 @@ impl Db {
             vec![]
         };
 
-        if let Ok(body) = Self::build_mantis_email_body(&conn, bug_id, action_header, None) {
-            self.notify_bug_event_with_extra(
-                &conn,
-                bug_id,
-                user_id,
-                &extra_recipients,
-                &subject,
-                &body,
-            );
+        if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, None) {
+            self.notify_bug_event_filtered(&conn, bug_id, 0, &extra_recipients, &subject, &body);
         }
 
         Ok(())
@@ -2741,7 +2799,8 @@ impl Db {
 
             let action_header = "A NOTE has been added to this issue.";
             let note_ctx = Some((note_id, actor_name, now, note));
-            let body = Self::build_mantis_email_body(conn, bug_id, action_header, note_ctx)
+            let body = db
+                .build_mantis_email_body(conn, bug_id, action_header, note_ctx)
                 .unwrap_or_default();
 
             let min_access = if view_state == 50 { 55 } else { 0 };
@@ -4158,43 +4217,43 @@ impl Db {
         match h.field_name.as_str() {
             "status" => (
                 "Status".to_string(),
-                Self::format_transition(&h.old_value, &h.new_value, |v| {
-                    BugStatus::from_i32(v)
-                        .map(|s| s.as_str())
-                        .unwrap_or("unknown")
-                }),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::status_label,
+                ),
             ),
             "resolution" => (
                 "Resolution".to_string(),
-                Self::format_transition(&h.old_value, &h.new_value, |v| {
-                    BugResolution::from_i32(v)
-                        .map(|r| r.as_str())
-                        .unwrap_or("unknown")
-                }),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::resolution_label,
+                ),
             ),
             "priority" => (
                 "Priority".to_string(),
-                Self::format_transition(&h.old_value, &h.new_value, |v| {
-                    BugPriority::from_i32(v)
-                        .map(|p| p.as_str())
-                        .unwrap_or("unknown")
-                }),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::priority_label,
+                ),
             ),
             "severity" => (
                 "Severity".to_string(),
-                Self::format_transition(&h.old_value, &h.new_value, |v| {
-                    BugSeverity::from_i32(v)
-                        .map(|s| s.as_str())
-                        .unwrap_or("unknown")
-                }),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::severity_label,
+                ),
             ),
             "reproducibility" => (
                 "Reproducibility".to_string(),
-                Self::format_transition(&h.old_value, &h.new_value, |v| {
-                    BugReproducibility::from_i32(v)
-                        .map(|r| r.as_str())
-                        .unwrap_or("unknown")
-                }),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::reproducibility_label,
+                ),
             ),
             "handler_id" => {
                 let old_id = h.old_value.parse::<i64>().unwrap_or(0);
@@ -4296,7 +4355,7 @@ impl Db {
              FROM mantis_bug_history_table h
              LEFT JOIN mantis_user_table u ON h.user_id = u.id
              WHERE h.bug_id = ?1
-             ORDER BY h.date_modified ASC, h.id ASC
+             ORDER BY h.date_modified DESC, h.id DESC
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![bug_id, max_rows as i64], |row| {
@@ -4327,10 +4386,12 @@ impl Db {
             }
             result.push(item);
         }
+        result.reverse();
         Ok(result)
     }
 
     pub fn build_mantis_email_body(
+        &self,
         conn: &Connection,
         bug_id: i64,
         action_header: &str,
@@ -4391,11 +4452,9 @@ impl Db {
         let date_submitted_str = crate::views::format_timestamp(bug.date_submitted);
         let last_updated_str = crate::views::format_timestamp(bug.last_updated);
 
-        let base_url = std::env::var("MANTIS_BASE_URL")
-            .unwrap_or_else(|_| "http://localhost:3000".to_string());
         let bug_url = format!(
             "{}/view_bug_page/{}",
-            base_url.trim_end_matches('/'),
+            self.base_url.trim_end_matches('/'),
             bug.id
         );
 
@@ -4552,30 +4611,10 @@ impl Db {
         &self,
         conn: &Connection,
         bug_id: i64,
-        _actor_id: i64,
         event_subject: &str,
         event_body: &str,
     ) {
         self.notify_bug_event_filtered(conn, bug_id, 0, &[], event_subject, event_body);
-    }
-
-    pub fn notify_bug_event_with_extra(
-        &self,
-        conn: &Connection,
-        bug_id: i64,
-        _actor_id: i64,
-        extra_recipients: &[i64],
-        event_subject: &str,
-        event_body: &str,
-    ) {
-        self.notify_bug_event_filtered(
-            conn,
-            bug_id,
-            0,
-            extra_recipients,
-            event_subject,
-            event_body,
-        );
     }
 
     pub fn notify_bug_event_filtered(
@@ -4592,27 +4631,21 @@ impl Db {
             _ => return,
         };
 
+        let needs_access_check = bug.view_state == 50 || min_access > 10;
         let can_receive = |u: &User| -> bool {
             if u.enabled == 0 || u.email.trim().is_empty() {
                 return false;
             }
-            let eff_access =
-                Self::query_effective_access_level(conn, u, bug.project_id).unwrap_or(0);
-
-            // If the bug itself is private, only developer+ (access >= 55) or direct reporter/handler may receive
-            if bug.view_state == 50
-                && eff_access < 55
-                && u.id != bug.reporter_id
-                && u.id != bug.handler_id
-            {
-                return false;
+            if needs_access_check {
+                let eff_access =
+                    Self::query_effective_access_level(conn, u, bug.project_id).unwrap_or(0);
+                if !Self::can_view_bug(u.id, eff_access, &bug) {
+                    return false;
+                }
+                if min_access > 10 && eff_access < min_access {
+                    return false;
+                }
             }
-
-            // If the event or note requires minimum access (e.g. private note)
-            if min_access > 10 && eff_access < min_access {
-                return false;
-            }
-
             true
         };
 
@@ -4642,23 +4675,17 @@ impl Db {
         }
 
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT u.id, u.email
+            "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected,
+                    u.access_level, u.login_count, u.lost_password_request_count, u.failed_login_count,
+                    u.cookie_string, u.last_visit, u.date_created
              FROM mantis_bug_monitor_table bm
              JOIN mantis_user_table u ON bm.user_id = u.id
              WHERE bm.bug_id = ?1 AND u.enabled != 0",
         ) {
-            if let Ok(rows) = stmt.query_map(params![bug_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            }) {
-                for (uid, email) in rows.flatten() {
-                    let trimmed = email.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if let Ok(Some(u)) = Self::query_user_by_id(conn, uid) {
-                        if can_receive(&u) {
-                            recipients.insert(trimmed.to_string());
-                        }
+            if let Ok(rows) = stmt.query_map(params![bug_id], Self::map_user_row) {
+                for u in rows.flatten() {
+                    if can_receive(&u) {
+                        recipients.insert(u.email.trim().to_string());
                     }
                 }
             }

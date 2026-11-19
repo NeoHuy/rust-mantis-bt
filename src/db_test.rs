@@ -1610,7 +1610,7 @@ fn test_jira_db_schema_migration_from_old_schema() {
          INSERT INTO mantis_jira_status_mapping_table VALUES ('Done', 80);"
     ).unwrap();
 
-    let db = Db(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+    let db = Db::from_conn(conn);
     db.migrate().unwrap();
 
     // Verify duplicates were purged and newest link remains
@@ -1748,12 +1748,12 @@ fn test_email_templates_detailed() {
     assert_eq!(emails.len(), 2); // reporter & handler, neither receives duplicate note email
     assert!(emails
         .iter()
-        .all(|e| e.subject.contains("Status changed to Resolved")));
+        .all(|e| e.subject.contains("Status changed to resolved")));
     let status_email = &emails[0];
     assert_eq!(
         status_email.subject,
         format!(
-            "[Core System {:07}] Status changed to Resolved: Null pointer in parser",
+            "[Core System {:07}] Status changed to resolved: Null pointer in parser",
             bug_id
         )
     );
@@ -2000,8 +2000,14 @@ fn test_email_review_comments_improvements() {
         .contains("Resolution changed to fixed: Reassignment Bug"));
     db.flush_email_queue().unwrap();
 
-    // B: Status same (50 -> 50) and resolution same (20 -> 20)
+    // B: Status same (50 -> 50) and resolution same (20 -> 20) with no note -> returns early without sending email!
     db.change_bug_status(bug_id, admin.id, 50, 20, None)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(emails.len(), 0);
+
+    // C: Status same (50 -> 50) and resolution same (20 -> 20) WITH note -> sends "Updated:" email
+    db.change_bug_status(bug_id, admin.id, 50, 20, Some("Note with update"))
         .unwrap();
     let emails = db.list_queued_emails().unwrap();
     assert!(emails[0].subject.contains("Updated: Reassignment Bug"));
@@ -2024,4 +2030,44 @@ fn test_email_review_comments_improvements() {
         "Email history must not reference private note ID"
     );
     assert!(!email_body.contains("Super secret dev note"));
+    db.flush_email_queue().unwrap();
+
+    // 5. Reporter of private bug CAN view and receive email for their own private bug
+    let rep_priv_bug = db
+        .create_bug(
+            proj_id,
+            reporter_id, // reporter has access 25
+            1,
+            "Private Reported Bug",
+            "Confidential by reporter",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50, // private bug
+        )
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    assert!(recipients.contains(&"rep1@example.com"));
+    let bug_obj = db.get_bug(rep_priv_bug).unwrap().unwrap();
+    assert!(Db::can_view_bug(reporter_id, 25, &bug_obj));
+    assert!(!Db::can_view_bug(999, 25, &bug_obj)); // another low-access user cannot view it
+    db.flush_email_queue().unwrap();
+
+    // 6. Test history limit keeps the NEWEST rows in email
+    for i in 1..=105 {
+        let note_text = format!("Sequential note {:03}", i);
+        db.change_bug_status(bug_id, admin.id, 50, 20, Some(&note_text))
+            .unwrap();
+    }
+    let emails = db.list_queued_emails().unwrap();
+    let latest_email = &emails[0];
+    // The email's Issue History table must include the newest changes (e.g. note 105)
+    assert!(latest_email.body.contains("Sequential note 105"));
 }

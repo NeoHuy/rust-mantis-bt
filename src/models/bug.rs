@@ -37,24 +37,6 @@ impl BugStatus {
             Self::Closed => "closed",
         }
     }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::New => "New",
-            Self::Feedback => "Feedback",
-            Self::Acknowledged => "Acknowledged",
-            Self::Confirmed => "Confirmed",
-            Self::Assigned => "Assigned",
-            Self::Resolved => "Resolved",
-            Self::Closed => "Closed",
-        }
-    }
-
-    pub fn display_name_or(v: i32) -> String {
-        Self::from_i32(v)
-            .map(|s| s.display_name().to_string())
-            .unwrap_or_else(|| v.to_string())
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

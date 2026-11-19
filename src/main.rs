@@ -33,9 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let addr_str = std::env::var("MANTIS_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-    let base_url =
-        std::env::var("MANTIS_BASE_URL").unwrap_or_else(|_| format!("http://{}", addr_str));
-    println!("Base URL for issue notifications: {}", base_url);
+    println!("Base URL for issue notifications: {}", db.base_url());
 
     let app = rust_mantis_bt::build_router(db);
 

@@ -7,6 +7,8 @@ pub mod mcp;
 pub mod models;
 pub mod views;
 
+pub const DEFAULT_MANTIS_ADDR: &str = "127.0.0.1:3000";
+
 pub fn build_router(db: db::Db) -> axum::Router {
     controllers::build_router(db)
 }

@@ -23,13 +23,9 @@ impl Db {
         &self.base_url
     }
 
-    pub fn set_base_url(&mut self, url: impl Into<String>) {
-        self.base_url = Arc::new(url.into());
-    }
-
     fn resolve_base_url() -> String {
         let addr_str =
-            std::env::var("MANTIS_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+            std::env::var("MANTIS_ADDR").unwrap_or_else(|_| crate::DEFAULT_MANTIS_ADDR.to_string());
         std::env::var("MANTIS_BASE_URL").unwrap_or_else(|_| format!("http://{}", addr_str))
     }
 
@@ -581,22 +577,7 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![username])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
@@ -622,22 +603,7 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![trimmed])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
@@ -762,22 +728,7 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
@@ -794,22 +745,7 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![cookie])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
@@ -899,24 +835,7 @@ impl Db {
         let mut stmt = conn.prepare(&sql)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            })
-        })?;
+        let rows = stmt.query_map(params_refs.as_slice(), Self::map_user_row)?;
         rows.collect()
     }
 
@@ -1404,22 +1323,7 @@ impl Db {
              ORDER BY u.username ASC",
         )?;
         let rows = stmt.query_map(params![project_id], |row| {
-            let user = User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            };
+            let user = Self::map_user_row(row)?;
             let access_level: i32 = row.get(14)?;
             Ok((user, access_level))
         })?;
@@ -4015,24 +3919,7 @@ impl Db {
              WHERE bm.bug_id = ?1
              ORDER BY u.username ASC",
         )?;
-        let rows = stmt.query_map(params![bug_id], |row| {
-            Ok(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![bug_id], Self::map_user_row)?;
         rows.collect()
     }
 
@@ -4043,7 +3930,7 @@ impl Db {
                 if eff < 10 {
                     return Ok(Vec::new());
                 }
-                self.list_bugs(pid, eff, 0, 50_000)?
+                self.list_bugs(pid, 90, 0, 50_000)?
             } else {
                 self.list_bugs(0, 90, 0, 50_000)?
             }
@@ -4060,7 +3947,7 @@ impl Db {
         let mut results = Vec::new();
         for b in all_candidates {
             let eff = self.effective_access_level(user, b.project_id)?;
-            if eff < 10 || (b.view_state == 50 && eff < 55) {
+            if !Self::can_view_bug(user.id, eff, &b) {
                 continue;
             }
             if let Some(st) = filter.status {

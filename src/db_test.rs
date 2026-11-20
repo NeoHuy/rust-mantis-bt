@@ -2058,6 +2058,52 @@ fn test_email_review_comments_improvements() {
     let bug_obj = db.get_bug(rep_priv_bug).unwrap().unwrap();
     assert!(Db::can_view_bug(reporter_id, 25, &bug_obj));
     assert!(!Db::can_view_bug(999, 25, &bug_obj)); // another low-access user cannot view it
+
+    // Handler can also view it even if access < 55
+    let handler_id = db
+        .create_user(
+            "priv_handler",
+            "Priv Handler",
+            "handler@example.com",
+            "password",
+            25, // Reporter access level
+            true,
+            false,
+        )
+        .unwrap();
+    db.assign_bug(rep_priv_bug, reporter_id, handler_id)
+        .unwrap();
+    let bug_obj_handled = db.get_bug(rep_priv_bug).unwrap().unwrap();
+    assert!(Db::can_view_bug(handler_id, 25, &bug_obj_handled));
+
+    // Verify filter_bugs visibility
+    let handler_user = db.get_user_by_id(handler_id).unwrap().unwrap();
+    let rep_user = db.get_user_by_id(reporter_id).unwrap().unwrap();
+    let other_user = db
+        .get_user_by_id(
+            db.create_user("other", "Other", "o@ex.com", "pw", 25, true, false)
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+
+    let filter = crate::models::BugFilter {
+        project_id: Some(proj_id),
+        ..Default::default()
+    };
+    let handler_bugs = db.filter_bugs(&filter, &handler_user).unwrap();
+    assert!(handler_bugs.iter().any(|b| b.id == rep_priv_bug));
+
+    let rep_bugs = db.filter_bugs(&filter, &rep_user).unwrap();
+    assert!(rep_bugs.iter().any(|b| b.id == rep_priv_bug));
+
+    let other_bugs = db.filter_bugs(&filter, &other_user).unwrap();
+    assert!(!other_bugs.iter().any(|b| b.id == rep_priv_bug));
+
+    // Test DEFAULT_MANTIS_ADDR constant and base URL fallback
+    assert_eq!(crate::DEFAULT_MANTIS_ADDR, "127.0.0.1:3000");
+    let fallback_url = db.base_url();
+    assert!(fallback_url.contains("127.0.0.1:3000") || fallback_url.starts_with("http"));
     db.flush_email_queue().unwrap();
 
     // 6. Test history limit keeps the NEWEST rows in email

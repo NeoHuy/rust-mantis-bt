@@ -108,6 +108,7 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
 }
 
 pub fn router() -> Router<Db> {
+    let upload_limit = (max_file_size() + 2 * 1024 * 1024).max(10 * 1024 * 1024);
     Router::new()
         .route("/view_all_bug_page", get(view_all_bug_page))
         .route("/view_bug_page/:id", get(view_bug_page))
@@ -127,7 +128,7 @@ pub fn router() -> Router<Db> {
         )
         .route(
             "/bug_file_add/:bug_id",
-            post(bug_file_add).layer(DefaultBodyLimit::disable()),
+            post(bug_file_add).layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/file/bug/:id/:filename", get(bug_file_download))
         .route("/bug_file_delete/:id", post(bug_file_delete))
@@ -1464,6 +1465,23 @@ pub async fn bug_relationship_add(
         return forbidden(&ctx, "Developer access required to manage relationships.");
     }
 
+    let dest_bug = match db.get_bug(form.dest_bug_id) {
+        Ok(Some(b)) => b,
+        _ => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Failed+to+add+relationship",
+                bug_id
+            ))
+            .into_response()
+        }
+    };
+    let dest_eff = db
+        .effective_access_level(&ctx.user, dest_bug.project_id)
+        .unwrap_or(0);
+    if dest_eff < 10 || (dest_bug.view_state == 50 && dest_eff < 55) {
+        return forbidden(&ctx, "Insufficient access to target issue.");
+    }
+
     match db.add_bug_relationship(bug_id, form.dest_bug_id, form.relationship_type) {
         Ok(()) => Redirect::to(&format!("/view_bug_page/{}?msg=Relationship+added", bug_id))
             .into_response(),
@@ -1610,6 +1628,38 @@ pub async fn bug_file_add(
     .into_response()
 }
 
+pub(crate) fn sanitize_download_filename(raw: &str) -> String {
+    let base = raw.rsplit(&['/', '\\'][..]).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c == '"' || c == ';' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if trimmed.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub(crate) fn sanitize_content_type(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(|c| c.is_control())
+        || axum::http::HeaderValue::from_str(trimmed).is_err()
+    {
+        "application/octet-stream".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub async fn bug_file_download(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -1633,15 +1683,9 @@ pub async fn bug_file_download(
         return forbidden(&ctx, "Insufficient access to download this attachment.");
     }
 
-    let content_type = if meta.file_type.is_empty() {
-        "application/octet-stream".to_string()
-    } else {
-        meta.file_type
-    };
-    let disp = format!(
-        "attachment; filename=\"{}\"",
-        meta.filename.replace('"', "_")
-    );
+    let content_type = sanitize_content_type(&meta.file_type);
+    let safe_filename = sanitize_download_filename(&meta.filename);
+    let disp = format!("attachment; filename=\"{}\"", safe_filename);
 
     (
         StatusCode::OK,

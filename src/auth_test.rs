@@ -19,18 +19,55 @@ fn test_generate_cookie_string() {
 #[test]
 fn test_auth_password_hashing_sha256_format_and_legacy_plain() {
     let hashed = hash_password("secret_password");
-    assert!(hashed.starts_with("sha256$"));
+    assert!(hashed.starts_with("pbkdf2_sha256$"));
     let parts: Vec<&str> = hashed.split('$').collect();
-    assert_eq!(parts.len(), 3);
-    assert_eq!(parts[0], "sha256");
-    assert_eq!(parts[1].len(), 32); // 16 bytes salt as hex
-    assert_eq!(parts[2].len(), 64); // sha256 output as hex
+    assert_eq!(parts.len(), 4);
+    assert_eq!(parts[0], "pbkdf2_sha256");
+    let iters: u32 = parts[1].parse().unwrap();
+    assert!(iters >= pbkdf2_iterations());
+    assert_eq!(parts[2].len(), 32); // 16 bytes salt as hex
+    assert_eq!(parts[3].len(), 64); // pbkdf2-hmac-sha256 32 bytes as hex
     assert!(verify_password("secret_password", &hashed));
     assert!(!verify_password("wrong_password", &hashed));
+    assert!(!needs_rehash(&hashed));
 
-    // Legacy plain fallback
-    assert!(verify_password("plain_text", "plain_text"));
-    assert!(!verify_password("wrong_text", "plain_text"));
+    // Legacy sha256$ format still verifies and triggers needs_rehash
+    let legacy_salt = "0123456789abcdef0123456789abcdef";
+    let mut legacy_hasher = Sha256::new();
+    legacy_hasher.update(legacy_salt.as_bytes());
+    legacy_hasher.update(b"secret_password");
+    let legacy_hash = format!(
+        "sha256${}${}",
+        legacy_salt,
+        hex_encode(&legacy_hasher.finalize())
+    );
+    assert!(verify_password("secret_password", &legacy_hash));
+    assert!(needs_rehash(&legacy_hash));
+
+    // Plaintext fallback is disabled by default
+    assert!(!verify_password("plain_text", "plain_text"));
+    assert!(!verify_password("", ""));
+}
+
+#[test]
+fn test_pbkdf2_hmac_sha256_rfc6070_vectors() {
+    let d1 = pbkdf2_hmac_sha256(b"password", b"salt", 1);
+    assert_eq!(
+        hex_encode(&d1),
+        "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+    );
+
+    let d2 = pbkdf2_hmac_sha256(b"password", b"salt", 2);
+    assert_eq!(
+        hex_encode(&d2),
+        "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+    );
+
+    let d4096 = pbkdf2_hmac_sha256(b"password", b"salt", 4096);
+    assert_eq!(
+        hex_encode(&d4096),
+        "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+    );
 }
 
 #[test]
@@ -273,4 +310,183 @@ fn test_constant_time_equality() {
     assert!(constant_time_eq_ignore_ascii_case("63A9F0", "63a9f0"));
     assert!(!constant_time_eq_ignore_ascii_case("ABCdef", "xyz123"));
     assert!(!constant_time_eq_ignore_ascii_case("short", "longer_str"));
+}
+
+#[test]
+fn test_session_rotation_on_login_logout_and_password_change() {
+    let db = Db::open_in_memory().unwrap();
+    let initial = db.get_user_by_username("administrator").unwrap().unwrap();
+    let initial_cookie = initial.cookie_string.clone();
+
+    // 1. Login rotates cookie_string
+    let logged_in = db.authenticate("administrator", "root").unwrap().unwrap();
+    assert_ne!(logged_in.cookie_string, initial_cookie);
+    assert!(db.get_user_by_cookie(&initial_cookie).unwrap().is_none());
+    assert!(db
+        .get_user_by_cookie(&logged_in.cookie_string)
+        .unwrap()
+        .is_some());
+
+    // 2. rotate_user_cookie invalidates current cookie
+    let rotated = db.rotate_user_cookie(logged_in.id).unwrap();
+    assert_ne!(rotated, logged_in.cookie_string);
+    assert!(db
+        .get_user_by_cookie(&logged_in.cookie_string)
+        .unwrap()
+        .is_none());
+    assert!(db.get_user_by_cookie(&rotated).unwrap().is_some());
+
+    // 3. Changing password via update_user rotates cookie_string
+    db.update_user(
+        logged_in.id,
+        "Administrator",
+        "root@localhost",
+        Some("new_secret"),
+        90,
+        true,
+        false,
+    )
+    .unwrap();
+    let after_pw = db.get_user_by_id(logged_in.id).unwrap().unwrap();
+    assert_ne!(after_pw.cookie_string, rotated);
+    assert!(db.get_user_by_cookie(&rotated).unwrap().is_none());
+    assert!(db
+        .get_user_by_cookie(&after_pw.cookie_string)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn test_brute_force_account_lockout() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user(
+            "victim",
+            "Victim",
+            "v@example.com",
+            "correctpass",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    // 4 failed attempts do not lock yet
+    for _ in 0..4 {
+        assert!(db.authenticate("victim", "wrong").unwrap().is_none());
+    }
+
+    // 5th failed attempt locks the account
+    assert!(db.authenticate("victim", "wrong").unwrap().is_none());
+
+    // Subsequent attempt even with the CORRECT password is rejected with Err
+    let locked_res = db.authenticate("victim", "correctpass");
+    assert!(locked_res.is_err());
+    assert!(locked_res.unwrap_err().contains("locked"));
+
+    // Admin resetting password clears the lockout
+    db.update_user(
+        uid,
+        "Victim",
+        "v@example.com",
+        Some("resetpass"),
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(db.authenticate("victim", "resetpass").unwrap().is_some());
+}
+
+#[test]
+fn test_is_session_expired_and_cookie_attributes() {
+    let db = Db::open_in_memory().unwrap();
+    let mut user = db.get_user_by_username("administrator").unwrap().unwrap();
+
+    // Fresh/never-visited user (last_visit == 0) is not expired
+    user.last_visit = 0;
+    assert!(!is_session_expired(&user));
+
+    // Recent visit is not expired
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    user.last_visit = now - 60;
+    assert!(!is_session_expired(&user));
+
+    // Old visit beyond TTL (> 7 days) is expired
+    user.last_visit = now - (session_ttl_secs() + 10);
+    assert!(is_session_expired(&user));
+
+    // make_cookie_header_with_path respects Path, HttpOnly, SameSite, Max-Age
+    let hdr = make_cookie_header_with_path(
+        "MANTIS_FLASH_TOKEN",
+        "abc",
+        "/api_tokens_page",
+        true,
+        Some(60),
+    );
+    assert!(hdr.contains("MANTIS_FLASH_TOKEN=abc"));
+    assert!(hdr.contains("Path=/api_tokens_page"));
+    assert!(hdr.contains("SameSite=Lax"));
+    assert!(hdr.contains("HttpOnly"));
+    assert!(hdr.contains("Max-Age=60"));
+}
+
+#[test]
+fn test_authenticate_auto_rehashes_legacy_passwords() {
+    let db = Db::open_in_memory().unwrap();
+    let uid_md5 = db
+        .create_user("md5user", "MD5", "md5@example.com", "temp", 25, true, false)
+        .unwrap();
+    let uid_sha = db
+        .create_user("shauser", "SHA", "sha@example.com", "temp", 25, true, false)
+        .unwrap();
+
+    // Seed legacy MD5 and legacy salted SHA-256 directly in DB
+    let md5_pw = md5_hex("legacy_pass");
+    let salt = "abcdef0123456789abcdef0123456789";
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(b"legacy_pass");
+    let sha_pw = format!("sha256${}${}", salt, hex_encode(&hasher.finalize()));
+
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET password = ?1 WHERE id = ?2",
+            rusqlite::params![md5_pw, uid_md5],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE mantis_user_table SET password = ?1 WHERE id = ?2",
+            rusqlite::params![sha_pw, uid_sha],
+        )
+        .unwrap();
+    }
+
+    // Logging in upgrades both passwords to pbkdf2_sha256$
+    let u_md5 = db.authenticate("md5user", "legacy_pass").unwrap().unwrap();
+    assert!(u_md5.password.starts_with("pbkdf2_sha256$"));
+    assert!(!needs_rehash(&u_md5.password));
+    let u_md5_db = db.get_user_by_id(uid_md5).unwrap().unwrap();
+    assert!(u_md5_db.password.starts_with("pbkdf2_sha256$"));
+
+    let u_sha = db.authenticate("shauser", "legacy_pass").unwrap().unwrap();
+    assert!(u_sha.password.starts_with("pbkdf2_sha256$"));
+    assert!(!needs_rehash(&u_sha.password));
+    let u_sha_db = db.get_user_by_id(uid_sha).unwrap().unwrap();
+    assert!(u_sha_db.password.starts_with("pbkdf2_sha256$"));
+}
+
+#[test]
+fn test_csrf_token_generation_and_verification() {
+    let cookie = generate_cookie_string();
+    let token = csrf_token_for_session(&cookie);
+    assert_eq!(token.len(), 64);
+    assert!(verify_csrf_token(&cookie, &token));
+    assert!(!verify_csrf_token(&cookie, "invalid_token"));
+    assert!(!verify_csrf_token("", &token));
+    assert!(!verify_csrf_token(&cookie, ""));
 }

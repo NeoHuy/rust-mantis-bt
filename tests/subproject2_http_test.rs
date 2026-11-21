@@ -567,6 +567,30 @@ async fn test_private_bug_visibility_and_access_control() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 
+    // Rep2 also gets 403 Forbidden with "Insufficient access to view private issue." on tag detach
+    let tag_id = db.get_tag_by_name("sec_tag").unwrap().unwrap().id;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_tag_detach/{}/{}", rep_priv_bug, tag_id))
+                .header("cookie", &rep2_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let body_text = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body_text.contains("Insufficient access to view private issue."));
+
     // Private bug handled by reporter2: reporter2 CAN view it
     let handled_priv_bug = db
         .create_bug(

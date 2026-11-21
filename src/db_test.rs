@@ -540,10 +540,10 @@ fn test_bug_schema_bootstrap_and_crud() {
     assert_eq!(full.description, "Description here");
     assert_eq!(full.steps_to_reproduce, "Steps");
 
-    let bugs = db.list_bugs(proj_id, 10, 0, 25).unwrap();
+    let bugs = db.list_bugs(proj_id, 0, 25).unwrap();
     assert_eq!(bugs.len(), 1);
 
-    // Private bug filtering at SQL level
+    // Create private bug
     let priv_bug_id = db
         .create_bug(
             proj_id,
@@ -564,10 +564,8 @@ fn test_bug_schema_bootstrap_and_crud() {
         )
         .unwrap();
     assert!(priv_bug_id > 0);
-    // Viewer (10) only sees public bug
-    assert_eq!(db.list_bugs(proj_id, 10, 0, 25).unwrap().len(), 1);
-    // Developer (55) sees both
-    assert_eq!(db.list_bugs(proj_id, 55, 0, 25).unwrap().len(), 2);
+    // list_bugs returns raw unfiltered bugs (total 2)
+    assert_eq!(db.list_bugs(proj_id, 0, 25).unwrap().len(), 2);
 
     // Update bug fields & verify history only records changed fields
     let changed = db

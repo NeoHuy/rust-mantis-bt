@@ -631,7 +631,7 @@ fn test_mcp_tools_and_rbac_dispatch() {
         json!({ "issue_id": priv_issue_id }),
     );
     assert!(res.is_error);
-    assert!(res.content[0].text.contains("Access Denied"));
+    assert!(res.content[0].text.contains("Access denied to issue"));
 
     // Updater (< 55 and not reporter) gets denied on update_issue for private issue
     let res = dispatch_tool_call(
@@ -644,9 +644,7 @@ fn test_mcp_tools_and_rbac_dispatch() {
         }),
     );
     assert!(res.is_error);
-    assert!(res.content[0]
-        .text
-        .contains("Access Denied to private issue"));
+    assert!(res.content[0].text.contains("Access denied to issue"));
 
     // Viewer search_issues does NOT return priv_issue
     let res = dispatch_tool_call(

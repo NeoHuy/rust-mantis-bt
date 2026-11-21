@@ -2132,10 +2132,13 @@ impl Db {
         }))
     }
 
+    /// Returns raw unfiltered bugs for a project (or all projects when project_id <= 0).
+    ///
+    /// Note: `list_bugs` is an unfiltered query; user-facing callers and `filter_bugs`
+    /// must filter results using `Db::can_view_bug` to enforce visibility rules.
     pub fn list_bugs(
         &self,
         project_id: i64,
-        user_access: i32,
         offset: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<Bug>> {
@@ -2148,14 +2151,11 @@ impl Db {
                         platform, version, fixed_in_version, target_version, build,
                         summary, view_state, sticky, due_date
                  FROM mantis_bug_table
-                 WHERE project_id = ?1 AND (view_state = 10 OR ?2 >= 55)
+                 WHERE project_id = ?1
                  ORDER BY sticky DESC, last_updated DESC, id DESC
-                 LIMIT ?3 OFFSET ?4",
+                 LIMIT ?2 OFFSET ?3",
             )?;
-            let rows = stmt.query_map(
-                params![project_id, user_access, limit, offset],
-                Self::map_bug_row,
-            )?;
+            let rows = stmt.query_map(params![project_id, limit, offset], Self::map_bug_row)?;
             rows.collect()
         } else {
             let mut stmt = conn.prepare(
@@ -2165,11 +2165,10 @@ impl Db {
                         platform, version, fixed_in_version, target_version, build,
                         summary, view_state, sticky, due_date
                  FROM mantis_bug_table
-                 WHERE (view_state = 10 OR ?1 >= 55)
                  ORDER BY sticky DESC, last_updated DESC, id DESC
-                 LIMIT ?2 OFFSET ?3",
+                 LIMIT ?1 OFFSET ?2",
             )?;
-            let rows = stmt.query_map(params![user_access, limit, offset], Self::map_bug_row)?;
+            let rows = stmt.query_map(params![limit, offset], Self::map_bug_row)?;
             rows.collect()
         }
     }
@@ -3930,12 +3929,12 @@ impl Db {
                 if eff < 10 {
                     return Ok(Vec::new());
                 }
-                self.list_bugs(pid, 90, 0, 50_000)?
+                self.list_bugs(pid, 0, 50_000)?
             } else {
-                self.list_bugs(0, 90, 0, 50_000)?
+                self.list_bugs(0, 0, 50_000)?
             }
         } else {
-            self.list_bugs(0, 90, 0, 50_000)?
+            self.list_bugs(0, 0, 50_000)?
         };
 
         let search_kw = filter

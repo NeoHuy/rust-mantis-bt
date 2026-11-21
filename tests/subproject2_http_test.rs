@@ -496,6 +496,157 @@ async fn test_private_bug_visibility_and_access_control() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // Reporter-owned private bug
+    let rep_priv_bug = db
+        .create_bug(
+            proj_id,
+            rep_id,
+            1,
+            "Reporter Secret Issue",
+            "Priv Rep",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+
+    // Reporter CAN view their own private bug
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", rep_priv_bug))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Reporter CAN attach a tag to their own private bug
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_tag_attach/{}", rep_priv_bug))
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("tag_string=sec_tag"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Another reporter (rep2) CANNOT view reporter 1's private bug
+    let rep2_id = db
+        .create_user("reporter2", "Reporter2", "r2@x.com", "pw", 25, true, false)
+        .unwrap();
+    let rep2_cookie =
+        set_project_cookie(&app, &login_as(&app, "reporter2", "pw").await, proj_id).await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", rep_priv_bug))
+                .header("cookie", &rep2_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // Rep2 also gets 403 Forbidden with "Insufficient access to view private issue." on tag detach
+    let tag_id = db.get_tag_by_name("sec_tag").unwrap().unwrap().id;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_tag_detach/{}/{}", rep_priv_bug, tag_id))
+                .header("cookie", &rep2_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let body_text = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body_text.contains("Insufficient access to view private issue."));
+
+    // Private bug handled by reporter2: reporter2 CAN view it
+    let handled_priv_bug = db
+        .create_bug(
+            proj_id,
+            dev_id,
+            1,
+            "Handled By Rep2 Secret Issue",
+            "Priv Handled",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+    db.assign_bug(handled_priv_bug, dev_id, rep2_id).unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", handled_priv_bug))
+                .header("cookie", &rep2_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // Reporter 2 sees handled_priv_bug in /view_all_bug_page
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page")
+                .header("cookie", &rep2_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Handled By Rep2 Secret Issue"));
+    assert!(!html.contains("Reporter Secret Issue"));
 }
 
 #[tokio::test]

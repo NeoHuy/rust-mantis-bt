@@ -2115,3 +2115,193 @@ fn test_email_review_comments_improvements() {
     // The email's Issue History table must include the newest changes (e.g. note 105)
     assert!(latest_email.body.contains("Sequential note 105"));
 }
+
+#[test]
+fn test_email_templates_and_notification_full_coverage() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let proj_id = db
+        .create_project("Full Coverage Proj", 10, 10, "desc", true)
+        .unwrap();
+
+    // 1. build_mantis_email_body for non-existent bug
+    {
+        let conn = db.conn();
+        let empty_body = db
+            .build_mantis_email_body(&conn, 999999, "Header", None)
+            .unwrap();
+        assert_eq!(empty_body, "");
+
+        // 2. enqueue_email with whitespace/empty email returns Ok(0)
+        let res = db.enqueue_email(&conn, "   ", "Subject", "Body").unwrap();
+        assert_eq!(res, 0);
+
+        // 3. notify_bug_event_filtered on non-existent bug returns early
+        db.notify_bug_event_filtered(&conn, 999999, 0, &[], "Subject", "Body");
+    }
+
+    // 4. Create bug with resolution == 0, additional_information, and steps_to_reproduce
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            1,
+            "Detailed Bug",
+            "Initial description",
+            "1. Step A\n2. Step B",
+            "Extra system info",
+            999, // invalid reproducibility -> fallback
+            999, // invalid severity -> fallback
+            999, // invalid priority -> fallback
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // 5. Populate history with all remaining field types to cover format_history_field_change
+    let body = {
+        let conn = db.conn();
+        db.record_history(&conn, bug_id, admin.id, "priority", "30", "40", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "severity", "50", "60", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "reproducibility", "10", "30", 0)
+            .unwrap();
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "file_added",
+            "",
+            "attached_file.txt",
+            0,
+        )
+        .unwrap();
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "file_deleted",
+            "old_file.txt",
+            "",
+            0,
+        )
+        .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "category_id", "1", "2", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "target_version", "1.0", "1.1", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "fixed_in_version", "", "1.0", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "version", "1.0", "2.0", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "view_state", "10", "50", 0)
+            .unwrap();
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "custom_field_x",
+            "OldVal",
+            "NewVal",
+            0,
+        )
+        .unwrap();
+        // Test handler_id where user is missing in DB (user#9999 fallback)
+        db.record_history(&conn, bug_id, admin.id, "handler_id", "9998", "9999", 0)
+            .unwrap();
+        // Test format_transition with unparseable string values
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "status",
+            "unparseable_old",
+            "unparseable_new",
+            0,
+        )
+        .unwrap();
+
+        // Build email body with current_note Some(...)
+        let note_ctx = Some((42, "admin_user", 1700000000, "Note test text"));
+        db.build_mantis_email_body(
+            &conn,
+            bug_id,
+            "The following issue has been TESTED.",
+            note_ctx,
+        )
+        .unwrap()
+    };
+
+    assert!(body.contains("The following issue has been TESTED."));
+    assert!(body.contains("Steps to Reproduce:\n1. Step A\n2. Step B"));
+    assert!(body.contains("Additional Information:\nExtra system info"));
+    assert!(body.contains("(0000042) admin_user"));
+    assert!(body.contains("Note test text"));
+    assert!(body.contains("File Added: attached_file.txt"));
+    assert!(body.contains("File Deleted: old_file.txt"));
+    assert!(body.contains("Priority"));
+    assert!(body.contains("Severity"));
+    assert!(body.contains("Reproducibility"));
+    assert!(body.contains("Category"));
+    assert!(body.contains("Target Version"));
+    assert!(body.contains("Fixed in Version"));
+    assert!(body.contains("Product Version"));
+    assert!(body.contains("View Status"));
+    assert!(body.contains("custom_field_x"));
+    assert!(body.contains("user#9998 => user#9999"));
+    assert!(body.contains("unparseable_old => unparseable_new"));
+
+    // 6. Test recipients edge cases in notify_bug_event_filtered:
+    // - disabled user
+    let disabled_u = db
+        .create_user(
+            "disabled_user",
+            "",
+            "dis@example.com",
+            "pw",
+            55,
+            false,
+            false,
+        )
+        .unwrap();
+    db.add_bug_monitor(bug_id, disabled_u).unwrap();
+
+    // - user with empty email
+    let empty_email_u = db
+        .create_user("empty_email", "", "   ", "pw", 55, true, false)
+        .unwrap();
+    db.add_bug_monitor(bug_id, empty_email_u).unwrap();
+
+    // - extra_recipients with <= 0 and non-existent id
+    db.flush_email_queue().unwrap();
+    {
+        let conn = db.conn();
+        db.notify_bug_event_filtered(
+            &conn,
+            bug_id,
+            0,
+            &[-1, 0, 99999, admin.id], // -1 and 0 skipped, 99999 non-existent, admin.id deduplicated
+            "Edge Test Subject",
+            &body,
+        );
+    }
+    let emails = db.list_queued_emails().unwrap();
+    let recs: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    // admin receives it, disabled_user and empty_email do NOT
+    assert!(!recs.contains(&"dis@example.com"));
+    assert!(!recs.contains(&""));
+    assert_eq!(
+        recs.iter().filter(|&&e| e == admin.email.as_str()).count(),
+        1
+    );
+
+    // 7. Test delete_queued_email
+    let email_id = emails[0].email_id;
+    db.delete_queued_email(email_id).unwrap();
+    let remaining = db.list_queued_emails().unwrap();
+    assert_eq!(remaining.len(), 0);
+}

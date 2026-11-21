@@ -360,12 +360,8 @@ impl JiraClient {
         config: &JiraResolvedConfig,
         key: &str,
     ) -> Result<JiraIssueDetails, JiraError> {
+        validate_jira_url(&config.base_url)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL is not configured".to_string(),
-            ));
-        }
         if config.email.trim().is_empty() || config.api_token.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Email and API token must be configured".to_string(),
@@ -429,12 +425,8 @@ impl JiraClient {
         &self,
         config: &JiraResolvedConfig,
     ) -> Result<Vec<JiraEpic>, JiraError> {
+        validate_jira_url(&config.base_url)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL is not configured".to_string(),
-            ));
-        }
         if config.project_key.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Jira Project Key is not configured for this project".to_string(),

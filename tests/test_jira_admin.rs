@@ -154,6 +154,7 @@ async fn test_admin_jira_refresh_epics_permissions_and_success() {
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    std::env::set_var("MANTIS_ALLOW_LOCAL_JIRA", "1");
     let addr = listener.local_addr().unwrap();
     let mock_url = format!("http://{}", addr);
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();

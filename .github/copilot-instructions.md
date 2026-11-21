@@ -16,10 +16,10 @@ See [AGENTS.md](../AGENTS.md) for full project rules and architecture.
 
 ### 2. Architecture & Patterns (MVC)
 - **Controllers (`src/controllers/`):** Axum 0.7 request orchestration and routing. Sub-routers in domain files (`src/controllers/*.rs`) merged in `src/controllers/mod.rs`. Handlers parse requests, verify permissions, call DB methods, invoke views, and return responses.
-- **Views (`src/views/`):** Server-side rendered HTML templates and layout (`src/views/layout.rs`). Render page content and escape user input with `views::html_escape` to prevent XSS.
+- **Views (`src/views/`):** Server-side rendered HTML templates and layout (`src/views/layout.rs`). Reuse shared helpers in `src/views/mod.rs` (`render_error_page`, `render_access_denied_page`, `render_not_found_page`), escape user input with `views::html_escape`, and never nest `<form>` tags inside edit pages.
 - **Models (`src/models/`):** Pure domain structs, enums, validation, and DTOs partitioned by domain (`src/models/*.rs`) and re-exported in `src/models/mod.rs`.
 - **Data Layer (`src/db.rs`):** SQLite with bundled `rusqlite`. Queries must **always** use parameterized `rusqlite::params![...]` (no SQL string formatting). Migrations must be idempotent.
-- **Security & Permissions:** Access levels in `src/auth.rs` and `src/models/user.rs` (Viewer=10, Reporter=25, Updater=40, Developer=55, Manager=70, Administrator=90). Guard controllers with `ctx.user.access_level`.
+- **Security & Permissions:** Access levels in `src/auth.rs` and `src/models/user.rs` (Viewer=10, Reporter=25, Updater=40, Developer=55, Manager=70, Administrator=90). Extract `AuthContext` (session/project cookies) for web routes and `ApiAuth` (Bearer PAT) for `/api/rest/*`. Guard global admin actions via `ctx.user.access_level` (returning `views::render_access_denied_page(&ctx)`) and project-scoped actions via `db.effective_access_level(&ctx.user, project_id)`. Strip `\r`/`\n` from error messages placed into redirect `Location` headers.
 - **Integrations:** Jira Cloud REST API client in `src/jira.rs`, with dedicated controllers and views.
 - **Testing Layout:** Maintain 1:1 companion unit test files (`*_test.rs`) alongside each module using `#[cfg(test)] #[path = "<name>_test.rs"] mod tests;`. HTTP integration tests live in `tests/`.
 

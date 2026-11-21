@@ -54,8 +54,45 @@ async fn test_login_submit_valid_credentials() {
 
 #[tokio::test]
 async fn test_logout_clears_cookie() {
-    let resp = logout().await;
+    let db = Db::open_in_memory().unwrap();
+    let user = db.authenticate("administrator", "root").unwrap().unwrap();
+    let old_cookie = user.cookie_string.clone();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        HeaderValue::from_str(&format!("MANTIS_STRING_COOKIE={}", old_cookie)).unwrap(),
+    );
+
+    let resp = logout(headers, State(db.clone())).await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let cookie_val = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
     assert!(cookie_val.contains("Max-Age=0"));
+    assert!(db.get_user_by_cookie(&old_cookie).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn test_login_submit_lockout_returns_429() {
+    let db = Db::open_in_memory().unwrap();
+    for _ in 0..5 {
+        let resp = login_submit(
+            State(db.clone()),
+            Form(LoginForm {
+                username: "administrator".to_string(),
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let resp = login_submit(
+        State(db),
+        Form(LoginForm {
+            username: "administrator".to_string(),
+            password: "root".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 }

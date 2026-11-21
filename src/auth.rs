@@ -203,15 +203,35 @@ pub fn parse_cookies(headers: &axum::http::HeaderMap) -> std::collections::HashM
     map
 }
 
-pub fn make_cookie_header(
+pub fn session_ttl_secs() -> i64 {
+    std::env::var("MANTIS_SESSION_TTL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .map(|v| v.max(60))
+        .unwrap_or(604_800)
+}
+
+pub fn is_session_expired(user: &crate::models::User) -> bool {
+    if user.last_visit <= 0 {
+        return false;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    now.saturating_sub(user.last_visit) > session_ttl_secs()
+}
+
+pub fn make_cookie_header_with_path(
     name: &str,
     value: &str,
+    path: &str,
     http_only: bool,
     max_age: Option<i64>,
 ) -> String {
     let mut parts = vec![
         format!("{}={}", name, value),
-        "Path=/".to_string(),
+        format!("Path={}", path),
         "SameSite=Lax".to_string(),
     ];
     if http_only {
@@ -220,7 +240,25 @@ pub fn make_cookie_header(
     if let Some(age) = max_age {
         parts.push(format!("Max-Age={}", age));
     }
+    let secure = std::env::var("MANTIS_COOKIE_SECURE")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false);
+    if secure {
+        parts.push("Secure".to_string());
+    }
     parts.join("; ")
+}
+
+pub fn make_cookie_header(
+    name: &str,
+    value: &str,
+    http_only: bool,
+    max_age: Option<i64>,
+) -> String {
+    make_cookie_header_with_path(name, value, "/", http_only, max_age)
 }
 
 #[axum::async_trait]
@@ -253,6 +291,10 @@ where
                 return Err(axum::response::Redirect::to("/login").into_response());
             }
         };
+
+        if is_session_expired(&user) {
+            return Err(axum::response::Redirect::to("/login").into_response());
+        }
 
         let mut active_project_id = 0;
         if let Some(pid_str) = cookies.get("MANTIS_PROJECT_COOKIE") {

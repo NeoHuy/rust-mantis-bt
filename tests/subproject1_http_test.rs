@@ -128,11 +128,14 @@ async fn test_auth_flow_login_failure_logout_and_account_update() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let cookie_hdr = res
+    let mut cookie_hdr = res
         .headers()
         .get("set-cookie")
         .unwrap()
         .to_str()
+        .unwrap()
+        .split(';')
+        .next()
         .unwrap()
         .to_string();
 
@@ -209,6 +212,35 @@ async fn test_auth_flow_login_failure_logout_and_account_update() {
         "strict-origin-when-cross-origin"
     );
 
+    // Password change rotates session cookie and invalidates the old cookie
+    let new_cookie_hdr = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_ne!(new_cookie_hdr, cookie_hdr);
+
+    let res_old = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/account_page")
+                .header("cookie", &cookie_hdr)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_old.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res_old.headers().get("location").unwrap(), "/login");
+
+    cookie_hdr = new_cookie_hdr;
+
     // 5. Update account successfully (realname & email)
     let res = app
         .clone()
@@ -229,7 +261,7 @@ async fn test_auth_flow_login_failure_logout_and_account_update() {
     assert_eq!(updated.realname, "Admin Renamed");
     assert_eq!(updated.email, "admin@test.com");
 
-    // 6. POST /logout returns 303 and clears cookie
+    // 6. POST /logout returns 303, clears cookie, and revokes session server-side
     let res = app
         .clone()
         .oneshot(
@@ -251,6 +283,24 @@ async fn test_auth_flow_login_failure_logout_and_account_update() {
         .unwrap()
         .to_string();
     assert!(logout_cookies.contains("Max-Age=0"));
+
+    // Reusing the logged-out cookie redirects to /login
+    let res_after_logout = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/account_page")
+                .header("cookie", &cookie_hdr)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_after_logout.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        res_after_logout.headers().get("location").unwrap(),
+        "/login"
+    );
 
     // 7. Requesting /account_page with empty cookie redirects to /login
     let res = app

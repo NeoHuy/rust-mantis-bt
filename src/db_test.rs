@@ -1224,6 +1224,23 @@ fn test_jira_config_resolution() {
 }
 
 #[test]
+fn test_resolve_jira_api_token_env_priority() {
+    assert_eq!(
+        Db::resolve_jira_api_token(Some("  env_tok_123  "), Some("db_tok_456".to_string())),
+        "env_tok_123"
+    );
+    assert_eq!(
+        Db::resolve_jira_api_token(Some("   "), Some("db_tok_456".to_string())),
+        "db_tok_456"
+    );
+    assert_eq!(
+        Db::resolve_jira_api_token(None, Some("db_tok_456".to_string())),
+        "db_tok_456"
+    );
+    assert_eq!(Db::resolve_jira_api_token(None, None), "");
+}
+
+#[test]
 fn test_signup_user_success_and_validations() {
     let db = Db::open_in_memory().unwrap();
 

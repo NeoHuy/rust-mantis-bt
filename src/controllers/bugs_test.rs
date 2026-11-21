@@ -37,3 +37,39 @@ fn test_parse_multipart_file_missing_header_or_boundary() {
     headers_no_boundary.insert(header::CONTENT_TYPE, "multipart/form-data".parse().unwrap());
     assert!(parse_multipart_file(&headers_no_boundary, b"dummy data").is_none());
 }
+
+#[test]
+fn test_sanitize_download_filename_and_content_type() {
+    // CRLF and control characters
+    assert_eq!(
+        sanitize_download_filename("evil\r\nX-Injected: 1.txt"),
+        "evil__X-Injected: 1.txt"
+    );
+    assert_eq!(sanitize_download_filename("a\0b.log"), "a_b.log");
+
+    // Path traversal (Unix & Windows separators)
+    assert_eq!(sanitize_download_filename("../../etc/passwd"), "passwd");
+    assert_eq!(
+        sanitize_download_filename(r"..\..\secret\report.pdf"),
+        "report.pdf"
+    );
+
+    // Quotes and semicolons
+    assert_eq!(
+        sanitize_download_filename("my\"file;name.txt"),
+        "my_file_name.txt"
+    );
+
+    // Empty or dot-only names fall back safely
+    assert_eq!(sanitize_download_filename(""), "attachment.bin");
+    assert_eq!(sanitize_download_filename("..."), "attachment.bin");
+    assert_eq!(sanitize_download_filename("../../"), "attachment.bin");
+
+    // Content-Type sanitization
+    assert_eq!(sanitize_content_type(""), "application/octet-stream");
+    assert_eq!(
+        sanitize_content_type("text/plain\r\nSet-Cookie: x=1"),
+        "application/octet-stream"
+    );
+    assert_eq!(sanitize_content_type("image/png"), "image/png");
+}

@@ -11,25 +11,113 @@ pub fn generate_cookie_string() -> String {
     s
 }
 
+pub const OWASP_PBKDF2_ITERATIONS: u32 = 600_000;
+
+pub fn pbkdf2_iterations() -> u32 {
+    if let Ok(val) = std::env::var("MANTIS_PBKDF2_ITERATIONS") {
+        if let Ok(parsed) = val.trim().parse::<u32>() {
+            return parsed.max(1_000);
+        }
+    }
+    if cfg!(test) {
+        1_000
+    } else if cfg!(debug_assertions) {
+        10_000
+    } else {
+        OWASP_PBKDF2_ITERATIONS
+    }
+}
+
+fn hmac_sha256_bases(key: &[u8]) -> (Sha256, Sha256) {
+    let mut k0 = [0u8; 64];
+    if key.len() > 64 {
+        let hashed = Sha256::digest(key);
+        k0[..32].copy_from_slice(&hashed);
+    } else {
+        k0[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= k0[i];
+        opad[i] ^= k0[i];
+    }
+
+    let mut ipad_base = Sha256::new();
+    ipad_base.update(ipad);
+    let mut opad_base = Sha256::new();
+    opad_base.update(opad);
+    (ipad_base, opad_base)
+}
+
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    let (mut inner, mut outer) = hmac_sha256_bases(key);
+    inner.update(data);
+    let inner_digest = inner.finalize();
+    outer.update(inner_digest);
+    outer.finalize().into()
+}
+
+pub fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    let iterations = iterations.max(1);
+    let (ipad_base, opad_base) = hmac_sha256_bases(password);
+
+    let mut inner = ipad_base.clone();
+    inner.update(salt);
+    inner.update(1u32.to_be_bytes());
+    let mut outer = opad_base.clone();
+    outer.update(inner.finalize());
+    let mut u: [u8; 32] = outer.finalize().into();
+    let mut t = u;
+
+    for _ in 1..iterations {
+        let mut inner_iter = ipad_base.clone();
+        inner_iter.update(u);
+        let mut outer_iter = opad_base.clone();
+        outer_iter.update(inner_iter.finalize());
+        u = outer_iter.finalize().into();
+        for (ti, ui) in t.iter_mut().zip(u.iter()) {
+            *ti ^= *ui;
+        }
+    }
+
+    t
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
 pub fn hash_password(plain: &str) -> String {
     let mut rng = rand::thread_rng();
     let salt_bytes: [u8; 16] = rng.gen();
-    let mut salt = String::with_capacity(32);
-    for b in salt_bytes {
-        salt.push_str(&format!("{:02x}", b));
+    let salt = hex_encode(&salt_bytes);
+    let iters = pbkdf2_iterations();
+    let derived = pbkdf2_hmac_sha256(plain.as_bytes(), salt.as_bytes(), iters);
+    format!("pbkdf2_sha256${}${}${}", iters, salt, hex_encode(&derived))
+}
+
+pub fn needs_rehash(stored: &str) -> bool {
+    let Some(rest) = stored.strip_prefix("pbkdf2_sha256$") else {
+        return true;
+    };
+    let mut parts = rest.splitn(3, '$');
+    let (Some(iters_str), Some(salt), Some(hash_hex)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return true;
+    };
+    let Ok(iters) = iters_str.parse::<u32>() else {
+        return true;
+    };
+    if iters < pbkdf2_iterations() || salt.is_empty() {
+        return true;
     }
-
-    let mut hasher = Sha256::new();
-    hasher.update(salt.as_bytes());
-    hasher.update(plain.as_bytes());
-    let hash = hasher.finalize();
-
-    let mut hash_str = String::with_capacity(64);
-    for b in hash {
-        hash_str.push_str(&format!("{:02x}", b));
-    }
-
-    format!("sha256${}${}", salt, hash_str)
+    !(hash_hex.len() == 64 && hash_hex.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -151,6 +239,23 @@ pub fn md5_hex(input: &str) -> String {
 }
 
 pub fn verify_password(plain: &str, stored: &str) -> bool {
+    if let Some(rest) = stored.strip_prefix("pbkdf2_sha256$") {
+        let mut parts = rest.splitn(3, '$');
+        let (Some(iters_str), Some(salt), Some(expected_hash)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let Ok(iters) = iters_str.parse::<u32>() else {
+            return false;
+        };
+        if iters == 0 || iters > 10_000_000 || salt.is_empty() || expected_hash.len() != 64 {
+            return false;
+        }
+        let derived = pbkdf2_hmac_sha256(plain.as_bytes(), salt.as_bytes(), iters);
+        return constant_time_eq_ignore_ascii_case(&hex_encode(&derived), expected_hash);
+    }
+
     if let Some(rest) = stored.strip_prefix("sha256$") {
         if let Some((salt, expected_hash)) = rest.split_once('$') {
             return verify_sha256_salted(plain, salt, expected_hash);
@@ -169,8 +274,31 @@ pub fn verify_password(plain: &str, stored: &str) -> bool {
         return true;
     }
 
-    // Plaintext fallback or legacy comparison
-    constant_time_eq(plain.as_bytes(), stored.as_bytes())
+    let allow_plaintext = std::env::var("MANTIS_ALLOW_LEGACY_PLAINTEXT_PASSWORD")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false);
+    if allow_plaintext && !stored.is_empty() {
+        return constant_time_eq(plain.as_bytes(), stored.as_bytes());
+    }
+
+    false
+}
+
+pub fn csrf_token_for_session(cookie_string: &str) -> String {
+    let mac = hmac_sha256(cookie_string.as_bytes(), b"mantis_csrf_v1");
+    hex_encode(&mac)
+}
+
+pub fn verify_csrf_token(cookie_string: &str, provided: &str) -> bool {
+    let trimmed = provided.trim();
+    if cookie_string.is_empty() || trimmed.is_empty() {
+        return false;
+    }
+    let expected = csrf_token_for_session(cookie_string);
+    constant_time_eq_ignore_ascii_case(&expected, trimmed)
 }
 
 pub fn effective_access_level(

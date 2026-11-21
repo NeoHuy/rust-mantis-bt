@@ -1630,6 +1630,38 @@ pub async fn bug_file_add(
     .into_response()
 }
 
+pub(crate) fn sanitize_download_filename(raw: &str) -> String {
+    let base = raw.rsplit(&['/', '\\'][..]).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c == '"' || c == ';' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if trimmed.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub(crate) fn sanitize_content_type(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(|c| c.is_control())
+        || axum::http::HeaderValue::from_str(trimmed).is_err()
+    {
+        "application/octet-stream".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub async fn bug_file_download(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -1653,15 +1685,9 @@ pub async fn bug_file_download(
         return forbidden(&ctx, "Insufficient access to download this attachment.");
     }
 
-    let content_type = if meta.file_type.is_empty() {
-        "application/octet-stream".to_string()
-    } else {
-        meta.file_type
-    };
-    let disp = format!(
-        "attachment; filename=\"{}\"",
-        meta.filename.replace('"', "_")
-    );
+    let content_type = sanitize_content_type(&meta.file_type);
+    let safe_filename = sanitize_download_filename(&meta.filename);
+    let disp = format!("attachment; filename=\"{}\"", safe_filename);
 
     (
         StatusCode::OK,

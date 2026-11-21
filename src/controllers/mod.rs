@@ -47,6 +47,30 @@ async fn logo_handler() -> impl IntoResponse {
     )
 }
 
+fn extract_url_authority(url_str: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url_str.trim()).ok()?;
+    let host = parsed.host_str()?;
+    Some(match parsed.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    })
+}
+
+fn host_matches_url(host_header: &str, url_str: &str) -> bool {
+    let Some(authority) = extract_url_authority(url_str) else {
+        return false;
+    };
+    authority.eq_ignore_ascii_case(host_header.trim())
+}
+
+fn csrf_forbidden(msg: &'static str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        axum::Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
 pub async fn security_headers_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -65,7 +89,116 @@ pub async fn security_headers_middleware(
         axum::http::header::REFERRER_POLICY,
         axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
+    headers.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'self'; base-uri 'self'",
+        ),
+    );
+    let secure_cookie = std::env::var("MANTIS_COOKIE_SECURE")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false);
+    if secure_cookie {
+        headers.insert(
+            axum::http::header::STRICT_TRANSPORT_SECURITY,
+            axum::http::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        );
+    }
     response
+}
+
+pub async fn csrf_protection_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method();
+    let is_state_changing = matches!(
+        *method,
+        axum::http::Method::POST
+            | axum::http::Method::PUT
+            | axum::http::Method::PATCH
+            | axum::http::Method::DELETE
+    );
+    if !is_state_changing {
+        return next.run(request).await;
+    }
+
+    let path = request.uri().path();
+    if path.starts_with("/api/rest/") || path == "/mcp" || path.starts_with("/mcp/") {
+        return next.run(request).await;
+    }
+
+    let headers = request.headers();
+
+    // Check 1: Fetch Metadata Sec-Fetch-Site
+    if let Some(sec_fetch_site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        let sfs = sec_fetch_site.trim().to_ascii_lowercase();
+        if sfs != "same-origin" && sfs != "none" {
+            return csrf_forbidden("CSRF validation failed: cross-site request rejected");
+        }
+    }
+
+    let host_hdr = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim());
+
+    // Check 2: Origin header
+    if let Some(origin_val) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        let trimmed_origin = origin_val.trim();
+        if trimmed_origin.eq_ignore_ascii_case("null") {
+            return csrf_forbidden("CSRF validation failed: null Origin rejected");
+        }
+        if let Some(host) = host_hdr {
+            if !host_matches_url(host, trimmed_origin) {
+                return csrf_forbidden("CSRF validation failed: Origin mismatch");
+            }
+        } else if extract_url_authority(trimmed_origin).is_none() {
+            return csrf_forbidden("CSRF validation failed: malformed Origin");
+        }
+    } else if let (Some(referer_val), Some(host)) = (
+        headers
+            .get(axum::http::header::REFERER)
+            .and_then(|v| v.to_str().ok()),
+        host_hdr,
+    ) {
+        // Check 3: Referer fallback when Origin is absent
+        if !host_matches_url(host, referer_val) {
+            return csrf_forbidden("CSRF validation failed: Referer mismatch");
+        }
+    }
+
+    // Check 4: X-CSRF-Token header & optional strict CSRF mode
+    let cookies = crate::auth::parse_cookies(headers);
+    let session_cookie = cookies
+        .get("MANTIS_STRING_COOKIE")
+        .map(|s| s.as_str())
+        .filter(|s| !s.is_empty());
+
+    if let Some(token_hdr) = headers.get("x-csrf-token").and_then(|v| v.to_str().ok()) {
+        match session_cookie {
+            Some(cookie_str) if crate::auth::verify_csrf_token(cookie_str, token_hdr) => {}
+            _ => return csrf_forbidden("CSRF validation failed: invalid X-CSRF-Token"),
+        }
+    } else {
+        let strict_csrf = std::env::var("MANTIS_STRICT_CSRF_TOKEN")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true"
+            })
+            .unwrap_or(false);
+        if strict_csrf && session_cookie.is_some() {
+            return csrf_forbidden("CSRF validation failed: missing X-CSRF-Token");
+        }
+    }
+
+    next.run(request).await
 }
 
 pub fn router() -> Router<Db> {
@@ -83,6 +216,7 @@ pub fn router() -> Router<Db> {
         .merge(planning::router())
         .merge(api::router())
         .merge(jira::router())
+        .layer(axum::middleware::from_fn(csrf_protection_middleware))
 }
 
 pub fn build_router(db: Db) -> Router {

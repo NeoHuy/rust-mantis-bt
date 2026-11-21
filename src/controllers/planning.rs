@@ -170,9 +170,20 @@ pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         return forbidden(&ctx, "Developer access required to view Time Tracking.");
     }
 
-    let entries = db
+    let entries: Vec<_> = db
         .list_time_tracking(ctx.active_project_id)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| {
+            if let Ok(Some(bug)) = db.get_bug(e.bug_id) {
+                db.effective_access_level(&ctx.user, bug.project_id)
+                    .unwrap_or(0)
+                    >= 55
+            } else {
+                false
+            }
+        })
+        .collect();
 
     let mut total_mins = 0i32;
     let mut by_user: BTreeMap<String, i32> = BTreeMap::new();
@@ -197,7 +208,21 @@ pub async fn news_page(
         ctx.user.access_level
     };
 
-    let items = db.list_news(ctx.active_project_id, eff).unwrap_or_default();
+    let items: Vec<_> = db
+        .list_news(ctx.active_project_id, eff)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| {
+            if n.project_id == 0 {
+                n.view_state == 10 || ctx.user.access_level >= 55
+            } else {
+                let p_eff = db
+                    .effective_access_level(&ctx.user, n.project_id)
+                    .unwrap_or(0);
+                p_eff >= 10 && (n.view_state == 10 || p_eff >= 55)
+            }
+        })
+        .collect();
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
         .unwrap_or_default()

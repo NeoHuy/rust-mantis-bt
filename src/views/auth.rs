@@ -201,6 +201,10 @@ pub fn render_account_page(ctx: &AuthContext, flash: Option<&str>) -> Html<Strin
                             <td class="input-col"><input type="email" name="email" value="{}" /></td>
                         </tr>
                         <tr>
+                            <td class="label-col">Current Password</td>
+                            <td class="input-col"><input type="password" name="current_password" placeholder="Required if changing password" /></td>
+                        </tr>
+                        <tr>
                             <td class="label-col">Password</td>
                             <td class="input-col"><input type="password" name="password" placeholder="Leave blank to keep unchanged" /></td>
                         </tr>

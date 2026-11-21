@@ -274,3 +274,125 @@ fn test_constant_time_equality() {
     assert!(!constant_time_eq_ignore_ascii_case("ABCdef", "xyz123"));
     assert!(!constant_time_eq_ignore_ascii_case("short", "longer_str"));
 }
+
+#[test]
+fn test_session_rotation_on_login_logout_and_password_change() {
+    let db = Db::open_in_memory().unwrap();
+    let initial = db.get_user_by_username("administrator").unwrap().unwrap();
+    let initial_cookie = initial.cookie_string.clone();
+
+    // 1. Login rotates cookie_string
+    let logged_in = db.authenticate("administrator", "root").unwrap().unwrap();
+    assert_ne!(logged_in.cookie_string, initial_cookie);
+    assert!(db.get_user_by_cookie(&initial_cookie).unwrap().is_none());
+    assert!(db
+        .get_user_by_cookie(&logged_in.cookie_string)
+        .unwrap()
+        .is_some());
+
+    // 2. rotate_user_cookie invalidates current cookie
+    let rotated = db.rotate_user_cookie(logged_in.id).unwrap();
+    assert_ne!(rotated, logged_in.cookie_string);
+    assert!(db
+        .get_user_by_cookie(&logged_in.cookie_string)
+        .unwrap()
+        .is_none());
+    assert!(db.get_user_by_cookie(&rotated).unwrap().is_some());
+
+    // 3. Changing password via update_user rotates cookie_string
+    db.update_user(
+        logged_in.id,
+        "Administrator",
+        "root@localhost",
+        Some("new_secret"),
+        90,
+        true,
+        false,
+    )
+    .unwrap();
+    let after_pw = db.get_user_by_id(logged_in.id).unwrap().unwrap();
+    assert_ne!(after_pw.cookie_string, rotated);
+    assert!(db.get_user_by_cookie(&rotated).unwrap().is_none());
+    assert!(db
+        .get_user_by_cookie(&after_pw.cookie_string)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn test_brute_force_account_lockout() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user(
+            "victim",
+            "Victim",
+            "v@example.com",
+            "correctpass",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    // 4 failed attempts do not lock yet
+    for _ in 0..4 {
+        assert!(db.authenticate("victim", "wrong").unwrap().is_none());
+    }
+
+    // 5th failed attempt locks the account
+    assert!(db.authenticate("victim", "wrong").unwrap().is_none());
+
+    // Subsequent attempt even with the CORRECT password is rejected with Err
+    let locked_res = db.authenticate("victim", "correctpass");
+    assert!(locked_res.is_err());
+    assert!(locked_res.unwrap_err().contains("locked"));
+
+    // Admin resetting password clears the lockout
+    db.update_user(
+        uid,
+        "Victim",
+        "v@example.com",
+        Some("resetpass"),
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(db.authenticate("victim", "resetpass").unwrap().is_some());
+}
+
+#[test]
+fn test_is_session_expired_and_cookie_attributes() {
+    let db = Db::open_in_memory().unwrap();
+    let mut user = db.get_user_by_username("administrator").unwrap().unwrap();
+
+    // Fresh/never-visited user (last_visit == 0) is not expired
+    user.last_visit = 0;
+    assert!(!is_session_expired(&user));
+
+    // Recent visit is not expired
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    user.last_visit = now - 60;
+    assert!(!is_session_expired(&user));
+
+    // Old visit beyond TTL (> 7 days) is expired
+    user.last_visit = now - (session_ttl_secs() + 10);
+    assert!(is_session_expired(&user));
+
+    // make_cookie_header_with_path respects Path, HttpOnly, SameSite, Max-Age
+    let hdr = make_cookie_header_with_path(
+        "MANTIS_FLASH_TOKEN",
+        "abc",
+        "/api_tokens_page",
+        true,
+        Some(60),
+    );
+    assert!(hdr.contains("MANTIS_FLASH_TOKEN=abc"));
+    assert!(hdr.contains("Path=/api_tokens_page"));
+    assert!(hdr.contains("SameSite=Lax"));
+    assert!(hdr.contains("HttpOnly"));
+    assert!(hdr.contains("Max-Age=60"));
+}

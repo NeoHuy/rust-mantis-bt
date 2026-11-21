@@ -9,14 +9,14 @@ This document defines the mandatory guidelines, architectural standards, and wor
 `rust-mantis-bt` is a modern, high-performance Mantis Bug Tracker clone written in Rust.
 
 - **Language & Edition:** Rust 2021 Edition
-- **Web Framework:** `axum` (v0.7), `tokio` (v1, multi-threaded runtime)
+- **Web Framework:** `axum` (v0.7), `tokio` (v1, multi-threaded runtime), `tokio-stream` (v0.1, MCP SSE streaming)
 - **Architecture:** Model-View-Controller (MVC) pattern with strict separation of concerns
 - **Database:** `rusqlite` (v0.31, bundled SQLite) with idempotent schemas
-- **Serialization:** `serde`, `serde_json`, `serde_urlencoded`
-- **Integrations:** Jira Cloud REST API integration (`src/jira.rs`)
-- **Security & Cryptography:** `sha2` (password hashing format `sha256$...`, legacy MD5 fallback support), session cookies (`mantis_string`)
+- **Serialization & HTTP Client:** `serde`, `serde_json`, `reqwest` (v0.12 with `rustls-tls` for Jira and SendGrid integrations)
+- **Integrations:** Jira Cloud REST API (`src/jira.rs`), SendGrid email queue dispatcher (`src/mailer.rs`), and Model Context Protocol (MCP) SSE server (`src/mcp/`, `/mcp/sse` & `/mcp/messages`)
+- **Security & Auth:** `sha2` (password hashing format `sha256$...`, legacy MD5 fallback support), `rand` (v0.8), `AuthContext` web session/project cookies (`MANTIS_STRING_COOKIE`, `MANTIS_PROJECT_COOKIE`), `ApiAuth` Bearer PAT for `/api/rest/*`, and Bearer PAT authentication in `src/mcp/handlers.rs`
 - **UI:** Server-side rendered HTML (`src/views/`) using a modern MantisBT 2.x responsive layout
-- **Testing:** Dedicated 1:1 companion unit test files (`*_test.rs`), `tower::ServiceExt` for HTTP integration tests in `tests/`
+- **Testing:** Dedicated 1:1 companion unit test files (`*_test.rs`), `tower::ServiceExt` and `http-body-util` for integration tests in `tests/`
 
 ---
 
@@ -58,9 +58,9 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 - **Target / Base Branch for PR:**
   - For all regular tasks (`feat/*`, `fix/*`, `refactor/*`, `ci/*`, `docs/*`): **Target MUST be `develop`**.
   - **NEVER** open a PR targeting `main` for standard development tasks.
-  - Releases from `develop` $\rightarrow$ `main` are handled as dedicated release PRs.
+  - Releases from `develop` → `main` are handled as dedicated release PRs.
 - **Pre-PR Quality Gate:**
-  Before pushing and opening a PR, ensure local branch is rebased on `origin/develop` and passes all checks:
+  Before pushing and opening a PR, ensure local branch is rebased on `origin/develop` and passes all checks (note: `.github/workflows/rust.yml` ignores `docs/**`, `**.md`, and `.gitignore`, so docs-only PRs skip GitHub Actions CI):
   ```bash
   cargo fmt --check
   cargo clippy --all-targets --all-features -- -D warnings
@@ -75,79 +75,48 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ## 3. Repository Architecture & Code Layout
 
-Code is cleanly organized into specialized MVC layers with dedicated 1:1 unit test companion files:
+Code is organized into specialized MVC layers with 1:1 companion unit test files (`<module>.rs` + `<module>_test.rs`) across MVC and core modules:
 
 ```text
 src/
-├── lib.rs                   # Library entry point, router assembly
-├── main.rs                  # Binary entry point, TCP listener & environment config
-├── auth.rs                  # AuthContext extractor, password hash, session checks
-├── auth_test.rs             # Unit tests for authentication
-├── db.rs                    # SQLite connection wrapper, schema bootstrap, queries
-├── db_test.rs               # Unit tests for database queries and migrations
-├── jira.rs                  # Jira Cloud REST API client and issue synchronization
-├── jira_test.rs             # Unit tests for Jira integration client
-├── models/                  # [MODEL LAYER] Domain entities, enums, type conversions & DTOs
-│   ├── mod.rs               # Module exports and re-exports
-│   ├── api.rs               # REST API, PAT, and token models
-│   ├── bug.rs               # Bug, BugNote, Attachment, History, BugRelationship
-│   ├── custom_field.rs      # Custom field definitions and project/bug bindings
-│   ├── filter.rs            # Filter criteria, saved filters, sort orders
-│   ├── jira.rs              # Jira configuration and issue mapping models
-│   ├── planning.rs          # Roadmap, changelog, version summary, time tracking
-│   ├── project.rs           # Project, subproject, category, version models
-│   ├── tag.rs               # Tag and issue-tag mapping models
-│   ├── user.rs              # User, access levels, profile models
-│   └── models_test.rs       # Unit tests for domain models
-├── controllers/             # [CONTROLLER LAYER] Axum request orchestration & routing
-│   ├── mod.rs               # Router assembly, state injection, root dispatch
-│   ├── controllers_test.rs  # General router and dispatcher tests
-│   ├── api.rs               # REST API endpoints & token management
-│   ├── api_test.rs          # Controller tests for API endpoints
-│   ├── auth.rs              # Login, logout, account management
-│   ├── auth_test.rs         # Controller tests for auth flows
-│   ├── bugs.rs              # Issue lifecycle, notes, attachments, workflow
-│   ├── bugs_test.rs         # Controller tests for bug operations
-│   ├── custom_fields.rs     # Custom fields CRUD and management
-│   ├── custom_fields_test.rs# Controller tests for custom fields
-│   ├── filters.rs           # Search filters, saved queries, CSV export
-│   ├── filters_test.rs      # Controller tests for filters & export
-│   ├── jira.rs              # Jira settings and push synchronization handlers
-│   ├── jira_test.rs         # Controller tests for Jira integration
-│   ├── planning.rs          # Roadmap, changelog, summary, email queue
-│   ├── planning_test.rs     # Controller tests for planning handlers
-│   ├── projects.rs          # Projects, subprojects, categories, versions
-│   ├── projects_test.rs     # Controller tests for project handlers
-│   ├── tags.rs              # Tag creation, deletion, association
-│   ├── tags_test.rs         # Controller tests for tag handlers
-│   ├── users.rs             # User admin CRUD, access level assignments
-│   └── users_test.rs        # Controller tests for user admin
-└── views/                   # [VIEW LAYER] Server-side HTML renderers & templates
-    ├── mod.rs               # View utilities (HTML escape, timestamp formatting, badges)
-    ├── views_test.rs        # Unit tests for view utilities
-    ├── layout.rs            # Main layout wrapper (navbar, breadcrumbs, sidebar)
-    ├── layout_test.rs       # Unit tests for layout rendering
-    ├── api.rs               # API documentation & token administration views
-    ├── api_test.rs          # View tests for API pages
-    ├── auth.rs              # Login and account view templates
-    ├── auth_test.rs         # View tests for auth pages
-    ├── bugs.rs              # Bug report, view, edit, workflow pages
-    ├── bugs_test.rs         # View tests for bug templates
-    ├── custom_fields.rs     # Custom field management views
-    ├── custom_fields_test.rs# View tests for custom field templates
-    ├── jira.rs              # Jira configuration and issue push modal views
-    ├── jira_test.rs         # View tests for Jira views
-    ├── planning.rs          # Roadmap, changelog, summary, email queue views
-    ├── planning_test.rs     # View tests for planning pages
-    ├── projects.rs          # Project management, categories, versions views
-    ├── projects_test.rs     # View tests for project views
-    ├── tags.rs              # Tag list and management views
-    ├── tags_test.rs         # View tests for tag views
-    ├── users.rs             # User management and creation views
-    └── users_test.rs        # View tests for user management views
-tests/                       # End-to-end HTTP integration tests (tower::ServiceExt)
-docs/                        # Design specifications and implementation plans
+├── lib.rs                      # Library entry point, build_router & CLI commands (create-token)
+├── main.rs                     # Binary entry point, TCP listener, env config & SendGrid worker
+├── auth.rs (+ auth_test.rs)    # AuthContext (cookies), ApiAuth (Bearer PAT), password hashing
+├── db.rs (+ db_test.rs)        # SQLite connection wrapper, schema bootstrap, queries
+├── jira.rs (+ jira_test.rs)    # Jira Cloud REST API client & issue synchronization
+├── mailer.rs                   # SendGrid email queue background dispatcher
+├── mcp/                        # Model Context Protocol (MCP) SSE server & tool dispatcher
+│   ├── mod.rs                  # McpState & /mcp/sse, /mcp/messages router
+│   ├── handlers.rs             # SSE & JSON-RPC HTTP handlers + PAT token auth
+│   ├── protocol.rs             # JSON-RPC / MCP protocol types & error codes
+│   ├── session.rs              # SessionManager for active SSE client streams
+│   └── tools.rs                # Tool definitions & permission-checked DB dispatch
+├── models/                     # [MODEL LAYER] Domain entities, enums, validation & DTOs
+│   ├── mod.rs                  # Submodule exports & re-exports
+│   ├── <domain>.rs             # Domain types (api, bug, custom_field, filter, jira, planning, project, tag, user)
+│   └── models_test.rs          # Unit tests for domain models
+├── controllers/                # [CONTROLLER LAYER] Axum request orchestration & routing
+│   ├── mod.rs                  # Master router merging sub-routers & MCP router (+ controllers_test.rs)
+│   └── <domain>.rs             # Handlers + `pub fn router() -> Router<Db>` (+ <domain>_test.rs)
+└── views/                      # [VIEW LAYER] Server-side HTML renderers & templates
+    ├── mod.rs                  # Shared helpers: html_escape, format_timestamp, status badges, error pages (+ views_test.rs)
+    ├── layout.rs               # Main layout wrapper: navbar, breadcrumbs, sidebar (+ layout_test.rs)
+    └── <domain>.rs             # SSR page templates (+ <domain>_test.rs)
+tests/                          # HTTP/MCP/Jira/SendGrid integration tests (tower::ServiceExt) & manual_test.sh
+docs/                           # Design specifications and implementation plans
 ```
+
+### Runtime Environment Variables
+- **Core & Storage:**
+  - `MANTIS_DB_PATH`: SQLite database file path (default: `mantis.db`).
+  - `MANTIS_ADDR`: Bind address and port (default: `127.0.0.1:3000`).
+  - `MANTIS_MAX_FILE_SIZE`: Maximum upload size in bytes for bug attachments.
+  - `MANTIS_UPLOAD_DIR`: Optional directory path for attachment storage.
+- **MCP Server:**
+  - `MANTIS_ALLOW_QUERY_TOKEN`: Set to `1` or `true` to allow `?token=` query auth on `/mcp/sse` for local dev/testing (disabled by default; prefer `Authorization: Bearer <token>`).
+- **SendGrid Email Worker:**
+  - `SENDGRID_API_KEY`: Enables the background email queue worker when set.
+  - `SENDGRID_FROM_EMAIL`, `SENDGRID_FROM_NAME`, `SENDGRID_ENDPOINT`: Optional sender identity and API endpoint overrides.
 
 ---
 
@@ -171,15 +140,17 @@ When tasked with implementing a feature or fixing a bug, follow this execution s
      - Viewer = 10, Reporter = 25, Updater = 40, Developer = 55, Manager = 70, Administrator = 90.
    - Add companion unit tests in `src/models/models_test.rs`.
 
-4. **Controllers & Routing (`src/controllers/` & `src/auth.rs`):**
-   - Controllers orchestrate HTTP requests: parse inputs, verify permissions, invoke DB queries, pass data to views, and return responses (`Html`, `Redirect`, `Json`, etc.).
-   - Extract `AuthContext` on protected endpoints.
+4. **Controllers, Routing & Integrations (`src/controllers/`, `src/auth.rs`, `src/mcp/`):**
+   - Controllers orchestrate HTTP requests: parse inputs, verify permissions, invoke DB queries, pass data to views, and return responses (`Html`, `Redirect`, `Response`, `Json`, etc.).
+   - Extract `AuthContext` on protected web endpoints and `ApiAuth` (Bearer PAT) on `/api/rest/*` endpoints.
    - Enforce access level guards before performing state mutations:
-     ```rust
-     if ctx.user.access_level < 70 {
-         return Err(...); // Or redirect with error
-     }
-     ```
+     - For global admin/manager actions, check `ctx.user.access_level` and return `views::render_access_denied_page(&ctx)`:
+       ```rust
+       if ctx.user.access_level < 70 {
+           return views::render_access_denied_page(&ctx);
+       }
+       ```
+     - For project-scoped actions (issues, notes, attachments, Jira push, REST API, MCP tools), always check `db.effective_access_level(&ctx.user, project_id)` (or `&auth.user` / `&user`) so project-specific overrides and private projects are respected.
    - Keep controllers thin: never build HTML markup directly in controllers; delegate all rendering to `src/views/`.
    - Each controller defines its own sub-router via `pub fn router() -> Router<Db>`, registered and merged in `src/controllers/mod.rs`.
    - Add companion unit tests in `src/controllers/<domain>_test.rs`.
@@ -187,13 +158,14 @@ When tasked with implementing a feature or fixing a bug, follow this execution s
 5. **Views & Templates (`src/views/`):**
    - Server-side rendered HTML functions in `src/views/<domain>.rs`.
    - Render page content inside the standard shell using `views::layout::render_layout`.
+   - Reuse shared helpers in `src/views/mod.rs` (`render_error_page`, `render_access_denied_page`, `render_not_found_page`, `html_escape`, `format_timestamp`, `render_status_badge`).
    - Ensure form methods (`POST`), hidden inputs (e.g., project context, IDs), and action URLs match routes in `controllers/`.
    - Escape all user-generated content with `views::html_escape` to prevent XSS.
    - Add companion unit tests in `src/views/<domain>_test.rs`.
 
 6. **Automated Testing:**
-   - **Unit Tests:** Maintain 1:1 companion test files (`<module>_test.rs`) using `#[cfg(test)] #[path = "<module>_test.rs"] mod tests;`.
-   - **Integration Tests:** Add or extend integration tests in `tests/` using `tower::ServiceExt`.
+   - **Unit Tests:** Maintain 1:1 companion test files (`<module>_test.rs`) for MVC and core modules using `#[cfg(test)] #[path = "<module>_test.rs"] mod tests;`.
+   - **Integration Tests:** Add or extend integration tests in `tests/` using `tower::ServiceExt` (covering HTTP flows, MCP SSE/tools, Jira, and SendGrid mailer).
    - Test both success and permission-denied / validation-error paths.
 
 ---
@@ -204,16 +176,18 @@ When tasked with implementing a feature or fixing a bug, follow this execution s
    - **ALWAYS** use parameterized queries with `rusqlite::params![...]`.
    - **NEVER** use string interpolation or formatting (`format!("SELECT ... WHERE id = {}", id)`) for SQL statements.
 
-2. **Output Sanitization (XSS & CSV Injection):**
+2. **Output Sanitization & HTTP/HTML Safety:**
    - Escape user-generated content before rendering inside HTML templates using `views::html_escape`.
    - When generating CSV exports, sanitize fields starting with `=`, `+`, `-`, or `@` to prevent spreadsheet formula injection.
+   - Never nest `<form>` tags inside edit pages (verified by `test_no_nested_forms_in_edit_pages`).
+   - Strip `\r` and `\n` characters from error messages placed into redirect `Location` headers or query strings to prevent header injection and `HeaderValue` panics.
 
 3. **Robust Error Handling:**
-   - Do **NOT** use `.unwrap()` or `.expect()` in production controller paths. Propagate errors with `?` or handle them gracefully with appropriate HTTP error status or user notification.
+   - Do **NOT** use `.unwrap()` or `.expect()` in production controller or MCP paths. Propagate errors with `?` or handle them gracefully with appropriate HTTP status, JSON-RPC error, or user notification.
 
 4. **Architecture & Test Separation:**
    - Maintain strict MVC separation: no DB calls or HTTP logic in views; no HTML markup generation in controllers.
-   - Every module must maintain its companion `*_test.rs` file.
+   - Every new MVC or core module must maintain its companion `*_test.rs` file (or dedicated integration tests in `tests/` for integration subsystems).
 
 5. **Dependencies Policy:**
    - Do **NOT** add external dependencies to `Cargo.toml` without explicit user request or confirmation. Favor the Rust standard library and existing crates.

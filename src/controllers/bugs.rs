@@ -1465,6 +1465,23 @@ pub async fn bug_relationship_add(
         return forbidden(&ctx, "Developer access required to manage relationships.");
     }
 
+    let dest_bug = match db.get_bug(form.dest_bug_id) {
+        Ok(Some(b)) => b,
+        _ => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Failed+to+add+relationship",
+                bug_id
+            ))
+            .into_response()
+        }
+    };
+    let dest_eff = db
+        .effective_access_level(&ctx.user, dest_bug.project_id)
+        .unwrap_or(0);
+    if dest_eff < 10 || (dest_bug.view_state == 50 && dest_eff < 55) {
+        return forbidden(&ctx, "Insufficient access to target issue.");
+    }
+
     match db.add_bug_relationship(bug_id, form.dest_bug_id, form.relationship_type) {
         Ok(()) => Redirect::to(&format!("/view_bug_page/{}?msg=Relationship+added", bug_id))
             .into_response(),

@@ -490,6 +490,18 @@ pub async fn manage_proj_user_add(
         return res;
     }
 
+    if form.access_level > ctx.user.access_level {
+        return (
+            StatusCode::FORBIDDEN,
+            views::projects::render_proj_user_error(
+                &ctx,
+                id,
+                "Cannot assign an access level higher than your own.",
+            ),
+        )
+            .into_response();
+    }
+
     match db.set_project_user(id, form.user_id, form.access_level) {
         Ok(_) => Redirect::to(&format!("/manage_proj_edit_page/{}", id)).into_response(),
         Err(e) => views::projects::render_proj_user_error(&ctx, id, &e).into_response(),

@@ -158,7 +158,6 @@ fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<()
         std::env::var("MANTIS_ALLOW_LOCAL_JIRA")
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false)
-            || std::env::var("CARGO_MANIFEST_DIR").is_ok()
             || cfg!(test)
     };
 
@@ -170,8 +169,10 @@ fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<()
         }
 
         if let Some(host) = parsed.host_str() {
-            let host_lower = host.to_ascii_lowercase();
+            let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+            let host_lower = clean_host.to_ascii_lowercase();
             if host_lower == "localhost"
+                || host_lower.ends_with(".localhost")
                 || host_lower == "instance-data"
                 || host_lower.ends_with(".internal")
                 || host_lower.ends_with(".local")
@@ -181,7 +182,7 @@ fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<()
                 ));
             }
 
-            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
                 if is_blocked_ip(&ip) {
                     return Err(JiraError::ConfigError(
                         "Private, loopback, or metadata IP addresses are not allowed".to_string(),
@@ -194,15 +195,36 @@ fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<()
     Ok(())
 }
 
+fn is_blocked_ipv4(ipv4: &std::net::Ipv4Addr) -> bool {
+    let octets = ipv4.octets();
+    let is_cgnat = octets[0] == 100 && (octets[1] & 0xc0) == 64;
+    ipv4.is_loopback()
+        || ipv4.is_private()
+        || ipv4.is_link_local()
+        || ipv4.is_broadcast()
+        || ipv4.is_unspecified()
+        || ipv4.is_documentation()
+        || is_cgnat
+        || octets[0] == 0
+}
+
 fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
-    if ip.is_loopback() || ip.is_unspecified() {
-        return true;
-    }
     match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            ipv4.is_private() || ipv4.is_link_local() || ipv4.is_broadcast()
-        }
+        std::net::IpAddr::V4(ipv4) => is_blocked_ipv4(ipv4),
         std::net::IpAddr::V6(ipv6) => {
+            if ipv6.is_loopback() || ipv6.is_unspecified() {
+                return true;
+            }
+            if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
+                if is_blocked_ipv4(&mapped_v4) {
+                    return true;
+                }
+            }
+            if let Some(compat_v4) = ipv6.to_ipv4() {
+                if is_blocked_ipv4(&compat_v4) {
+                    return true;
+                }
+            }
             let segments = ipv6.segments();
             (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
         }
@@ -213,6 +235,7 @@ impl JiraClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }

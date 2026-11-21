@@ -8,6 +8,7 @@ async fn spawn_mock_jira(
     status_code: StatusCode,
     body_json: serde_json::Value,
 ) -> (String, tokio::sync::oneshot::Sender<()>) {
+    std::env::set_var("MANTIS_ALLOW_LOCAL_JIRA", "1");
     let default_key = body_json
         .get("key")
         .and_then(|k| k.as_str())
@@ -65,6 +66,7 @@ async fn spawn_mock_jira(
 }
 
 async fn login(app: &axum::Router, username: &str, password: &str) -> String {
+    std::env::set_var("MANTIS_ALLOW_LOCAL_JIRA", "1");
     let res = app
         .clone()
         .oneshot(

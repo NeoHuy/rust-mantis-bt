@@ -209,4 +209,17 @@ fn test_validate_jira_url_ssrf_protection() {
     assert!(validate_jira_url_with_enforcement("https://instance-data", true).is_err());
     assert!(validate_jira_url_with_enforcement("https://metadata.google.internal", true).is_err());
     assert!(validate_jira_url_with_enforcement("https://service.local", true).is_err());
+    assert!(validate_jira_url_with_enforcement("https://sub.localhost", true).is_err());
+
+    // CGNAT & 0.0.0.0/8
+    assert!(validate_jira_url_with_enforcement("https://100.64.0.1", true).is_err());
+    assert!(validate_jira_url_with_enforcement("https://0.0.0.0", true).is_err());
+
+    // IPv6 loopback, unique-local, link-local, and IPv4-mapped IPv6 literals
+    assert!(validate_jira_url_with_enforcement("https://[::1]:8080", true).is_err());
+    assert!(validate_jira_url_with_enforcement("https://[fc00::1]", true).is_err());
+    assert!(validate_jira_url_with_enforcement("https://[fe80::1]", true).is_err());
+    assert!(validate_jira_url_with_enforcement("https://[::ffff:127.0.0.1]", true).is_err());
+    assert!(validate_jira_url_with_enforcement("https://[::ffff:169.254.169.254]", true).is_err());
+    assert!(validate_jira_url_with_enforcement("https://[::ffff:10.0.0.1]", true).is_err());
 }

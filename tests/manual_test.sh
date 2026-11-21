@@ -237,13 +237,13 @@ assert_contains "$CSV_CONTENT" "Memory leak in auth cache" "CSV export contains 
 # --- TEST SCENARIO 9: REST API & API Tokens ---
 echo ""
 echo "--- Scenario 9: REST API & API Tokens ---"
-CREATE_TOKEN_RESP=$(curl -s -i -b "${COOKIE_JAR}" -d "name=Test+API+Token" "${BASE_URL}/api_token_create")
+CREATE_TOKEN_RESP=$(curl -s -i -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" -d "name=Test+API+Token" "${BASE_URL}/api_token_create")
 assert_contains "$CREATE_TOKEN_RESP" "303" "POST /api_token_create redirects with created token"
 
-RAW_TOKEN=$(echo "$CREATE_TOKEN_RESP" | grep -i "location:" | grep -oE 'token=[a-zA-Z0-9_-]+' | cut -d'=' -f2 | tr -d '\r\n' || true)
+RAW_TOKEN=$(echo "$CREATE_TOKEN_RESP" | grep -i "set-cookie:" | grep -oE 'MANTIS_FLASH_TOKEN=[a-zA-Z0-9_-]+' | cut -d'=' -f2 | tr -d '\r\n' || true)
 echo "  [INFO] Extracted API Token: ${RAW_TOKEN}"
 
-TOKEN_PAGE=$(curl -s -b "${COOKIE_JAR}" "${BASE_URL}/api_tokens_page?token=${RAW_TOKEN}")
+TOKEN_PAGE=$(curl -s -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" "${BASE_URL}/api_tokens_page")
 assert_contains "$TOKEN_PAGE" "New API Token Created!" "API tokens page renders new token banner"
 
 if [[ -n "$RAW_TOKEN" ]]; then

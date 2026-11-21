@@ -59,7 +59,7 @@ pub async fn login_page(headers: HeaderMap, State(db): State<Db>) -> Response {
     let cookies = parse_cookies(&headers);
     if let Some(cookie_str) = cookies.get("MANTIS_STRING_COOKIE") {
         if let Ok(Some(user)) = db.get_user_by_cookie(cookie_str) {
-            if user.enabled == 1 {
+            if user.enabled == 1 && !crate::auth::is_session_expired(&user) {
                 return Redirect::to("/my_view_page").into_response();
             }
         }
@@ -71,8 +71,12 @@ pub async fn login_page(headers: HeaderMap, State(db): State<Db>) -> Response {
 pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> Response {
     match db.authenticate(&form.username, &form.password) {
         Ok(Some(user)) => {
-            let cookie_val =
-                make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, None);
+            let cookie_val = make_cookie_header(
+                "MANTIS_STRING_COOKIE",
+                &user.cookie_string,
+                true,
+                Some(crate::auth::session_ttl_secs()),
+            );
             let target_url = "/my_view_page";
             let mut res = Redirect::to(target_url).into_response();
             if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
@@ -80,7 +84,12 @@ pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> 
             }
             res
         }
-        _ => (
+        Err(lock_msg) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            views::auth::render_login_page(Some(&lock_msg), db.is_signup_allowed()),
+        )
+            .into_response(),
+        Ok(None) => (
             StatusCode::UNAUTHORIZED,
             views::auth::render_login_page(
                 Some("Invalid username or password."),
@@ -95,7 +104,7 @@ pub async fn signup_page(headers: HeaderMap, State(db): State<Db>) -> Response {
     let cookies = parse_cookies(&headers);
     if let Some(cookie_str) = cookies.get("MANTIS_STRING_COOKIE") {
         if let Ok(Some(user)) = db.get_user_by_cookie(cookie_str) {
-            if user.enabled == 1 {
+            if user.enabled == 1 && !crate::auth::is_session_expired(&user) {
                 return Redirect::to("/my_view_page").into_response();
             }
         }
@@ -138,8 +147,12 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
 
     match db.signup_user(&form.username, realname, &form.email, &form.password) {
         Ok(user) => {
-            let cookie_val =
-                make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, None);
+            let cookie_val = make_cookie_header(
+                "MANTIS_STRING_COOKIE",
+                &user.cookie_string,
+                true,
+                Some(crate::auth::session_ttl_secs()),
+            );
             let mut res = views::auth::render_signup_success_page(&user.username).into_response();
             if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
                 res.headers_mut().insert(SET_COOKIE, hv);
@@ -154,7 +167,16 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
     }
 }
 
-pub async fn logout() -> Response {
+pub async fn logout(headers: HeaderMap, State(db): State<Db>) -> Response {
+    let cookies = parse_cookies(&headers);
+    if let Some(cookie_str) = cookies.get("MANTIS_STRING_COOKIE") {
+        if !cookie_str.is_empty() {
+            if let Ok(Some(user)) = db.get_user_by_cookie(cookie_str) {
+                let _ = db.rotate_user_cookie(user.id);
+            }
+        }
+    }
+
     let clear_auth = make_cookie_header("MANTIS_STRING_COOKIE", "", true, Some(0));
     let clear_proj = make_cookie_header("MANTIS_PROJECT_COOKIE", "", false, Some(0));
 
@@ -267,7 +289,24 @@ pub async fn account_update(
         ctx.user.enabled == 1,
         ctx.user.protected == 1,
     ) {
-        Ok(_) => Redirect::to("/account_page?msg=Account+updated+successfully").into_response(),
+        Ok(_) => {
+            let mut res =
+                Redirect::to("/account_page?msg=Account+updated+successfully").into_response();
+            if new_password.is_some() {
+                if let Ok(Some(updated_user)) = db.get_user_by_id(ctx.user.id) {
+                    let cookie_val = make_cookie_header(
+                        "MANTIS_STRING_COOKIE",
+                        &updated_user.cookie_string,
+                        true,
+                        Some(crate::auth::session_ttl_secs()),
+                    );
+                    if let Ok(hv) = HeaderValue::from_str(&cookie_val) {
+                        res.headers_mut().insert(SET_COOKIE, hv);
+                    }
+                }
+            }
+            res
+        }
         Err(e) => {
             let content = format!(
                 "<p>Failed to update account: {}</p>",

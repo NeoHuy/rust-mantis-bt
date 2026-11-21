@@ -1,4 +1,4 @@
-use crate::auth::{ApiAuth, AuthContext};
+use crate::auth::{make_cookie_header_with_path, parse_cookies, ApiAuth, AuthContext};
 use crate::controllers::parse_bool;
 use crate::db::Db;
 use crate::models::{
@@ -7,7 +7,8 @@ use crate::models::{
 };
 use crate::views;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::header::{HeaderMap, SET_COOKIE};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Json;
@@ -19,7 +20,6 @@ use serde_json::{json, Value};
 pub struct FlashQuery {
     pub msg: Option<String>,
     pub err: Option<String>,
-    pub token: Option<String>,
 }
 
 fn forbidden_html(ctx: &AuthContext, msg: &str) -> Response {
@@ -37,6 +37,7 @@ fn forbidden_html(ctx: &AuthContext, msg: &str) -> Response {
 // ─── Web UI: API Tokens & Plugin Management ─────────────────────────────────
 
 pub async fn api_tokens_page(
+    headers: HeaderMap,
     State(db): State<Db>,
     ctx: AuthContext,
     Query(q): Query<FlashQuery>,
@@ -55,15 +56,36 @@ pub async fn api_tokens_page(
         Vec::new()
     };
 
-    views::api::render_api_tokens_page(
+    let cookies = parse_cookies(&headers);
+    let flash_token = cookies
+        .get("MANTIS_FLASH_TOKEN")
+        .filter(|t| !t.is_empty())
+        .cloned();
+
+    let mut res = views::api::render_api_tokens_page(
         &ctx,
         &tokens,
         &all_tokens,
-        q.token.as_deref(),
+        flash_token.as_deref(),
         q.msg.as_deref(),
         q.err.as_deref(),
     )
-    .into_response()
+    .into_response();
+
+    if flash_token.is_some() {
+        let clear_flash = make_cookie_header_with_path(
+            "MANTIS_FLASH_TOKEN",
+            "",
+            "/api_tokens_page",
+            true,
+            Some(0),
+        );
+        if let Ok(hv) = HeaderValue::from_str(&clear_flash) {
+            res.headers_mut().append(SET_COOKIE, hv);
+        }
+    }
+
+    res
 }
 
 #[derive(Deserialize)]
@@ -84,11 +106,20 @@ pub async fn api_token_create(
     }
 
     match db.create_api_token(ctx.user.id, &form.name) {
-        Ok((_id, raw_token)) => Redirect::to(&format!(
-            "/api_tokens_page?msg=Token+created&token={}",
-            raw_token
-        ))
-        .into_response(),
+        Ok((_id, raw_token)) => {
+            let mut res = Redirect::to("/api_tokens_page?msg=Token+created").into_response();
+            let flash_cookie = make_cookie_header_with_path(
+                "MANTIS_FLASH_TOKEN",
+                &raw_token,
+                "/api_tokens_page",
+                true,
+                Some(60),
+            );
+            if let Ok(hv) = HeaderValue::from_str(&flash_cookie) {
+                res.headers_mut().append(SET_COOKIE, hv);
+            }
+            res
+        }
         Err(_) => {
             Redirect::to("/api_tokens_page?err=Invalid+or+duplicate+token+name").into_response()
         }

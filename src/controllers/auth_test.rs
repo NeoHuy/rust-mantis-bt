@@ -26,6 +26,7 @@ fn test_account_update_form_deserialize() {
     assert_eq!(form.email, "john@example.com");
     assert_eq!(form.password.as_deref(), Some("newpass"));
     assert_eq!(form.password_confirm.as_deref(), Some("newpass"));
+    assert_eq!(form.current_password, None);
 }
 
 #[tokio::test]

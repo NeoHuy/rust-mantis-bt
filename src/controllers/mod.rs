@@ -47,6 +47,27 @@ async fn logo_handler() -> impl IntoResponse {
     )
 }
 
+pub async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    response
+}
+
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/", get(root_handler))
@@ -62,6 +83,7 @@ pub fn router() -> Router<Db> {
         .merge(planning::router())
         .merge(api::router())
         .merge(jira::router())
+        .layer(axum::middleware::from_fn(security_headers_middleware))
 }
 
 pub fn build_router(db: Db) -> Router {

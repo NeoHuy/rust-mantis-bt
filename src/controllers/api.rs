@@ -615,6 +615,13 @@ pub async fn rest_update_issue(
     let eff = db
         .effective_access_level(&auth.user, bug.project_id)
         .unwrap_or(0);
+    if bug.view_state == 50 && eff < 55 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "message": "Access denied to private issue" })),
+        )
+            .into_response();
+    }
     let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == auth.user.id);
     if !can_edit {
         return (
@@ -624,6 +631,39 @@ pub async fn rest_update_issue(
             .into_response();
     }
 
+    let handler_id = payload.handler.and_then(|h| h.id);
+    if let Some(hid) = handler_id {
+        if hid != bug.handler_id && eff < 55 {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "message": "Developer access required to assign issues" })),
+            )
+                .into_response();
+        }
+    }
+
+    if let Some(ref st_ref) = payload.status {
+        if let Some(new_st) = st_ref.id {
+            let new_st = new_st as i32;
+            let required_level = if new_st == 90 {
+                70
+            } else if new_st == 80 || bug.status >= 80 {
+                55
+            } else {
+                40
+            };
+            if eff < required_level {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(
+                        json!({ "message": "Insufficient access level for this status transition" }),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let update = BugUpdate {
         summary: payload.summary,
         description: payload.description,
@@ -631,7 +671,7 @@ pub async fn rest_update_issue(
         additional_information: payload.additional_information,
         priority: payload.priority.and_then(|p| p.id).map(|v| v as i32),
         severity: payload.severity.and_then(|s| s.id).map(|v| v as i32),
-        handler_id: payload.handler.and_then(|h| h.id),
+        handler_id,
         target_version: payload.target_version,
         fixed_in_version: payload.fixed_in_version,
         ..Default::default()
@@ -725,6 +765,13 @@ pub async fn rest_add_issue_note(
     }
 
     let vs = payload.view_state.and_then(|v| v.id).unwrap_or(10) as i32;
+    if vs == 50 && eff < 55 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "message": "Developer access required to add private bugnotes" })),
+        )
+            .into_response();
+    }
     let mins = if eff >= 55 {
         payload.time_tracking.unwrap_or(0).max(0)
     } else {

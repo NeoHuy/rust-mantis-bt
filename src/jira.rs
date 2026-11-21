@@ -130,10 +130,112 @@ impl Default for JiraClient {
     }
 }
 
+pub fn validate_jira_url(base_url: &str) -> Result<(), JiraError> {
+    validate_jira_url_internal(base_url, false)
+}
+
+pub fn validate_jira_url_with_enforcement(
+    base_url: &str,
+    enforce_strict: bool,
+) -> Result<(), JiraError> {
+    validate_jira_url_internal(base_url, enforce_strict)
+}
+
+fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<(), JiraError> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(JiraError::ConfigError(
+            "Jira Base URL cannot be empty".to_string(),
+        ));
+    }
+
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| JiraError::ConfigError(format!("Invalid Jira Base URL: {}", e)))?;
+
+    let allow_local = if enforce_strict {
+        false
+    } else {
+        std::env::var("MANTIS_ALLOW_LOCAL_JIRA")
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false)
+            || cfg!(test)
+    };
+
+    if !allow_local {
+        if parsed.scheme() != "https" {
+            return Err(JiraError::ConfigError(
+                "Jira Base URL must use HTTPS".to_string(),
+            ));
+        }
+
+        if let Some(host) = parsed.host_str() {
+            let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+            let host_lower = clean_host.to_ascii_lowercase();
+            if host_lower == "localhost"
+                || host_lower.ends_with(".localhost")
+                || host_lower == "instance-data"
+                || host_lower.ends_with(".internal")
+                || host_lower.ends_with(".local")
+            {
+                return Err(JiraError::ConfigError(
+                    "Local and internal Jira hosts are not allowed".to_string(),
+                ));
+            }
+
+            if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
+                if is_blocked_ip(&ip) {
+                    return Err(JiraError::ConfigError(
+                        "Private, loopback, or metadata IP addresses are not allowed".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_blocked_ipv4(ipv4: &std::net::Ipv4Addr) -> bool {
+    let octets = ipv4.octets();
+    let is_cgnat = octets[0] == 100 && (octets[1] & 0xc0) == 64;
+    ipv4.is_loopback()
+        || ipv4.is_private()
+        || ipv4.is_link_local()
+        || ipv4.is_broadcast()
+        || ipv4.is_unspecified()
+        || ipv4.is_documentation()
+        || is_cgnat
+        || octets[0] == 0
+}
+
+fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => is_blocked_ipv4(ipv4),
+        std::net::IpAddr::V6(ipv6) => {
+            if ipv6.is_loopback() || ipv6.is_unspecified() {
+                return true;
+            }
+            if let Some(mapped_v4) = ipv6.to_ipv4_mapped() {
+                if is_blocked_ipv4(&mapped_v4) {
+                    return true;
+                }
+            }
+            if let Some(compat_v4) = ipv6.to_ipv4() {
+                if is_blocked_ipv4(&compat_v4) {
+                    return true;
+                }
+            }
+            let segments = ipv6.segments();
+            (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 impl JiraClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }
@@ -149,12 +251,8 @@ impl JiraClient {
         email: &str,
         api_token: &str,
     ) -> Result<JiraMyselfResponse, JiraError> {
+        validate_jira_url(base_url)?;
         let trimmed_url = base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL cannot be empty".to_string(),
-            ));
-        }
         if email.trim().is_empty() || api_token.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Email and API token must be configured".to_string(),
@@ -198,12 +296,8 @@ impl JiraClient {
         issue_type: &str,
         epic_key: Option<&str>,
     ) -> Result<JiraCreateIssueResponse, JiraError> {
+        validate_jira_url(&config.base_url)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL is not configured".to_string(),
-            ));
-        }
         if config.project_key.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Jira Project Key is not configured for this project".to_string(),
@@ -266,12 +360,8 @@ impl JiraClient {
         config: &JiraResolvedConfig,
         key: &str,
     ) -> Result<JiraIssueDetails, JiraError> {
+        validate_jira_url(&config.base_url)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL is not configured".to_string(),
-            ));
-        }
         if config.email.trim().is_empty() || config.api_token.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Email and API token must be configured".to_string(),
@@ -335,12 +425,8 @@ impl JiraClient {
         &self,
         config: &JiraResolvedConfig,
     ) -> Result<Vec<JiraEpic>, JiraError> {
+        validate_jira_url(&config.base_url)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
-        if trimmed_url.is_empty() {
-            return Err(JiraError::ConfigError(
-                "Jira Base URL is not configured".to_string(),
-            ));
-        }
         if config.project_key.trim().is_empty() {
             return Err(JiraError::ConfigError(
                 "Jira Project Key is not configured for this project".to_string(),

@@ -77,3 +77,127 @@ fn test_rest_add_note_payload_deserialize() {
     assert_eq!(payload.view_state.as_ref().and_then(|v| v.id), Some(10));
     assert_eq!(payload.time_tracking, Some(45));
 }
+
+#[tokio::test]
+async fn test_rest_update_issue_and_add_note_access_guards() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("PublicProj", 10, 10, "", true).unwrap();
+    let reporter_id = db
+        .create_user("rep1", "Reporter", "rep@test.com", "pass", 25, true, false)
+        .unwrap();
+    let updater_id = db
+        .create_user("upd1", "Updater", "upd@test.com", "pass", 40, true, false)
+        .unwrap();
+    let reporter = db.get_user_by_id(reporter_id).unwrap().unwrap();
+    let updater = db.get_user_by_id(updater_id).unwrap().unwrap();
+
+    // Private bug (view_state = 50)
+    let priv_bug = db
+        .create_bug(
+            proj_id,
+            1,
+            1,
+            "Secret Bug",
+            "Confidential",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+
+    // Updater (40) cannot PATCH a private bug
+    let resp = rest_update_issue(
+        State(db.clone()),
+        ApiAuth {
+            user: updater.clone(),
+        },
+        Path(priv_bug),
+        Json(RestPatchIssuePayload {
+            summary: Some("Hacked".to_string()),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Public bug created by reporter
+    let pub_bug = db
+        .create_bug(
+            proj_id,
+            reporter_id,
+            1,
+            "Public Bug",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Reporter (25) cannot assign handler via PATCH
+    let resp = rest_update_issue(
+        State(db.clone()),
+        ApiAuth {
+            user: reporter.clone(),
+        },
+        Path(pub_bug),
+        Json(RestPatchIssuePayload {
+            handler: Some(IdNameRef {
+                id: Some(1),
+                name: None,
+            }),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Reporter (25) cannot resolve (80) or close (90) via PATCH
+    let resp = rest_update_issue(
+        State(db.clone()),
+        ApiAuth {
+            user: reporter.clone(),
+        },
+        Path(pub_bug),
+        Json(RestPatchIssuePayload {
+            status: Some(IdNameRef {
+                id: Some(80),
+                name: None,
+            }),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Reporter (25) cannot add a private bugnote (view_state = 50)
+    let resp = rest_add_issue_note(
+        State(db),
+        ApiAuth { user: reporter },
+        Path(pub_bug),
+        Json(RestAddNotePayload {
+            text: "Secret note".to_string(),
+            view_state: Some(IdNameRef {
+                id: Some(50),
+                name: None,
+            }),
+            time_tracking: None,
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}

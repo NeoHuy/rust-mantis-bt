@@ -108,6 +108,9 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
 }
 
 pub fn router() -> Router<Db> {
+    let upload_limit = max_file_size()
+        .saturating_add(2 * 1024 * 1024)
+        .max(10 * 1024 * 1024);
     Router::new()
         .route("/view_all_bug_page", get(view_all_bug_page))
         .route("/view_bug_page/:id", get(view_bug_page))
@@ -127,7 +130,7 @@ pub fn router() -> Router<Db> {
         )
         .route(
             "/bug_file_add/:bug_id",
-            post(bug_file_add).layer(DefaultBodyLimit::disable()),
+            post(bug_file_add).layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/file/bug/:id/:filename", get(bug_file_download))
         .route("/bug_file_delete/:id", post(bug_file_delete))
@@ -755,7 +758,7 @@ pub async fn view_bug_page(
         } else if let Ok(Some(cached)) = db.get_cached_jira_epics(pkey, 86400) {
             cached
         } else {
-            let client = crate::jira::JiraClient::new();
+            let client = crate::jira::JiraClient::with_allow_local(db.allow_local_jira());
             match client.list_epics(&jira_conf).await {
                 Ok(fetched) => {
                     let _ = db.save_jira_epics_cache(pkey, &fetched);
@@ -1462,6 +1465,23 @@ pub async fn bug_relationship_add(
         .unwrap_or(0);
     if eff < 55 {
         return forbidden(&ctx, "Developer access required to manage relationships.");
+    }
+
+    let dest_bug = match db.get_bug(form.dest_bug_id) {
+        Ok(Some(b)) => b,
+        _ => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Failed+to+add+relationship",
+                bug_id
+            ))
+            .into_response()
+        }
+    };
+    let dest_eff = db
+        .effective_access_level(&ctx.user, dest_bug.project_id)
+        .unwrap_or(0);
+    if dest_eff < 10 || (dest_bug.view_state == 50 && dest_eff < 55) {
+        return forbidden(&ctx, "Insufficient access to target issue.");
     }
 
     match db.add_bug_relationship(bug_id, form.dest_bug_id, form.relationship_type) {

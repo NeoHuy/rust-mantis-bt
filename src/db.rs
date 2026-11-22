@@ -11,10 +11,31 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    allow_local_jira: Arc<std::sync::atomic::AtomicBool>,
     base_url: Arc<String>,
 }
 
 impl Db {
+    pub(crate) fn from_connection(conn: Connection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+            allow_local_jira: Arc::new(std::sync::atomic::AtomicBool::new(
+                crate::jira::env_allow_local_jira(),
+            )),
+            base_url: Arc::new(Self::resolve_base_url()),
+        }
+    }
+
+    pub fn allow_local_jira(&self) -> bool {
+        self.allow_local_jira
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_allow_local_jira(&self, allow: bool) {
+        self.allow_local_jira
+            .store(allow, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("db lock poisoned")
     }
@@ -36,10 +57,7 @@ impl Db {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-            base_url: Arc::new(Self::resolve_base_url()),
-        };
+        let db = Self::from_connection(conn);
         db.migrate()?;
         Ok(db)
     }
@@ -50,19 +68,13 @@ impl Db {
             "PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self {
-            conn: Arc::new(Mutex::new(conn)),
-            base_url: Arc::new(Self::resolve_base_url()),
-        };
+        let db = Self::from_connection(conn);
         db.migrate()?;
         Ok(db)
     }
 
     pub fn from_conn(conn: Connection) -> Self {
-        Self {
-            conn: Arc::new(Mutex::new(conn)),
-            base_url: Arc::new(Self::resolve_base_url()),
-        }
+        Self::from_connection(conn)
     }
 
     pub fn can_view_bug(user_id: i64, user_access: i32, bug: &Bug) -> bool {

@@ -66,6 +66,20 @@ pub async fn manage_jira_page(
     let cached_epics = db.list_cached_jira_epics_summary().unwrap_or_default();
     let status_mappings = db.list_jira_status_mappings().unwrap_or_default();
 
+    let saved_url_warning = if q.err.is_none() && !config.base_url.trim().is_empty() {
+        crate::jira::validate_jira_url_with_allow_local(&config.base_url, db.allow_local_jira())
+            .err()
+            .map(|e| {
+                format!(
+                    "Saved Jira Base URL is currently blocked by SSRF policy ({}). For internal or on-premises Jira instances, set MANTIS_ALLOW_LOCAL_JIRA=1 and restart the server.",
+                    e
+                )
+            })
+    } else {
+        None
+    };
+    let effective_err = q.err.as_deref().or(saved_url_warning.as_deref());
+
     views::jira::render_manage_jira_page(
         &ctx,
         &config,
@@ -74,7 +88,7 @@ pub async fn manage_jira_page(
         &cached_epics,
         &status_mappings,
         q.msg.as_deref(),
-        q.err.as_deref(),
+        effective_err,
     )
     .into_response()
 }
@@ -112,6 +126,18 @@ pub async fn manage_jira_config(
     } else {
         None
     };
+
+    if enabled || !base_url.is_empty() {
+        if let Err(e) =
+            crate::jira::validate_jira_url_with_allow_local(base_url, db.allow_local_jira())
+        {
+            return Redirect::to(&format!(
+                "/manage_jira_page?err=Failed+to+save+config:+{}",
+                url_encode(&sanitize_error_message(&e.to_string()))
+            ))
+            .into_response();
+        }
+    }
 
     if let Err(e) = db.save_jira_global_config(
         enabled,
@@ -190,7 +216,7 @@ pub async fn manage_jira_test(State(db): State<Db>, ctx: AuthContext) -> Respons
         }
     };
 
-    let client = JiraClient::new();
+    let client = JiraClient::with_allow_local(db.allow_local_jira());
     match client
         .test_connection(&config.base_url, &config.email, &config.api_token)
         .await
@@ -256,7 +282,7 @@ pub async fn manage_jira_refresh_epics(State(db): State<Db>, ctx: AuthContext) -
             .into_response();
     }
 
-    let client = JiraClient::new();
+    let client = JiraClient::with_allow_local(db.allow_local_jira());
     let mut total_epics = 0;
     let mut errors = Vec::new();
 
@@ -339,7 +365,7 @@ pub async fn sync_bug_with_jira(
         .into_response();
     }
 
-    let client = JiraClient::new();
+    let client = JiraClient::with_allow_local(db.allow_local_jira());
     let existing_link = match db.get_jira_link_by_bug_id(bug_id) {
         Ok(l) => l,
         Err(e) => {

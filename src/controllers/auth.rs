@@ -36,6 +36,7 @@ pub struct AccountUpdateForm {
     pub email: String,
     pub password: Option<String>,
     pub password_confirm: Option<String>,
+    pub current_password: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -221,6 +222,22 @@ pub async fn account_update(
                     "Error",
                     &ctx,
                     Some("Passwords do not match."),
+                    content,
+                ),
+            )
+                .into_response();
+        }
+        let current_pw = form.current_password.as_deref().unwrap_or("");
+        if current_pw.trim().is_empty()
+            || !crate::auth::verify_password(current_pw, &ctx.user.password)
+        {
+            let content = "<p>Current password is incorrect or missing.</p>";
+            return (
+                StatusCode::BAD_REQUEST,
+                views::layout::render_layout(
+                    "Error",
+                    &ctx,
+                    Some("Current password is incorrect or missing."),
                     content,
                 ),
             )

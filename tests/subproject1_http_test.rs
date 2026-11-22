@@ -166,6 +166,49 @@ async fn test_auth_flow_login_failure_logout_and_account_update() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
+    // 4b. Update account with missing or invalid current_password returns 400
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/account_update")
+                .header("cookie", &cookie_hdr)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("realname=Admin+Renamed&email=admin@test.com&password=newpass&password_confirm=newpass&current_password=wrongpass"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 4c. Update account password with correct current_password succeeds
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/account_update")
+                .header("cookie", &cookie_hdr)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("realname=Admin+Renamed&email=admin@test.com&password=newpass&password_confirm=newpass&current_password=root"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Verify security headers on response
+    assert_eq!(res.headers().get("x-frame-options").unwrap(), "SAMEORIGIN");
+    assert_eq!(
+        res.headers().get("x-content-type-options").unwrap(),
+        "nosniff"
+    );
+    assert_eq!(
+        res.headers().get("referrer-policy").unwrap(),
+        "strict-origin-when-cross-origin"
+    );
+
     // 5. Update account successfully (realname & email)
     let res = app
         .clone()

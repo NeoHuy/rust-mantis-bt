@@ -47,6 +47,27 @@ async fn logo_handler() -> impl IntoResponse {
     )
 }
 
+pub async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        axum::http::header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    response
+}
+
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/", get(root_handler))
@@ -66,7 +87,10 @@ pub fn router() -> Router<Db> {
 
 pub fn build_router(db: Db) -> Router {
     let mcp_router = crate::mcp::router(db.clone(), crate::mcp::SessionManager::new());
-    router().with_state(db).merge(mcp_router)
+    router()
+        .with_state(db)
+        .merge(mcp_router)
+        .layer(axum::middleware::from_fn(security_headers_middleware))
 }
 
 #[cfg(test)]

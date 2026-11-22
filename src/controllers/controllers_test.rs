@@ -31,6 +31,7 @@ async fn test_security_headers_middleware() {
     let app = build_router(db);
 
     let res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/login")
@@ -40,11 +41,24 @@ async fn test_security_headers_middleware() {
         .await
         .unwrap();
 
-    let headers = res.headers();
-    assert_eq!(headers.get("x-frame-options").unwrap(), "SAMEORIGIN");
-    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
-    assert_eq!(
-        headers.get("referrer-policy").unwrap(),
-        "strict-origin-when-cross-origin"
-    );
+    for response in [
+        res,
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap(),
+    ] {
+        let headers = response.headers();
+        assert_eq!(headers.get("x-frame-options").unwrap(), "SAMEORIGIN");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(
+            headers.get("referrer-policy").unwrap(),
+            "strict-origin-when-cross-origin"
+        );
+    }
 }

@@ -186,8 +186,10 @@ async fn test_rest_update_issue_and_add_note_access_guards() {
 
     // Reporter (25) cannot add a private bugnote (view_state = 50)
     let resp = rest_add_issue_note(
-        State(db),
-        ApiAuth { user: reporter },
+        State(db.clone()),
+        ApiAuth {
+            user: reporter.clone(),
+        },
         Path(pub_bug),
         Json(RestAddNotePayload {
             text: "Secret note".to_string(),
@@ -200,4 +202,75 @@ async fn test_rest_update_issue_and_add_note_access_guards() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Reporter (25) CAN PATCH their own private bug
+    let rep_priv_bug = db
+        .create_bug(
+            proj_id,
+            reporter_id,
+            1,
+            "My Private Bug",
+            "Reporter confidential",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+    let resp = rest_update_issue(
+        State(db.clone()),
+        ApiAuth {
+            user: reporter.clone(),
+        },
+        Path(rep_priv_bug),
+        Json(RestPatchIssuePayload {
+            summary: Some("Updated Own Private Bug".to_string()),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Move pub_bug to resolved (80)
+    db.change_bug_status(pub_bug, 1, 80, 20, None).unwrap();
+
+    // Updater (40) CAN update summary while echoing unchanged status=80
+    let resp = rest_update_issue(
+        State(db.clone()),
+        ApiAuth { user: updater },
+        Path(pub_bug),
+        Json(RestPatchIssuePayload {
+            summary: Some("Updated while resolved".to_string()),
+            status: Some(IdNameRef {
+                id: Some(80),
+                name: None,
+            }),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Reporter (25) CAN reopen their own resolved (80) bug back to feedback (20)
+    let resp = rest_update_issue(
+        State(db.clone()),
+        ApiAuth { user: reporter },
+        Path(pub_bug),
+        Json(RestPatchIssuePayload {
+            status: Some(IdNameRef {
+                id: Some(20),
+                name: None,
+            }),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(db.get_bug(pub_bug).unwrap().unwrap().status, 20);
 }

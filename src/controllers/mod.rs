@@ -83,12 +83,14 @@ pub fn router() -> Router<Db> {
         .merge(planning::router())
         .merge(api::router())
         .merge(jira::router())
-        .layer(axum::middleware::from_fn(security_headers_middleware))
 }
 
 pub fn build_router(db: Db) -> Router {
     let mcp_router = crate::mcp::router(db.clone(), crate::mcp::SessionManager::new());
-    router().with_state(db).merge(mcp_router)
+    router()
+        .with_state(db)
+        .merge(mcp_router)
+        .layer(axum::middleware::from_fn(security_headers_middleware))
 }
 
 #[cfg(test)]

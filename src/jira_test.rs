@@ -223,3 +223,23 @@ fn test_validate_jira_url_ssrf_protection() {
     assert!(validate_jira_url_with_enforcement("https://[::ffff:169.254.169.254]", true).is_err());
     assert!(validate_jira_url_with_enforcement("https://[::ffff:10.0.0.1]", true).is_err());
 }
+
+#[test]
+fn test_check_resolved_ips_blocks_internal_addresses() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    let public_ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+    let loopback_v4 = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let metadata_v4 = IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254));
+    let private_v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    let loopback_v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+
+    assert!(check_resolved_ips("jira.example.com", &[public_ip], false).is_ok());
+    assert!(check_resolved_ips("empty.example.com", &[], false).is_err());
+
+    for blocked in [loopback_v4, metadata_v4, private_v4, loopback_v6] {
+        assert!(check_resolved_ips("127.0.0.1.nip.io", &[blocked], false).is_err());
+        assert!(check_resolved_ips("dual.example.com", &[public_ip, blocked], false).is_err());
+        assert!(check_resolved_ips("localhost", &[blocked], true).is_ok());
+    }
+}

@@ -615,7 +615,7 @@ pub async fn rest_update_issue(
     let eff = db
         .effective_access_level(&auth.user, bug.project_id)
         .unwrap_or(0);
-    if bug.view_state == 50 && eff < 55 {
+    if bug.view_state == 50 && eff < 55 && bug.reporter_id != auth.user.id {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "message": "Access denied to private issue" })),
@@ -642,9 +642,17 @@ pub async fn rest_update_issue(
         }
     }
 
-    if let Some(ref st_ref) = payload.status {
-        if let Some(new_st) = st_ref.id {
-            let new_st = new_st as i32;
+    let requested_status_change = payload
+        .status
+        .as_ref()
+        .and_then(|s| s.id)
+        .map(|v| v as i32)
+        .filter(|&new_st| new_st != bug.status);
+
+    if let Some(new_st) = requested_status_change {
+        let is_reporter_reopen =
+            bug.status == 80 && new_st == 20 && eff >= 25 && bug.reporter_id == auth.user.id;
+        if !is_reporter_reopen {
             let required_level = if new_st == 90 {
                 70
             } else if new_st == 80 || bug.status >= 80 {
@@ -681,16 +689,14 @@ pub async fn rest_update_issue(
         return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
     }
 
-    if let Some(st_ref) = payload.status {
-        if let Some(new_st) = st_ref.id {
-            let res_code = payload
-                .resolution
-                .and_then(|r| r.id)
-                .map(|v| v as i32)
-                .unwrap_or(bug.resolution);
-            if let Err(e) = db.change_bug_status(id, auth.user.id, new_st as i32, res_code, None) {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
-            }
+    if let Some(new_st) = requested_status_change {
+        let res_code = payload
+            .resolution
+            .and_then(|r| r.id)
+            .map(|v| v as i32)
+            .unwrap_or(bug.resolution);
+        if let Err(e) = db.change_bug_status(id, auth.user.id, new_st, res_code, None) {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
         }
     }
 

@@ -108,7 +108,9 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
 }
 
 pub fn router() -> Router<Db> {
-    let upload_limit = (max_file_size() + 2 * 1024 * 1024).max(10 * 1024 * 1024);
+    let upload_limit = max_file_size()
+        .saturating_add(2 * 1024 * 1024)
+        .max(10 * 1024 * 1024);
     Router::new()
         .route("/view_all_bug_page", get(view_all_bug_page))
         .route("/view_bug_page/:id", get(view_bug_page))
@@ -756,7 +758,7 @@ pub async fn view_bug_page(
         } else if let Ok(Some(cached)) = db.get_cached_jira_epics(pkey, 86400) {
             cached
         } else {
-            let client = crate::jira::JiraClient::new();
+            let client = crate::jira::JiraClient::with_allow_local(db.allow_local_jira());
             match client.list_epics(&jira_conf).await {
                 Ok(fetched) => {
                     let _ = db.save_jira_epics_cache(pkey, &fetched);

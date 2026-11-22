@@ -8,11 +8,33 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>);
+pub struct Db {
+    conn: Arc<Mutex<Connection>>,
+    allow_local_jira: Arc<std::sync::atomic::AtomicBool>,
+}
 
 impl Db {
+    pub(crate) fn from_connection(conn: Connection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+            allow_local_jira: Arc::new(std::sync::atomic::AtomicBool::new(
+                crate::jira::env_allow_local_jira(),
+            )),
+        }
+    }
+
+    pub fn allow_local_jira(&self) -> bool {
+        self.allow_local_jira
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_allow_local_jira(&self, allow: bool) {
+        self.allow_local_jira
+            .store(allow, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.0.lock().expect("db lock poisoned")
+        self.conn.lock().expect("db lock poisoned")
     }
 
     pub fn open(path: &str) -> rusqlite::Result<Self> {
@@ -22,7 +44,7 @@ impl Db {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self(Arc::new(Mutex::new(conn)));
+        let db = Self::from_connection(conn);
         db.migrate()?;
         Ok(db)
     }
@@ -33,7 +55,7 @@ impl Db {
             "PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self(Arc::new(Mutex::new(conn)));
+        let db = Self::from_connection(conn);
         db.migrate()?;
         Ok(db)
     }

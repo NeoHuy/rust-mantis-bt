@@ -154,7 +154,6 @@ async fn test_admin_jira_refresh_epics_permissions_and_success() {
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    std::env::set_var("MANTIS_ALLOW_LOCAL_JIRA", "1");
     let addr = listener.local_addr().unwrap();
     let mock_url = format!("http://{}", addr);
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -168,6 +167,7 @@ async fn test_admin_jira_refresh_epics_permissions_and_success() {
     });
 
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     db.save_jira_global_config(
         true,
         &mock_url,
@@ -232,4 +232,142 @@ async fn test_admin_jira_refresh_epics_permissions_and_success() {
     assert_eq!(cached[1].key, "ALPHA-2");
 
     let _ = tx.send(());
+}
+
+#[tokio::test]
+async fn test_admin_jira_rejects_ssrf_url_by_default() {
+    use axum::body::to_bytes;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let admin_cookie = login(&app, "administrator", "root").await;
+
+    for blocked_url in [
+        "http://127.0.0.1:8080",
+        "https://169.254.169.254",
+        "https://metadata.google.internal",
+        "https://localhost:8443",
+    ] {
+        let form = format!(
+            "jira_enabled=1&jira_base_url={}&jira_email=bot@example.com&jira_api_token=tok&jira_default_issue_type=Bug&jira_default_project_key=PROJ",
+            blocked_url
+        );
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/manage_jira_config")
+                    .header("cookie", &admin_cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let loc = res.headers().get("location").unwrap().to_str().unwrap();
+        assert!(
+            loc.contains("err=Failed+to+save+config"),
+            "Expected SSRF rejection for {}, got {}",
+            blocked_url,
+            loc
+        );
+        assert_eq!(db.get_jira_config(0).unwrap().base_url, "");
+    }
+
+    // Simulate legacy on-prem/internal URL saved prior to SSRF restriction
+    db.save_jira_global_config(
+        true,
+        "http://127.0.0.1:8080",
+        "bot@example.com",
+        Some("tok"),
+        "Bug",
+        "PROJ",
+    )
+    .unwrap();
+
+    // Admin page should display clear SSRF warning & MANTIS_ALLOW_LOCAL_JIRA=1 remediation
+    let page_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_jira_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page_res.status(), StatusCode::OK);
+    let page_body = String::from_utf8(
+        to_bytes(page_res.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(page_body.contains("blocked by SSRF policy"));
+    assert!(page_body.contains("MANTIS_ALLOW_LOCAL_JIRA=1"));
+
+    // Connection test using legacy blocked URL must be rejected by default
+    let test_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/manage_jira_test")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(test_res.status(), StatusCode::SEE_OTHER);
+    let test_loc = test_res
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        test_loc.contains("Connection+failed"),
+        "Expected Connection+failed redirect, got {}",
+        test_loc
+    );
+
+    // HTTPS localhost/loopback saved directly is also rejected at connection test time
+    db.save_jira_global_config(
+        true,
+        "https://127.0.0.1:8080",
+        "bot@example.com",
+        Some("tok"),
+        "Bug",
+        "PROJ",
+    )
+    .unwrap();
+    let test_res_https = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/manage_jira_test")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(test_res_https.status(), StatusCode::SEE_OTHER);
+    let test_loc_https = test_res_https
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        test_loc_https.contains("Connection+failed"),
+        "Expected Connection+failed redirect for https://127.0.0.1:8080, got {}",
+        test_loc_https
+    );
 }

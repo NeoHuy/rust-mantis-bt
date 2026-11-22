@@ -170,7 +170,7 @@ pub fn render_manage_jira_page(
                             <th>Jira Base URL</th>
                             <td>
                                 <input type="url" name="jira_base_url" value="{}" placeholder="https://yourcompany.atlassian.net" style="width:100%; max-width:400px;" required>
-                                <small style="color:#777; display:block; margin-top:2px;">Atlassian Jira Cloud URL (e.g. https://domain.atlassian.net)</small>
+                                <small style="color:#777; display:block; margin-top:2px;">Atlassian Jira Cloud URL (e.g. https://domain.atlassian.net). Internal/HTTP or on-prem hosts require <code>MANTIS_ALLOW_LOCAL_JIRA=1</code>.</small>
                             </td>
                         </tr>
                         <tr>

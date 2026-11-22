@@ -1610,7 +1610,7 @@ fn test_jira_db_schema_migration_from_old_schema() {
          INSERT INTO mantis_jira_status_mapping_table VALUES ('Done', 80);"
     ).unwrap();
 
-    let db = Db(std::sync::Arc::new(std::sync::Mutex::new(conn)));
+    let db = Db::from_connection(conn);
     db.migrate().unwrap();
 
     // Verify duplicates were purged and newest link remains

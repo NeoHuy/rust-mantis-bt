@@ -8,7 +8,6 @@ async fn spawn_mock_jira(
     status_code: StatusCode,
     body_json: serde_json::Value,
 ) -> (String, tokio::sync::oneshot::Sender<()>) {
-    std::env::set_var("MANTIS_ALLOW_LOCAL_JIRA", "1");
     let default_key = body_json
         .get("key")
         .and_then(|k| k.as_str())
@@ -66,7 +65,6 @@ async fn spawn_mock_jira(
 }
 
 async fn login(app: &axum::Router, username: &str, password: &str) -> String {
-    std::env::set_var("MANTIS_ALLOW_LOCAL_JIRA", "1");
     let res = app
         .clone()
         .oneshot(
@@ -97,6 +95,7 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
 #[tokio::test]
 async fn test_jira_push_success() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db
         .create_project("Core Project", 10, 10, "Desc", true)
         .unwrap();
@@ -186,6 +185,7 @@ async fn test_jira_push_success() {
 #[tokio::test]
 async fn test_jira_push_already_linked() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev2", "Dev 2", "d2@x.com", "pass", 55, true, false)
@@ -232,6 +232,7 @@ async fn test_jira_push_already_linked() {
 #[tokio::test]
 async fn test_jira_push_permission_denied() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let rep_id = db
         .create_user(
@@ -272,6 +273,7 @@ async fn test_jira_push_permission_denied() {
 #[tokio::test]
 async fn test_jira_push_jira_error_keeps_bug_state() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev3", "Dev 3", "d3@x.com", "pass", 55, true, false)
@@ -337,6 +339,7 @@ async fn test_jira_push_jira_error_keeps_bug_state() {
 #[tokio::test]
 async fn test_jira_push_effective_access_level() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     // Private project
     let priv_proj_id = db
         .create_project("Private Proj", 10, 50, "Desc", true)
@@ -424,6 +427,7 @@ async fn test_jira_push_effective_access_level() {
 #[tokio::test]
 async fn test_jira_push_handles_multiline_error_without_panic() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev4", "Dev 4", "d4@x.com", "pass", 55, true, false)
@@ -481,6 +485,7 @@ async fn test_jira_push_handles_multiline_error_without_panic() {
 #[tokio::test]
 async fn test_jira_link_cascade_on_bug_delete() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev5", "Dev 5", "d5@x.com", "pass", 55, true, false)
@@ -608,6 +613,7 @@ async fn spawn_full_mock_jira() -> (String, tokio::sync::oneshot::Sender<()>) {
 #[tokio::test]
 async fn test_jira_sync_existing_ticket_by_key_updates_mantis_status() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user(
@@ -673,6 +679,7 @@ async fn test_jira_sync_existing_ticket_by_key_updates_mantis_status() {
 #[tokio::test]
 async fn test_jira_sync_refresh_existing_link_and_unlink() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user(
@@ -772,6 +779,7 @@ async fn test_jira_sync_refresh_existing_link_and_unlink() {
 #[tokio::test]
 async fn test_jira_sync_create_new_ticket_with_epic() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user(

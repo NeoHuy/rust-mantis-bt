@@ -122,6 +122,7 @@ impl std::error::Error for JiraError {}
 #[derive(Clone)]
 pub struct JiraClient {
     client: reqwest::Client,
+    allow_local: bool,
 }
 
 impl Default for JiraClient {
@@ -130,18 +131,74 @@ impl Default for JiraClient {
     }
 }
 
+pub(crate) fn env_allow_local_jira() -> bool {
+    std::env::var("MANTIS_ALLOW_LOCAL_JIRA")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+pub fn check_resolved_ips(
+    host: &str,
+    ips: &[std::net::IpAddr],
+    allow_local: bool,
+) -> Result<(), String> {
+    if allow_local {
+        return Ok(());
+    }
+    if ips.is_empty() {
+        return Err(format!(
+            "DNS resolution for '{}' returned no addresses",
+            host
+        ));
+    }
+    for ip in ips {
+        if is_blocked_ip(ip) {
+            return Err(format!(
+                "Jira host '{}' resolves to blocked IP address {}",
+                host, ip
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct SafeDnsResolver {
+    allow_local: bool,
+}
+
+impl reqwest::dns::Resolve for SafeDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow_local = self.allow_local;
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            let ips: Vec<std::net::IpAddr> = addrs.iter().map(|a| a.ip()).collect();
+            check_resolved_ips(&host, &ips, allow_local)
+                .map_err(|msg| -> Box<dyn std::error::Error + Send + Sync> { msg.into() })?;
+            let iter: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
 pub fn validate_jira_url(base_url: &str) -> Result<(), JiraError> {
-    validate_jira_url_internal(base_url, false)
+    let allow_local = env_allow_local_jira() || cfg!(test);
+    validate_jira_url_with_allow_local(base_url, allow_local)
 }
 
 pub fn validate_jira_url_with_enforcement(
     base_url: &str,
     enforce_strict: bool,
 ) -> Result<(), JiraError> {
-    validate_jira_url_internal(base_url, enforce_strict)
+    let allow_local = !enforce_strict && (env_allow_local_jira() || cfg!(test));
+    validate_jira_url_with_allow_local(base_url, allow_local)
 }
 
-fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<(), JiraError> {
+pub fn validate_jira_url_with_allow_local(
+    base_url: &str,
+    allow_local: bool,
+) -> Result<(), JiraError> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
         return Err(JiraError::ConfigError(
@@ -152,15 +209,6 @@ fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<()
     let parsed = reqwest::Url::parse(trimmed)
         .map_err(|e| JiraError::ConfigError(format!("Invalid Jira Base URL: {}", e)))?;
 
-    let allow_local = if enforce_strict {
-        false
-    } else {
-        std::env::var("MANTIS_ALLOW_LOCAL_JIRA")
-            .map(|v| v == "1" || v == "true")
-            .unwrap_or(false)
-            || cfg!(test)
-    };
-
     if !allow_local {
         if parsed.scheme() != "https" {
             return Err(JiraError::ConfigError(
@@ -168,26 +216,30 @@ fn validate_jira_url_internal(base_url: &str, enforce_strict: bool) -> Result<()
             ));
         }
 
-        if let Some(host) = parsed.host_str() {
-            let clean_host = host.trim_start_matches('[').trim_end_matches(']');
-            let host_lower = clean_host.to_ascii_lowercase();
-            if host_lower == "localhost"
-                || host_lower.ends_with(".localhost")
-                || host_lower == "instance-data"
-                || host_lower.ends_with(".internal")
-                || host_lower.ends_with(".local")
-            {
-                return Err(JiraError::ConfigError(
-                    "Local and internal Jira hosts are not allowed".to_string(),
-                ));
-            }
+        let Some(host) = parsed.host_str() else {
+            return Err(JiraError::ConfigError(
+                "Jira Base URL must contain a valid host".to_string(),
+            ));
+        };
 
-            if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
-                if is_blocked_ip(&ip) {
-                    return Err(JiraError::ConfigError(
-                        "Private, loopback, or metadata IP addresses are not allowed".to_string(),
-                    ));
-                }
+        let clean_host = host.trim_start_matches('[').trim_end_matches(']');
+        let host_lower = clean_host.to_ascii_lowercase();
+        if host_lower == "localhost"
+            || host_lower.ends_with(".localhost")
+            || host_lower == "instance-data"
+            || host_lower.ends_with(".internal")
+            || host_lower.ends_with(".local")
+        {
+            return Err(JiraError::ConfigError(
+                "Local and internal Jira hosts are not allowed".to_string(),
+            ));
+        }
+
+        if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
+            if is_blocked_ip(&ip) {
+                return Err(JiraError::ConfigError(
+                    "Private, loopback, or metadata IP addresses are not allowed".to_string(),
+                ));
             }
         }
     }
@@ -233,16 +285,28 @@ fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
 
 impl JiraClient {
     pub fn new() -> Self {
+        Self::with_allow_local(env_allow_local_jira())
+    }
+
+    pub fn with_allow_local(allow_local: bool) -> Self {
+        let resolver = std::sync::Arc::new(SafeDnsResolver { allow_local });
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(resolver)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        Self {
+            client,
+            allow_local,
+        }
     }
 
     pub fn with_client(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            allow_local: env_allow_local_jira(),
+        }
     }
 
     pub async fn test_connection(
@@ -251,7 +315,7 @@ impl JiraClient {
         email: &str,
         api_token: &str,
     ) -> Result<JiraMyselfResponse, JiraError> {
-        validate_jira_url(base_url)?;
+        validate_jira_url_with_allow_local(base_url, self.allow_local)?;
         let trimmed_url = base_url.trim().trim_end_matches('/');
         if email.trim().is_empty() || api_token.trim().is_empty() {
             return Err(JiraError::ConfigError(
@@ -296,7 +360,7 @@ impl JiraClient {
         issue_type: &str,
         epic_key: Option<&str>,
     ) -> Result<JiraCreateIssueResponse, JiraError> {
-        validate_jira_url(&config.base_url)?;
+        validate_jira_url_with_allow_local(&config.base_url, self.allow_local)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
         if config.project_key.trim().is_empty() {
             return Err(JiraError::ConfigError(
@@ -360,7 +424,7 @@ impl JiraClient {
         config: &JiraResolvedConfig,
         key: &str,
     ) -> Result<JiraIssueDetails, JiraError> {
-        validate_jira_url(&config.base_url)?;
+        validate_jira_url_with_allow_local(&config.base_url, self.allow_local)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
         if config.email.trim().is_empty() || config.api_token.trim().is_empty() {
             return Err(JiraError::ConfigError(
@@ -425,7 +489,7 @@ impl JiraClient {
         &self,
         config: &JiraResolvedConfig,
     ) -> Result<Vec<JiraEpic>, JiraError> {
-        validate_jira_url(&config.base_url)?;
+        validate_jira_url_with_allow_local(&config.base_url, self.allow_local)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
         if config.project_key.trim().is_empty() {
             return Err(JiraError::ConfigError(

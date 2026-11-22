@@ -505,7 +505,7 @@ pub async fn rest_get_issue(State(db): State<Db>, auth: ApiAuth, Path(id): Path<
     let eff = db
         .effective_access_level(&auth.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(auth.user.id, eff, &bug) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "message": "Access denied to this issue" })),
@@ -798,7 +798,7 @@ pub async fn rest_add_issue_note(
     let eff = db
         .effective_access_level(&auth.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || (bug.view_state == 50 && eff < 55) {
+    if eff < 25 || !Db::can_view_bug(auth.user.id, eff, &bug) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "message": "Reporter access required to add bugnotes" })),

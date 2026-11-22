@@ -269,3 +269,20 @@ fn test_jira_status_mapping_serialization() {
     let deserialized: JiraStatusMapping = serde_json::from_str(&json).unwrap();
     assert_eq!(mapping, deserialized);
 }
+
+#[test]
+fn test_bug_enums_as_str() {
+    assert_eq!(BugStatus::New.as_str(), "new");
+    assert_eq!(BugStatus::Feedback.as_str(), "feedback");
+    assert_eq!(BugStatus::Acknowledged.as_str(), "acknowledged");
+    assert_eq!(BugStatus::Confirmed.as_str(), "confirmed");
+    assert_eq!(BugStatus::Assigned.as_str(), "assigned");
+    assert_eq!(BugStatus::Resolved.as_str(), "resolved");
+    assert_eq!(BugStatus::Closed.as_str(), "closed");
+
+    assert_eq!(BugResolution::Open.as_str(), "open");
+    assert_eq!(BugResolution::Fixed.as_str(), "fixed");
+    assert_eq!(BugPriority::Normal.as_str(), "normal");
+    assert_eq!(BugSeverity::Minor.as_str(), "minor");
+    assert_eq!(BugReproducibility::Always.as_str(), "always");
+}

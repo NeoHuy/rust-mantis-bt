@@ -540,10 +540,10 @@ fn test_bug_schema_bootstrap_and_crud() {
     assert_eq!(full.description, "Description here");
     assert_eq!(full.steps_to_reproduce, "Steps");
 
-    let bugs = db.list_bugs(proj_id, 10, 0, 25).unwrap();
+    let bugs = db.list_bugs(proj_id, 0, 25).unwrap();
     assert_eq!(bugs.len(), 1);
 
-    // Private bug filtering at SQL level
+    // Create private bug
     let priv_bug_id = db
         .create_bug(
             proj_id,
@@ -564,10 +564,8 @@ fn test_bug_schema_bootstrap_and_crud() {
         )
         .unwrap();
     assert!(priv_bug_id > 0);
-    // Viewer (10) only sees public bug
-    assert_eq!(db.list_bugs(proj_id, 10, 0, 25).unwrap().len(), 1);
-    // Developer (55) sees both
-    assert_eq!(db.list_bugs(proj_id, 55, 0, 25).unwrap().len(), 2);
+    // list_bugs returns raw unfiltered bugs (total 2)
+    assert_eq!(db.list_bugs(proj_id, 0, 25).unwrap().len(), 2);
 
     // Update bug fields & verify history only records changed fields
     let changed = db
@@ -1636,4 +1634,674 @@ fn test_jira_db_schema_migration_from_old_schema() {
 
     // Verify COLLATE NOCASE works on migrated table
     assert_eq!(db.resolve_jira_status_to_mantis("done"), 80);
+}
+
+#[test]
+fn test_email_templates_detailed() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let dev_id = db
+        .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
+        .unwrap();
+    let proj_id = db
+        .create_project("Core System", 10, 10, "desc", true)
+        .unwrap();
+
+    // 1. Create bug -> New Issue email
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            1,
+            "Null pointer in parser",
+            "Crash on empty token",
+            "1. Open page\n2. Click filter",
+            "",
+            30,
+            50,
+            10,
+            "1.0",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(emails.len(), 1);
+    assert_eq!(
+        emails[0].subject,
+        format!("[Core System {:07}] New: Null pointer in parser", bug_id)
+    );
+    assert!(emails[0]
+        .body
+        .contains("The following issue has been SUBMITTED."));
+    assert!(emails[0]
+        .body
+        .contains(&format!("/view_bug_page/{}", bug_id)));
+    assert!(emails[0]
+        .body
+        .contains("Reported By:                administrator"));
+    assert!(emails[0]
+        .body
+        .contains("Project:                    Core System"));
+    assert!(emails[0]
+        .body
+        .contains(&format!("Issue ID:                   {}", bug_id)));
+    assert!(emails[0]
+        .body
+        .contains("Category:                   General"));
+    assert!(emails[0]
+        .body
+        .contains("Reproducibility:            always"));
+    assert!(emails[0].body.contains("Severity:                   minor"));
+    assert!(emails[0]
+        .body
+        .contains("Priority:                   normal"));
+    assert!(emails[0].body.contains("Status:                     new"));
+    assert!(emails[0].body.contains("Date Submitted:             "));
+    assert!(emails[0].body.contains("Last Modified:              "));
+    assert!(emails[0]
+        .body
+        .contains("Summary:                    Null pointer in parser"));
+    assert!(emails[0]
+        .body
+        .contains("Description:\nCrash on empty token"));
+    assert!(emails[0]
+        .body
+        .contains("Steps to Reproduce:\n1. Open page\n2. Click filter"));
+    assert!(emails[0].body.contains("Issue History"));
+    assert!(emails[0].body.contains("New Issue"));
+
+    db.flush_email_queue().unwrap();
+
+    // 2. Assign bug -> Assigned email
+    db.assign_bug(bug_id, admin.id, dev_id).unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(emails.len(), 2); // reporter & handler
+    assert_eq!(
+        emails[0].subject,
+        format!(
+            "[Core System {:07}] Assigned to dev1: Null pointer in parser",
+            bug_id
+        )
+    );
+    assert!(emails[0]
+        .body
+        .contains("The following issue has been ASSIGNED."));
+    assert!(emails[0]
+        .body
+        .contains("Assigned To:                dev1 (Dev One)"));
+    assert!(emails[0].body.contains("Assigned To              => dev1"));
+    assert!(emails[0]
+        .body
+        .contains("Status                   new => assigned"));
+
+    db.flush_email_queue().unwrap();
+
+    // 3. Status change -> Status Changed email (only 1 email per recipient, no duplicate note email)
+    db.change_bug_status(bug_id, dev_id, 80, 20, Some("Fixed in patch v1.2"))
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(emails.len(), 2); // reporter & handler, neither receives duplicate note email
+    assert!(emails
+        .iter()
+        .all(|e| e.subject.contains("Status changed to resolved")));
+    let status_email = &emails[0];
+    assert_eq!(
+        status_email.subject,
+        format!(
+            "[Core System {:07}] Status changed to resolved: Null pointer in parser",
+            bug_id
+        )
+    );
+    assert!(status_email
+        .body
+        .contains("The following issue has been RESOLVED."));
+    assert!(status_email
+        .body
+        .contains("Status:                     resolved"));
+    assert!(status_email
+        .body
+        .contains("Resolution:                 fixed"));
+    assert!(status_email.body.contains("Fixed in patch v1.2"));
+    assert!(status_email
+        .body
+        .contains("Status                   assigned => resolved"));
+    assert!(status_email
+        .body
+        .contains("Resolution               open => fixed"));
+
+    db.flush_email_queue().unwrap();
+
+    // 4. Note added -> Note added email
+    db.add_bugnote(bug_id, admin.id, "Please verify on staging", 10)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let note_email = emails
+        .iter()
+        .find(|e| e.subject.contains("Note added"))
+        .expect("Note added email not found");
+    assert_eq!(
+        note_email.subject,
+        format!(
+            "[Core System {:07}] Note added by administrator: Null pointer in parser",
+            bug_id
+        )
+    );
+    assert!(note_email
+        .body
+        .contains("A NOTE has been added to this issue."));
+    assert!(note_email.body.contains("Please verify on staging"));
+
+    db.flush_email_queue().unwrap();
+
+    // 5. Unassigning issue (handler_id = 0)
+    db.assign_bug(bug_id, admin.id, 0).unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(
+        emails[0].subject,
+        format!(
+            "[Core System {:07}] Unassigned: Null pointer in parser",
+            bug_id
+        )
+    );
+    assert!(emails[0]
+        .body
+        .contains("The following issue has been UNASSIGNED."));
+    assert!(emails[0].body.contains("Assigned To:                \n"));
+    assert!(emails[0].body.contains("dev1 =>"));
+
+    db.flush_email_queue().unwrap();
+
+    // 6. User with empty realname (should format as username, no empty parentheses)
+    let plain_user_id = db
+        .create_user("plainuser", "", "plain@example.com", "pw", 55, true, false)
+        .unwrap();
+    db.assign_bug(bug_id, admin.id, plain_user_id).unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(
+        emails[0].subject,
+        format!(
+            "[Core System {:07}] Assigned to plainuser: Null pointer in parser",
+            bug_id
+        )
+    );
+    assert!(emails[0]
+        .body
+        .contains("Assigned To:                plainuser\n"));
+
+    db.flush_email_queue().unwrap();
+
+    // 7. Private note permissions: reporter with access 25 must NOT receive private note email
+    let reporter_user_id = db
+        .create_user(
+            "lowreporter",
+            "Low Reporter",
+            "low@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let priv_bug_id = db
+        .create_bug(
+            proj_id,
+            reporter_user_id,
+            1,
+            "Bug with private note",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.assign_bug(priv_bug_id, admin.id, dev_id).unwrap();
+    db.flush_email_queue().unwrap();
+
+    // Add private note (view_state = 50)
+    db.add_bugnote(priv_bug_id, dev_id, "Secret internal discussion", 50)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    // admin (90) and dev1 (55) can receive it, lowreporter (25) cannot!
+    assert!(!recipients.contains(&"low@example.com"));
+    assert!(recipients.contains(&"dev1@example.com"));
+
+    db.flush_email_queue().unwrap();
+
+    // 8. Subject header injection prevention: \r and \n are stripped
+    {
+        let conn = db.conn();
+        db.enqueue_email(
+            &conn,
+            "test@example.com",
+            "Header\r\nInjection: Bad",
+            "body",
+        )
+        .unwrap();
+    }
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(emails[0].subject, "HeaderInjection: Bad");
+}
+
+#[test]
+fn test_email_review_comments_improvements() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let dev1_id = db
+        .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
+        .unwrap();
+    let dev2_id = db
+        .create_user("dev2", "Dev Two", "dev2@example.com", "pw", 55, true, false)
+        .unwrap();
+    let reporter_id = db
+        .create_user(
+            "reporter1",
+            "Reporter One",
+            "rep1@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let proj_id = db
+        .create_project("Project Alpha", 10, 10, "Alpha proj", true)
+        .unwrap();
+
+    // 1. Previous handler notification on reassignment
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            reporter_id,
+            1,
+            "Reassignment Bug",
+            "Initial desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10, // public bug
+        )
+        .unwrap();
+    // Assign to dev1
+    db.assign_bug(bug_id, admin.id, dev1_id).unwrap();
+    db.flush_email_queue().unwrap();
+
+    // Now reassign to dev2
+    db.assign_bug(bug_id, admin.id, dev2_id).unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    // Previous handler (dev1@example.com), new handler (dev2@example.com), and reporter (rep1@example.com) should receive email!
+    assert!(recipients.contains(&"dev1@example.com"));
+    assert!(recipients.contains(&"dev2@example.com"));
+    assert!(recipients.contains(&"rep1@example.com"));
+    db.flush_email_queue().unwrap();
+
+    // 2. Private bug (view_state = 50) check: low access user (access 25) does NOT receive emails unless reporter or handler
+    let priv_bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            1,
+            "Top Secret Bug",
+            "Confidential",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50, // private bug
+        )
+        .unwrap();
+    // Monitor by reporter1 (access 25)
+    db.add_bug_monitor(priv_bug_id, reporter_id).unwrap();
+    // Monitor by dev1 (access 55)
+    db.add_bug_monitor(priv_bug_id, dev1_id).unwrap();
+    db.flush_email_queue().unwrap();
+
+    // Status change on private bug
+    db.change_bug_status(priv_bug_id, admin.id, 50, 10, None)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    // dev1 (access 55) and admin receive; reporter1 (access 25) must NOT receive because bug is private!
+    assert!(recipients.contains(&"dev1@example.com"));
+    assert!(!recipients.contains(&"rep1@example.com"));
+    db.flush_email_queue().unwrap();
+
+    // 3. Neutral subject if status unchanged
+    // A: Status same (50 -> 50), resolution changed (10 -> 20 fixed)
+    db.change_bug_status(bug_id, admin.id, 50, 20, None)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert!(emails[0]
+        .subject
+        .contains("Resolution changed to fixed: Reassignment Bug"));
+    db.flush_email_queue().unwrap();
+
+    // B: Status same (50 -> 50) and resolution same (20 -> 20) with no note -> returns early without sending email!
+    db.change_bug_status(bug_id, admin.id, 50, 20, None)
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert_eq!(emails.len(), 0);
+
+    // C: Status same (50 -> 50) and resolution same (20 -> 20) WITH note -> sends "Updated:" email
+    db.change_bug_status(bug_id, admin.id, 50, 20, Some("Note with update"))
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    assert!(emails[0].subject.contains("Updated: Reassignment Bug"));
+    db.flush_email_queue().unwrap();
+
+    // 4. Private note exclusion from history in subsequent email
+    let note_id = db
+        .add_bugnote(bug_id, dev2_id, "Super secret dev note", 50)
+        .unwrap(); // view_state = 50
+    db.flush_email_queue().unwrap();
+
+    // Trigger another update (e.g. status change)
+    db.change_bug_status(bug_id, dev2_id, 80, 20, None).unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let email_body = &emails[0].body;
+    // Issue history in this email must NOT leak the private note
+    let history_note_ref = format!("{:07}", note_id);
+    assert!(
+        !email_body.contains(&history_note_ref),
+        "Email history must not reference private note ID"
+    );
+    assert!(!email_body.contains("Super secret dev note"));
+    db.flush_email_queue().unwrap();
+
+    // 5. Reporter of private bug CAN view and receive email for their own private bug
+    let rep_priv_bug = db
+        .create_bug(
+            proj_id,
+            reporter_id, // reporter has access 25
+            1,
+            "Private Reported Bug",
+            "Confidential by reporter",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50, // private bug
+        )
+        .unwrap();
+    let emails = db.list_queued_emails().unwrap();
+    let recipients: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    assert!(recipients.contains(&"rep1@example.com"));
+    let bug_obj = db.get_bug(rep_priv_bug).unwrap().unwrap();
+    assert!(Db::can_view_bug(reporter_id, 25, &bug_obj));
+    assert!(!Db::can_view_bug(999, 25, &bug_obj)); // another low-access user cannot view it
+
+    // Handler can also view it even if access < 55
+    let handler_id = db
+        .create_user(
+            "priv_handler",
+            "Priv Handler",
+            "handler@example.com",
+            "password",
+            25, // Reporter access level
+            true,
+            false,
+        )
+        .unwrap();
+    db.assign_bug(rep_priv_bug, reporter_id, handler_id)
+        .unwrap();
+    let bug_obj_handled = db.get_bug(rep_priv_bug).unwrap().unwrap();
+    assert!(Db::can_view_bug(handler_id, 25, &bug_obj_handled));
+
+    // Verify filter_bugs visibility
+    let handler_user = db.get_user_by_id(handler_id).unwrap().unwrap();
+    let rep_user = db.get_user_by_id(reporter_id).unwrap().unwrap();
+    let other_user = db
+        .get_user_by_id(
+            db.create_user("other", "Other", "o@ex.com", "pw", 25, true, false)
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+
+    let filter = crate::models::BugFilter {
+        project_id: Some(proj_id),
+        ..Default::default()
+    };
+    let handler_bugs = db.filter_bugs(&filter, &handler_user).unwrap();
+    assert!(handler_bugs.iter().any(|b| b.id == rep_priv_bug));
+
+    let rep_bugs = db.filter_bugs(&filter, &rep_user).unwrap();
+    assert!(rep_bugs.iter().any(|b| b.id == rep_priv_bug));
+
+    let other_bugs = db.filter_bugs(&filter, &other_user).unwrap();
+    assert!(!other_bugs.iter().any(|b| b.id == rep_priv_bug));
+
+    // Test DEFAULT_MANTIS_ADDR constant and base URL fallback
+    assert_eq!(crate::DEFAULT_MANTIS_ADDR, "127.0.0.1:3000");
+    let fallback_url = db.base_url();
+    assert!(fallback_url.contains("127.0.0.1:3000") || fallback_url.starts_with("http"));
+    db.flush_email_queue().unwrap();
+
+    // 6. Test history limit keeps the NEWEST rows in email
+    for i in 1..=105 {
+        let note_text = format!("Sequential note {:03}", i);
+        db.change_bug_status(bug_id, admin.id, 50, 20, Some(&note_text))
+            .unwrap();
+    }
+    let emails = db.list_queued_emails().unwrap();
+    let latest_email = &emails[0];
+    // The email's Issue History table must include the newest changes (e.g. note 105)
+    assert!(latest_email.body.contains("Sequential note 105"));
+}
+
+#[test]
+fn test_email_templates_and_notification_full_coverage() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let proj_id = db
+        .create_project("Full Coverage Proj", 10, 10, "desc", true)
+        .unwrap();
+
+    // 1. build_mantis_email_body for non-existent bug
+    {
+        let conn = db.conn();
+        let empty_body = db
+            .build_mantis_email_body(&conn, 999999, "Header", None)
+            .unwrap();
+        assert_eq!(empty_body, "");
+
+        // 2. enqueue_email with whitespace/empty email returns Ok(0)
+        let res = db.enqueue_email(&conn, "   ", "Subject", "Body").unwrap();
+        assert_eq!(res, 0);
+
+        // 3. notify_bug_event_filtered on non-existent bug returns early
+        db.notify_bug_event_filtered(&conn, 999999, 0, &[], "Subject", "Body");
+    }
+
+    // 4. Create bug with resolution == 0, additional_information, and steps_to_reproduce
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            1,
+            "Detailed Bug",
+            "Initial description",
+            "1. Step A\n2. Step B",
+            "Extra system info",
+            999, // invalid reproducibility -> fallback
+            999, // invalid severity -> fallback
+            999, // invalid priority -> fallback
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // 5. Populate history with all remaining field types to cover format_history_field_change
+    let body = {
+        let conn = db.conn();
+        db.record_history(&conn, bug_id, admin.id, "priority", "30", "40", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "severity", "50", "60", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "reproducibility", "10", "30", 0)
+            .unwrap();
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "file_added",
+            "",
+            "attached_file.txt",
+            0,
+        )
+        .unwrap();
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "file_deleted",
+            "old_file.txt",
+            "",
+            0,
+        )
+        .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "category_id", "1", "2", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "target_version", "1.0", "1.1", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "fixed_in_version", "", "1.0", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "version", "1.0", "2.0", 0)
+            .unwrap();
+        db.record_history(&conn, bug_id, admin.id, "view_state", "10", "50", 0)
+            .unwrap();
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "custom_field_x",
+            "OldVal",
+            "NewVal",
+            0,
+        )
+        .unwrap();
+        // Test handler_id where user is missing in DB (user#9999 fallback)
+        db.record_history(&conn, bug_id, admin.id, "handler_id", "9998", "9999", 0)
+            .unwrap();
+        // Test format_transition with unparseable string values
+        db.record_history(
+            &conn,
+            bug_id,
+            admin.id,
+            "status",
+            "unparseable_old",
+            "unparseable_new",
+            0,
+        )
+        .unwrap();
+
+        // Build email body with current_note Some(...)
+        let note_ctx = Some((42, "admin_user", 1700000000, "Note test text"));
+        db.build_mantis_email_body(
+            &conn,
+            bug_id,
+            "The following issue has been TESTED.",
+            note_ctx,
+        )
+        .unwrap()
+    };
+
+    assert!(body.contains("The following issue has been TESTED."));
+    assert!(body.contains("Steps to Reproduce:\n1. Step A\n2. Step B"));
+    assert!(body.contains("Additional Information:\nExtra system info"));
+    assert!(body.contains("(0000042) admin_user"));
+    assert!(body.contains("Note test text"));
+    assert!(body.contains("File Added: attached_file.txt"));
+    assert!(body.contains("File Deleted: old_file.txt"));
+    assert!(body.contains("Priority"));
+    assert!(body.contains("Severity"));
+    assert!(body.contains("Reproducibility"));
+    assert!(body.contains("Category"));
+    assert!(body.contains("Target Version"));
+    assert!(body.contains("Fixed in Version"));
+    assert!(body.contains("Product Version"));
+    assert!(body.contains("View Status"));
+    assert!(body.contains("custom_field_x"));
+    assert!(body.contains("user#9998 => user#9999"));
+    assert!(body.contains("unparseable_old => unparseable_new"));
+
+    // 6. Test recipients edge cases in notify_bug_event_filtered:
+    // - disabled user
+    let disabled_u = db
+        .create_user(
+            "disabled_user",
+            "",
+            "dis@example.com",
+            "pw",
+            55,
+            false,
+            false,
+        )
+        .unwrap();
+    db.add_bug_monitor(bug_id, disabled_u).unwrap();
+
+    // - user with empty email
+    let empty_email_u = db
+        .create_user("empty_email", "", "   ", "pw", 55, true, false)
+        .unwrap();
+    db.add_bug_monitor(bug_id, empty_email_u).unwrap();
+
+    // - extra_recipients with <= 0 and non-existent id
+    db.flush_email_queue().unwrap();
+    {
+        let conn = db.conn();
+        db.notify_bug_event_filtered(
+            &conn,
+            bug_id,
+            0,
+            &[-1, 0, 99999, admin.id], // -1 and 0 skipped, 99999 non-existent, admin.id deduplicated
+            "Edge Test Subject",
+            &body,
+        );
+    }
+    let emails = db.list_queued_emails().unwrap();
+    let recs: Vec<&str> = emails.iter().map(|e| e.email.as_str()).collect();
+    // admin receives it, disabled_user and empty_email do NOT
+    assert!(!recs.contains(&"dis@example.com"));
+    assert!(!recs.contains(&""));
+    assert_eq!(
+        recs.iter().filter(|&&e| e == admin.email.as_str()).count(),
+        1
+    );
+
+    // 7. Test delete_queued_email
+    let email_id = emails[0].email_id;
+    db.delete_queued_email(email_id).unwrap();
+    let remaining = db.list_queued_emails().unwrap();
+    assert_eq!(remaining.len(), 0);
 }

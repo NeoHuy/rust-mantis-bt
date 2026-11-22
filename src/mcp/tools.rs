@@ -290,11 +290,8 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
             };
 
             let eff = db.effective_access_level(user, bug.project_id).unwrap_or(0);
-            if eff < 10 || (bug.view_state == 50 && eff < 55 && bug.reporter_id != user.id) {
-                return CallToolResult::error(format!(
-                    "Access Denied to issue #{}. Minimum Developer (55) required for private issues.",
-                    issue_id
-                ));
+            if !Db::can_view_bug(user.id, eff, &bug) {
+                return CallToolResult::error(format!("Access denied to issue #{}.", issue_id));
             }
 
             let full = match db.get_bug_full(issue_id) {
@@ -441,11 +438,8 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
             };
 
             let eff = db.effective_access_level(user, bug.project_id).unwrap_or(0);
-            if bug.view_state == 50 && eff < 55 && bug.reporter_id != user.id {
-                return CallToolResult::error(format!(
-                    "Access Denied to private issue #{}. Minimum Developer (55) required.",
-                    issue_id
-                ));
+            if !Db::can_view_bug(user.id, eff, &bug) {
+                return CallToolResult::error(format!("Access denied to issue #{}.", issue_id));
             }
 
             let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == user.id);
@@ -548,7 +542,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
             };
 
             let eff = db.effective_access_level(user, bug.project_id).unwrap_or(0);
-            if eff < 25 || (bug.view_state == 50 && eff < 55 && bug.reporter_id != user.id) {
+            if eff < 25 || !Db::can_view_bug(user.id, eff, &bug) {
                 return CallToolResult::error(format!(
                     "Permission Denied: Reporter (25) or higher required to add bugnotes to issue #{}",
                     issue_id

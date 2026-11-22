@@ -579,7 +579,7 @@ pub async fn view_bug_page(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(ctx.user.id, eff, bug) {
         return forbidden(&ctx, "You do not have permission to view this issue.");
     }
 
@@ -1097,7 +1097,7 @@ pub async fn update_bug_page(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if bug.view_state == 50 && eff < 55 {
+    if !Db::can_view_bug(ctx.user.id, eff, bug) {
         return forbidden(&ctx, "Insufficient access to view private issue.");
     }
     let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == ctx.user.id);
@@ -1154,7 +1154,7 @@ pub async fn update_bug(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if bug.view_state == 50 && eff < 55 {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to view private issue.");
     }
     let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == ctx.user.id);
@@ -1226,7 +1226,7 @@ pub async fn bug_monitor_add(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to monitor this issue.");
     }
     let _ = db.add_bug_monitor(bug_id, ctx.user.id);
@@ -1284,7 +1284,7 @@ pub async fn bug_change_status(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if bug.view_state == 50 && eff < 55 {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to view private issue.");
     }
 
@@ -1392,7 +1392,7 @@ pub async fn bugnote_add(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || (bug.view_state == 50 && eff < 55) {
+    if eff < 25 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Reporter access required to add bugnotes.");
     }
 
@@ -1599,7 +1599,7 @@ pub async fn bug_file_add(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || (bug.view_state == 50 && eff < 55) {
+    if eff < 25 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Reporter access required to upload attachments.");
     }
 
@@ -1649,7 +1649,7 @@ pub async fn bug_file_download(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to download this attachment.");
     }
 

@@ -32,7 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("No SENDGRID_API_KEY provided; email background worker will not start.");
     }
 
-    let addr_str = std::env::var("MANTIS_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
+    let addr_str = std::env::var("MANTIS_ADDR")
+        .unwrap_or_else(|_| rust_mantis_bt::DEFAULT_MANTIS_ADDR.to_string());
+    println!("Base URL for issue notifications: {}", db.base_url());
+
     let app = rust_mantis_bt::build_router(db);
 
     let addr: SocketAddr = addr_str.parse()?;

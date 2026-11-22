@@ -103,7 +103,10 @@ pub async fn bug_tag_attach(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view private issue.");
+    }
+    if eff < 25 {
         return forbidden(&ctx, "Reporter access required to attach tags.");
     }
 
@@ -146,6 +149,9 @@ pub async fn bug_tag_detach(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view private issue.");
+    }
     let bug_tags = db.list_bug_tags(bug_id).unwrap_or_default();
     let attached_by_me = bug_tags
         .iter()

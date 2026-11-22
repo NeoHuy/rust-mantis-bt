@@ -208,6 +208,7 @@ async fn test_csrf_protection_middleware() {
 
     // 8. Stateless REST API route is NOT blocked by Web UI CSRF middleware (401, not 403)
     let res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -221,4 +222,39 @@ async fn test_csrf_protection_middleware() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // 9. Reverse proxy with X-Forwarded-Host succeeds
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/set_project")
+                .header("cookie", &session_cookie)
+                .header("sec-fetch-site", "same-origin")
+                .header("x-forwarded-host", "mantis.mycompany.com")
+                .header("origin", "https://mantis.mycompany.com")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("project_id=0"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // 10. Missing Host header with cross-origin Origin is rejected (403)
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/set_project")
+                .header("cookie", &session_cookie)
+                .header("origin", "https://attacker.example.com")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("project_id=0"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }

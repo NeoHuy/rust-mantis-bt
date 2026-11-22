@@ -739,7 +739,6 @@ pub fn render_layout(
         <div class="user-controls">
             {report_top_btn}
             <form action="/set_project" method="POST" style="display:inline-flex; align-items:center; gap:6px; margin:0;">
-                <input type="hidden" name="_csrf" value="{csrf_token}">
                 <label for="top_project_id" style="color:#dce7f5; font-size:12px;">Project:</label>
                 <select name="project_id" id="top_project_id" onchange="var pid=this.value;this.disabled=true;fetch('/set_project',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded','X-CSRF-Token':'{csrf_token}'}},body:'project_id='+encodeURIComponent(pid)}}).then(function(){{window.location.reload();}}).catch(function(){{window.location.reload();}});">
                     {project_options}
@@ -748,7 +747,6 @@ pub fn render_layout(
             </form>
             <span class="nav-pill">&#128100; <a href="/account_page" style="color:#fff; text-decoration:none;"><strong>{username}</strong></a> <span style="opacity:0.85;">({role})</span></span>
             <form action="/logout" method="POST" style="display:inline; margin:0;">
-                <input type="hidden" name="_csrf" value="{csrf_token}">
                 <button type="submit">Logout</button>
             </form>
         </div>

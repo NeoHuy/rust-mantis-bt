@@ -102,6 +102,14 @@ pub fn hash_password(plain: &str) -> String {
     format!("pbkdf2_sha256${}${}${}", iters, salt, hex_encode(&derived))
 }
 
+pub fn dummy_password_hash() -> String {
+    let iters = pbkdf2_iterations();
+    format!(
+        "pbkdf2_sha256${}$00000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000",
+        iters
+    )
+}
+
 pub fn needs_rehash(stored: &str) -> bool {
     let Some(rest) = stored.strip_prefix("pbkdf2_sha256$") else {
         return true;

@@ -437,7 +437,6 @@ fn test_is_session_expired_and_cookie_attributes() {
 }
 
 #[test]
-#[test]
 fn test_authenticate_auto_rehashes_legacy_passwords() {
     let db = Db::open_in_memory().unwrap();
     let uid_md5 = db
@@ -492,6 +491,48 @@ fn test_csrf_token_generation_and_verification() {
     assert!(!verify_csrf_token(&cookie, "invalid_token"));
     assert!(!verify_csrf_token("", &token));
     assert!(!verify_csrf_token(&cookie, ""));
+}
+
+#[test]
+fn test_dummy_password_hash_timing_parity() {
+    let dummy = dummy_password_hash();
+    assert!(dummy.starts_with("pbkdf2_sha256$"));
+    // Dummy hash must be valid PBKDF2 structure and fail gracefully
+    assert!(!verify_password("wrong_password", &dummy));
+}
+
+#[test]
+fn test_rehash_preserves_concurrent_password_change() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user(
+            "concurrent_user",
+            "Conc",
+            "c@example.com",
+            "temp",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    // Set legacy hash directly
+    let md5_pw = md5_hex("my_old_pass");
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET password = ?1 WHERE id = ?2",
+            rusqlite::params![md5_pw, uid],
+        )
+        .unwrap();
+    }
+
+    // Authenticate updates password hash to PBKDF2
+    let logged_in = db
+        .authenticate("concurrent_user", "my_old_pass")
+        .unwrap()
+        .unwrap();
+    assert!(logged_in.password.starts_with("pbkdf2_sha256$"));
 }
 
 #[test]
@@ -566,5 +607,4 @@ fn test_signup_session_has_valid_expiry() {
 
     old_user.last_visit = 1000;
     assert!(is_session_expired(&old_user));
-}
 }

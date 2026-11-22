@@ -791,10 +791,14 @@ impl Db {
             .map_err(|e| e.to_string())?
         {
             Some(u) => u,
-            None => return Ok(None),
+            None => {
+                crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
+                return Ok(None);
+            }
         };
 
         if user.enabled == 0 {
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
             return Ok(None);
         }
 
@@ -821,6 +825,7 @@ impl Db {
             .and_then(|s| s.trim().parse::<i64>().ok())
             .unwrap_or(0);
         if locked_until > now {
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
             return Err(
                 "Account temporarily locked due to too many failed login attempts. Please try again later."
                     .to_string(),
@@ -879,13 +884,23 @@ impl Db {
         {
             let conn = self.conn();
             if let Some(ref new_pw_hash) = rehashed {
-                conn.execute(
+                let rows = conn.execute(
                     "UPDATE mantis_user_table
                      SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2, password = ?3
-                     WHERE id = ?4",
-                    params![now, new_cookie, new_pw_hash, user.id],
+                     WHERE id = ?4 AND password = ?5",
+                    params![now, new_cookie, new_pw_hash, user.id, user.password],
                 )
                 .map_err(|e| e.to_string())?;
+                if rows == 0 {
+                    // Password was updated concurrently by an admin, preserve the new password
+                    conn.execute(
+                        "UPDATE mantis_user_table
+                         SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2
+                         WHERE id = ?3",
+                        params![now, new_cookie, user.id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
             } else {
                 conn.execute(
                     "UPDATE mantis_user_table

@@ -142,9 +142,16 @@ pub async fn csrf_protection_middleware(
     }
 
     let host_hdr = headers
-        .get(axum::http::header::HOST)
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(axum::http::header::HOST))
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim());
+        .map(|s| s.trim())
+        .or_else(|| request.uri().authority().map(|a| a.as_str()));
+
+    let public_origin = std::env::var("MANTIS_PUBLIC_ORIGIN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     // Check 2: Origin header
     if let Some(origin_val) = headers
@@ -155,46 +162,46 @@ pub async fn csrf_protection_middleware(
         if trimmed_origin.eq_ignore_ascii_case("null") {
             return csrf_forbidden("CSRF validation failed: null Origin rejected");
         }
-        if let Some(host) = host_hdr {
-            if !host_matches_url(host, trimmed_origin) {
-                return csrf_forbidden("CSRF validation failed: Origin mismatch");
-            }
-        } else if extract_url_authority(trimmed_origin).is_none() {
-            return csrf_forbidden("CSRF validation failed: malformed Origin");
+        let matches_host = host_hdr
+            .map(|host| host_matches_url(host, trimmed_origin))
+            .unwrap_or(false);
+        let matches_public = public_origin
+            .as_deref()
+            .map(|po| trimmed_origin.eq_ignore_ascii_case(po))
+            .unwrap_or(false);
+
+        if !matches_host && !matches_public {
+            return csrf_forbidden("CSRF validation failed: Origin mismatch");
         }
-    } else if let (Some(referer_val), Some(host)) = (
-        headers
-            .get(axum::http::header::REFERER)
-            .and_then(|v| v.to_str().ok()),
-        host_hdr,
-    ) {
+    } else if let Some(referer_val) = headers
+        .get(axum::http::header::REFERER)
+        .and_then(|v| v.to_str().ok())
+    {
         // Check 3: Referer fallback when Origin is absent
-        if !host_matches_url(host, referer_val) {
+        let matches_host = host_hdr
+            .map(|host| host_matches_url(host, referer_val.trim()))
+            .unwrap_or(false);
+        let matches_public = public_origin
+            .as_deref()
+            .map(|po| referer_val.trim().starts_with(po))
+            .unwrap_or(false);
+
+        if !matches_host && !matches_public {
             return csrf_forbidden("CSRF validation failed: Referer mismatch");
         }
     }
 
-    // Check 4: X-CSRF-Token header & optional strict CSRF mode
-    let cookies = crate::auth::parse_cookies(headers);
-    let session_cookie = cookies
-        .get("MANTIS_STRING_COOKIE")
-        .map(|s| s.as_str())
-        .filter(|s| !s.is_empty());
-
+    // Check 4: If X-CSRF-Token header is provided (e.g. from AJAX/fetch requests), validate it
     if let Some(token_hdr) = headers.get("x-csrf-token").and_then(|v| v.to_str().ok()) {
+        let cookies = crate::auth::parse_cookies(headers);
+        let session_cookie = cookies
+            .get("MANTIS_STRING_COOKIE")
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty());
+
         match session_cookie {
             Some(cookie_str) if crate::auth::verify_csrf_token(cookie_str, token_hdr) => {}
             _ => return csrf_forbidden("CSRF validation failed: invalid X-CSRF-Token"),
-        }
-    } else {
-        let strict_csrf = std::env::var("MANTIS_STRICT_CSRF_TOKEN")
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                v == "1" || v == "true"
-            })
-            .unwrap_or(false);
-        if strict_csrf && session_cookie.is_some() {
-            return csrf_forbidden("CSRF validation failed: missing X-CSRF-Token");
         }
     }
 

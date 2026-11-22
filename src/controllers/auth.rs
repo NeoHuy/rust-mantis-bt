@@ -49,7 +49,7 @@ pub fn router() -> Router<Db> {
         .route("/login", get(login_page).post(login_submit))
         .route("/signup_page", get(signup_page))
         .route("/signup", post(signup_submit))
-        .route("/logout", get(logout).post(logout))
+        .route("/logout", post(logout))
         .route("/set_project", post(set_project))
         .route("/account_page", get(account_page))
         .route("/account_update", post(account_update))
@@ -69,7 +69,14 @@ pub async fn login_page(headers: HeaderMap, State(db): State<Db>) -> Response {
 }
 
 pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> Response {
-    match db.authenticate(&form.username, &form.password) {
+    let username = form.username;
+    let password = form.password;
+    let db_auth = db.clone();
+    let auth_res = tokio::task::spawn_blocking(move || db_auth.authenticate(&username, &password))
+        .await
+        .unwrap_or_else(|_| Err("Authentication task failed".to_string()));
+
+    match auth_res {
         Ok(Some(user)) => {
             let cookie_val = make_cookie_header(
                 "MANTIS_STRING_COOKIE",
@@ -244,10 +251,15 @@ pub async fn account_update(
             )
                 .into_response();
         }
-        let current_pw = form.current_password.as_deref().unwrap_or("");
-        if current_pw.trim().is_empty()
-            || !crate::auth::verify_password(current_pw, &ctx.user.password)
-        {
+        let current_pw = form.current_password.as_deref().unwrap_or("").to_string();
+        let user_pw = ctx.user.password.clone();
+        let pw_valid = tokio::task::spawn_blocking(move || {
+            !current_pw.trim().is_empty() && crate::auth::verify_password(&current_pw, &user_pw)
+        })
+        .await
+        .unwrap_or(false);
+
+        if !pw_valid {
             let content = "<p>Current password is incorrect or missing.</p>";
             return (
                 StatusCode::BAD_REQUEST,

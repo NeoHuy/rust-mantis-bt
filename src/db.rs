@@ -544,7 +544,7 @@ impl Db {
                     0,  // lost_password_request_count
                     0,  // failed_login_count
                     cookie,
-                    0,   // last_visit
+                    now, // last_visit
                     now, // date_created
                 ],
             )?;
@@ -763,6 +763,17 @@ impl Db {
         }
     }
 
+    pub fn rotate_user_cookie(&self, user_id: i64) -> Result<String, String> {
+        let new_cookie = crate::auth::generate_cookie_string();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET cookie_string = ?1 WHERE id = ?2",
+            params![new_cookie, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(new_cookie)
+    }
+
     pub fn authenticate(&self, username: &str, password: &str) -> Result<Option<User>, String> {
         let user = match self
             .get_user_by_username(username)
@@ -776,35 +787,95 @@ impl Db {
             return Ok(None);
         }
 
-        if !crate::auth::verify_password(password, &user.password) {
-            let conn = self.conn();
-            conn.execute(
-                "UPDATE mantis_user_table SET failed_login_count = failed_login_count + 1 WHERE id = ?1",
-                params![user.id],
-            ).map_err(|e| e.to_string())?;
-            return Ok(None);
-        }
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
+        let max_failed_logins = std::env::var("MANTIS_MAX_FAILED_LOGINS")
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .map(|v| v.max(1))
+            .unwrap_or(5);
+        let lockout_secs = std::env::var("MANTIS_LOCKOUT_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .map(|v| v.max(1))
+            .unwrap_or(900);
+
+        let locked_until = self
+            .get_config("login_locked_until", 0, user.id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        if locked_until > now {
+            return Err(
+                "Account temporarily locked due to too many failed login attempts. Please try again later."
+                    .to_string(),
+            );
+        } else if locked_until > 0 {
+            // Lockout period has elapsed: clear lock config and reset failure counter
+            let _ = self.set_config("login_locked_until", 0, user.id, "0");
+            let conn = self.conn();
+            conn.execute(
+                "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+                params![user.id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        if !crate::auth::verify_password(password, &user.password) {
+            let conn = self.conn();
+            let new_count: i32 = conn
+                .query_row(
+                    "UPDATE mantis_user_table SET failed_login_count = failed_login_count + 1 WHERE id = ?1 RETURNING failed_login_count",
+                    params![user.id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            drop(conn);
+
+            if new_count >= max_failed_logins {
+                self.set_config(
+                    "login_locked_until",
+                    0,
+                    user.id,
+                    &(now + lockout_secs).to_string(),
+                )
+                .map_err(|e| e.to_string())?;
+                // Reset failed_login_count to 0 so when the lockout period expires,
+                // the user gets a fresh set of attempts instead of locking on a single wrong attempt
+                let conn = self.conn();
+                conn.execute(
+                    "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+                    params![user.id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            return Ok(None);
+        }
+
+        let new_cookie = crate::auth::generate_cookie_string();
+
         {
             let conn = self.conn();
             conn.execute(
                 "UPDATE mantis_user_table
-                 SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1
-                 WHERE id = ?2",
-                params![now, user.id],
+                 SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2
+                 WHERE id = ?3",
+                params![now, new_cookie, user.id],
             )
             .map_err(|e| e.to_string())?;
         }
+
+        let _ = self.set_config("login_locked_until", 0, user.id, "0");
 
         let mut updated = user;
         updated.login_count += 1;
         updated.failed_login_count = 0;
         updated.last_visit = now;
+        updated.cookie_string = new_cookie;
         Ok(Some(updated))
     }
 
@@ -883,7 +954,7 @@ impl Db {
                 username, realname, email, password, enabled, protected,
                 access_level, login_count, lost_password_request_count, failed_login_count,
                 cookie_string, last_visit, date_created
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, 0, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, ?9, ?10)",
             params![
                 trimmed_username,
                 realname,
@@ -894,11 +965,24 @@ impl Db {
                 access_level,
                 cookie,
                 now,
+                now,
             ],
         )
         .map_err(|e| e.to_string())?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn unlock_user(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        drop(conn);
+        let _ = self.set_config("login_locked_until", 0, id, "0");
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -945,16 +1029,29 @@ impl Db {
 
         if let Some(pw) = new_password {
             let hashed_pw = crate::auth::hash_password(pw);
+            let new_cookie = crate::auth::generate_cookie_string();
             conn.execute(
                 "UPDATE mantis_user_table
-                 SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6
-                 WHERE id = ?7",
-                params![realname, email, hashed_pw, access_level, enabled_val, protected_val, id],
-            ).map_err(|e| e.to_string())?;
+                 SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6, cookie_string = ?7, failed_login_count = 0
+                 WHERE id = ?8",
+                params![
+                    realname,
+                    email,
+                    hashed_pw,
+                    access_level,
+                    enabled_val,
+                    protected_val,
+                    new_cookie,
+                    id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            drop(conn);
+            let _ = self.set_config("login_locked_until", 0, id, "0");
         } else {
             conn.execute(
                 "UPDATE mantis_user_table
-                 SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5
+                 SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5, failed_login_count = 0
                  WHERE id = ?6",
                 params![
                     realname,
@@ -966,6 +1063,8 @@ impl Db {
                 ],
             )
             .map_err(|e| e.to_string())?;
+            drop(conn);
+            let _ = self.set_config("login_locked_until", 0, id, "0");
         }
 
         Ok(())

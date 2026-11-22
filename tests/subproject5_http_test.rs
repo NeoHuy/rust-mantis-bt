@@ -69,8 +69,58 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     let loc = res.headers().get("location").unwrap().to_str().unwrap();
-    let raw_token = loc.split("token=").nth(1).unwrap().to_string();
+    assert!(
+        !loc.contains("token="),
+        "Token must not leak in redirect URL"
+    );
+    let flash_set_cookie = res
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("MANTIS_FLASH_TOKEN="))
+        .expect("MANTIS_FLASH_TOKEN cookie must be set");
+    assert!(flash_set_cookie.contains("HttpOnly"));
+    assert!(flash_set_cookie.contains("Max-Age=60"));
+    assert!(flash_set_cookie.contains("Path=/api_tokens_page"));
+    let flash_pair = flash_set_cookie.split(';').next().unwrap().to_string();
+    let raw_token = flash_pair
+        .strip_prefix("MANTIS_FLASH_TOKEN=")
+        .unwrap()
+        .to_string();
     assert_eq!(raw_token.len(), 64);
+
+    // 2b. Visiting /api_tokens_page displays token once and clears MANTIS_FLASH_TOKEN
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api_tokens_page")
+                .header("cookie", format!("{}; {}", cookie, flash_pair))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("cache-control").unwrap(),
+        "no-store, private"
+    );
+    let clear_hdr = res
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("MANTIS_FLASH_TOKEN="))
+        .expect("MANTIS_FLASH_TOKEN must be cleared after display");
+    assert!(clear_hdr.contains("Max-Age=0"));
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains(&raw_token));
 
     // 3. Call GET /api/rest/users/me with Authorization header
     let res = app

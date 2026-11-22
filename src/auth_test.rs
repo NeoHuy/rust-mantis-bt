@@ -366,9 +366,11 @@ fn test_is_session_expired_and_cookie_attributes() {
     let db = Db::open_in_memory().unwrap();
     let mut user = db.get_user_by_username("administrator").unwrap().unwrap();
 
-    // Fresh/never-visited user (last_visit == 0) is not expired
+    // User with last_visit <= 0 (never logged in or invalid timestamp) is considered expired
     user.last_visit = 0;
-    assert!(!is_session_expired(&user));
+    assert!(is_session_expired(&user));
+    user.last_visit = -1;
+    assert!(is_session_expired(&user));
 
     // Recent visit is not expired
     let now = std::time::SystemTime::now()
@@ -395,4 +397,78 @@ fn test_is_session_expired_and_cookie_attributes() {
     assert!(hdr.contains("SameSite=Lax"));
     assert!(hdr.contains("HttpOnly"));
     assert!(hdr.contains("Max-Age=60"));
+}
+
+#[test]
+fn test_lockout_does_not_permanently_rearm() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user(
+            "victim2",
+            "Victim2",
+            "v2@example.com",
+            "correctpass",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    // 5 failures lock the account
+    for _ in 0..5 {
+        assert!(db.authenticate("victim2", "wrong").unwrap().is_none());
+    }
+    assert!(db.authenticate("victim2", "correctpass").is_err());
+
+    // Fast-forward past lockout window: simulate expired lock
+    db.set_config("login_locked_until", 0, uid, "1").unwrap();
+
+    // Next wrong attempt should NOT immediately re-lock the account on attempt 1!
+    assert!(db.authenticate("victim2", "wrong").unwrap().is_none());
+    // Correct password succeeds because failure counter was reset!
+    assert!(db.authenticate("victim2", "correctpass").unwrap().is_some());
+}
+
+#[test]
+fn test_admin_unlock_user() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user(
+            "prot_victim",
+            "Protected Victim",
+            "pv@example.com",
+            "pass",
+            90,
+            true,
+            true, // protected = true
+        )
+        .unwrap();
+
+    for _ in 0..5 {
+        assert!(db.authenticate("prot_victim", "wrong").unwrap().is_none());
+    }
+    assert!(db.authenticate("prot_victim", "pass").is_err());
+
+    // Explicit unlock by admin works even for protected users
+    db.unlock_user(uid).unwrap();
+    assert!(db.authenticate("prot_victim", "pass").unwrap().is_some());
+}
+
+#[test]
+fn test_signup_session_has_valid_expiry() {
+    let db = Db::open_in_memory().unwrap();
+    let user = db
+        .signup_user("signup_test", "Signup Test", "st@example.com", "pass123")
+        .unwrap();
+    // Newly signed-up user has last_visit > 0 and is not expired
+    assert!(user.last_visit > 0);
+    assert!(!is_session_expired(&user));
+
+    // Manipulate last_visit to 0 or very old timestamp to verify expiry
+    let mut old_user = user;
+    old_user.last_visit = 0;
+    assert!(is_session_expired(&old_user));
+
+    old_user.last_visit = 1000;
+    assert!(is_session_expired(&old_user));
 }

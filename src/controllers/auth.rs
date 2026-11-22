@@ -84,12 +84,7 @@ pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> 
             }
             res
         }
-        Err(lock_msg) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            views::auth::render_login_page(Some(&lock_msg), db.is_signup_allowed()),
-        )
-            .into_response(),
-        Ok(None) => (
+        Err(_) | Ok(None) => (
             StatusCode::UNAUTHORIZED,
             views::auth::render_login_page(
                 Some("Invalid username or password."),

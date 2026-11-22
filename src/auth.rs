@@ -213,7 +213,7 @@ pub fn session_ttl_secs() -> i64 {
 
 pub fn is_session_expired(user: &crate::models::User) -> bool {
     if user.last_visit <= 0 {
-        return false;
+        return true;
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -72,7 +72,7 @@ async fn test_logout_clears_cookie() {
 }
 
 #[tokio::test]
-async fn test_login_submit_lockout_returns_429() {
+async fn test_login_submit_lockout_blocks_login_without_enumeration() {
     let db = Db::open_in_memory().unwrap();
     for _ in 0..5 {
         let resp = login_submit(
@@ -86,13 +86,26 @@ async fn test_login_submit_lockout_returns_429() {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    // After 5 failed attempts, the account is locked; even with the correct password,
+    // login is denied with 401 UNAUTHORIZED to avoid username enumeration
     let resp = login_submit(
-        State(db),
+        State(db.clone()),
         Form(LoginForm {
             username: "administrator".to_string(),
             password: "root".to_string(),
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Non-existent username also returns identical 401 UNAUTHORIZED
+    let resp_nonexistent = login_submit(
+        State(db),
+        Form(LoginForm {
+            username: "nonexistent_victim".to_string(),
+            password: "any_password".to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(resp_nonexistent.status(), StatusCode::UNAUTHORIZED);
 }

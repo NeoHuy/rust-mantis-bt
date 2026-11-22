@@ -104,6 +104,10 @@ async fn test_rest_api_tokens_and_plugins_end_to_end() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers().get("cache-control").unwrap(),
+        "no-store, private"
+    );
     let clear_hdr = res
         .headers()
         .get_all("set-cookie")

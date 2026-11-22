@@ -244,6 +244,7 @@ async fn test_csrf_protection_middleware() {
 
     // 10. Missing Host header with cross-origin Origin is rejected (403)
     let res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -257,4 +258,39 @@ async fn test_csrf_protection_middleware() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 11. MANTIS_PUBLIC_ORIGIN scheme matching validation
+    std::env::set_var("MANTIS_PUBLIC_ORIGIN", "https://mantis.prod.com");
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/set_project")
+                .header("cookie", &session_cookie)
+                .header("origin", "https://mantis.prod.com")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("project_id=0"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Mismatched scheme (http instead of https) is rejected (403)
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/set_project")
+                .header("cookie", &session_cookie)
+                .header("origin", "http://mantis.prod.com")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("project_id=0"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    std::env::remove_var("MANTIS_PUBLIC_ORIGIN");
 }

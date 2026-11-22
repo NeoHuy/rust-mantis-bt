@@ -249,7 +249,7 @@ pub async fn account_update(
     ctx: AuthContext,
     Form(form): Form<AccountUpdateForm>,
 ) -> Response {
-    let new_password = form.password.as_ref().filter(|p| !p.trim().is_empty());
+    let new_password = form.password.as_deref().filter(|p| !p.trim().is_empty());
     if let Some(pass) = new_password {
         let confirm = form.password_confirm.as_deref().unwrap_or("");
         if pass != confirm {
@@ -301,15 +301,30 @@ pub async fn account_update(
         }
     }
 
-    match db.update_user(
-        ctx.user.id,
-        &form.realname,
-        &form.email,
-        new_password.map(|s| s.as_str()),
-        ctx.user.access_level,
-        ctx.user.enabled == 1,
-        ctx.user.protected == 1,
-    ) {
+    let db_update = db.clone();
+    let uid = ctx.user.id;
+    let realname = form.realname.clone();
+    let email = form.email.clone();
+    let access_level = ctx.user.access_level;
+    let enabled = ctx.user.enabled == 1;
+    let protected = ctx.user.protected == 1;
+    let new_pw_owned = new_password.map(|s| s.to_string());
+
+    let update_res = tokio::task::spawn_blocking(move || {
+        db_update.update_user(
+            uid,
+            &realname,
+            &email,
+            new_pw_owned.as_deref(),
+            access_level,
+            enabled,
+            protected,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| Err("Update user task failed".to_string()));
+
+    match update_res {
         Ok(_) => {
             let mut res =
                 Redirect::to("/account_page?msg=Account+updated+successfully").into_response();

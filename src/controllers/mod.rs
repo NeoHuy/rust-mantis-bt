@@ -175,7 +175,16 @@ pub async fn csrf_protection_middleware(
         let matches_public = public_origin
             .as_deref()
             .map(|po| {
-                if let (Some(a1), Some(a2)) = (
+                if let (Ok(u1), Ok(u2)) =
+                    (reqwest::Url::parse(po), reqwest::Url::parse(trimmed_origin))
+                {
+                    u1.scheme().eq_ignore_ascii_case(u2.scheme())
+                        && u1
+                            .host_str()
+                            .unwrap_or("")
+                            .eq_ignore_ascii_case(u2.host_str().unwrap_or(""))
+                        && u1.port_or_known_default() == u2.port_or_known_default()
+                } else if let (Some(a1), Some(a2)) = (
                     extract_url_authority(po),
                     extract_url_authority(trimmed_origin),
                 ) {
@@ -200,7 +209,17 @@ pub async fn csrf_protection_middleware(
         let matches_public = public_origin
             .as_deref()
             .map(|po| {
-                if let (Some(a1), Some(a2)) = (
+                if let (Ok(u1), Ok(u2)) = (
+                    reqwest::Url::parse(po),
+                    reqwest::Url::parse(referer_val.trim()),
+                ) {
+                    u1.scheme().eq_ignore_ascii_case(u2.scheme())
+                        && u1
+                            .host_str()
+                            .unwrap_or("")
+                            .eq_ignore_ascii_case(u2.host_str().unwrap_or(""))
+                        && u1.port_or_known_default() == u2.port_or_known_default()
+                } else if let (Some(a1), Some(a2)) = (
                     extract_url_authority(po),
                     extract_url_authority(referer_val.trim()),
                 ) {

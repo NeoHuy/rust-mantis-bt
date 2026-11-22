@@ -841,7 +841,14 @@ impl Db {
             .map_err(|e| e.to_string())?;
         }
 
-        if !crate::auth::verify_password(password, &user.password) {
+        let is_pbkdf2 = user.password.starts_with("pbkdf2_sha256$");
+        let pw_matches = crate::auth::verify_password(password, &user.password);
+        if !is_pbkdf2 {
+            // Equalize verification timing with PBKDF2 calculation for non-PBKDF2 legacy hashes
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
+        }
+
+        if !pw_matches {
             let conn = self.conn();
             let new_count: i32 = conn
                 .query_row(
@@ -1052,6 +1059,13 @@ impl Db {
         enabled: bool,
         protected: bool,
     ) -> Result<(), String> {
+        let hashed_pw_and_cookie = new_password.map(|pw| {
+            (
+                crate::auth::hash_password(pw),
+                crate::auth::generate_cookie_string(),
+            )
+        });
+
         let conn = self.conn();
         let existing = match Self::query_user_by_id(&conn, id).map_err(|e| e.to_string())? {
             Some(u) => u,
@@ -1083,9 +1097,7 @@ impl Db {
         let enabled_val = if enabled { 1 } else { 0 };
         let protected_val = if protected { 1 } else { 0 };
 
-        if let Some(pw) = new_password {
-            let hashed_pw = crate::auth::hash_password(pw);
-            let new_cookie = crate::auth::generate_cookie_string();
+        if let Some((hashed_pw, new_cookie)) = hashed_pw_and_cookie {
             conn.execute(
                 "UPDATE mantis_user_table
                  SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6, cookie_string = ?7, failed_login_count = 0

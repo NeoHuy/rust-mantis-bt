@@ -514,7 +514,7 @@ impl Db {
                     0,  // lost_password_request_count
                     0,  // failed_login_count
                     cookie,
-                    0,   // last_visit
+                    now, // last_visit
                     now, // date_created
                 ],
             )?;
@@ -825,18 +825,32 @@ impl Db {
                 "Account temporarily locked due to too many failed login attempts. Please try again later."
                     .to_string(),
             );
+        } else if locked_until > 0 {
+            // Lockout period has elapsed: clear lock config and reset failure counter
+            let _ = self.set_config("login_locked_until", 0, user.id, "0");
+            let conn = self.conn();
+            let _ = conn.execute(
+                "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+                params![user.id],
+            );
         }
 
         if !crate::auth::verify_password(password, &user.password) {
+            let base_count = if locked_until > 0 && locked_until <= now {
+                0
+            } else {
+                user.failed_login_count
+            };
+            let new_count = base_count + 1;
             {
                 let conn = self.conn();
                 conn.execute(
-                    "UPDATE mantis_user_table SET failed_login_count = failed_login_count + 1 WHERE id = ?1",
-                    params![user.id],
+                    "UPDATE mantis_user_table SET failed_login_count = ?1 WHERE id = ?2",
+                    params![new_count, user.id],
                 )
                 .map_err(|e| e.to_string())?;
             }
-            if user.failed_login_count + 1 >= max_failed_logins {
+            if new_count >= max_failed_logins {
                 self.set_config(
                     "login_locked_until",
                     0,
@@ -844,6 +858,13 @@ impl Db {
                     &(now + lockout_secs).to_string(),
                 )
                 .map_err(|e| e.to_string())?;
+                // Reset failed_login_count to 0 so when the lockout period expires,
+                // the user gets a fresh set of attempts instead of locking on a single wrong attempt
+                let conn = self.conn();
+                let _ = conn.execute(
+                    "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+                    params![user.id],
+                );
             }
             return Ok(None);
         }
@@ -981,7 +1002,7 @@ impl Db {
                 username, realname, email, password, enabled, protected,
                 access_level, login_count, lost_password_request_count, failed_login_count,
                 cookie_string, last_visit, date_created
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, 0, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, ?9, ?10)",
             params![
                 trimmed_username,
                 realname,
@@ -992,11 +1013,24 @@ impl Db {
                 access_level,
                 cookie,
                 now,
+                now,
             ],
         )
         .map_err(|e| e.to_string())?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn unlock_user(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        drop(conn);
+        let _ = self.set_config("login_locked_until", 0, id, "0");
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1065,7 +1099,7 @@ impl Db {
         } else {
             conn.execute(
                 "UPDATE mantis_user_table
-                 SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5
+                 SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5, failed_login_count = 0
                  WHERE id = ?6",
                 params![
                     realname,
@@ -1077,6 +1111,8 @@ impl Db {
                 ],
             )
             .map_err(|e| e.to_string())?;
+            drop(conn);
+            let _ = self.set_config("login_locked_until", 0, id, "0");
         }
 
         Ok(())

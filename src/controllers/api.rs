@@ -83,6 +83,10 @@ pub async fn api_tokens_page(
         if let Ok(hv) = HeaderValue::from_str(&clear_flash) {
             res.headers_mut().append(SET_COOKIE, hv);
         }
+        res.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, private"),
+        );
     }
 
     res

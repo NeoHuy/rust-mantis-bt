@@ -119,7 +119,7 @@ async fn test_custom_fields_tags_monitors_and_my_view() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let bug_id = db.list_bugs(proj_id, 90, 0, 10).unwrap()[0].id;
+    let bug_id = db.list_bugs(proj_id, 0, 10).unwrap()[0].id;
 
     // 3. Attach tags to the bug
     let res = app

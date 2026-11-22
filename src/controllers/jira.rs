@@ -311,7 +311,7 @@ pub async fn sync_bug_with_jira(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 55 || (bug.view_state == 50 && eff < 55) {
+    if eff < 55 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden_html(
             &ctx,
             "Developer access required on this project to sync issues with Jira.",
@@ -580,7 +580,7 @@ pub async fn unlink_bug_from_jira(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 55 || (bug.view_state == 50 && eff < 55) {
+    if eff < 55 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden_html(
             &ctx,
             "Developer access required on this project to unlink issues from Jira.",

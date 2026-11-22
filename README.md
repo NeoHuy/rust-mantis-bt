@@ -31,9 +31,10 @@ cargo run
 ```
 By default, the server listens on `http://127.0.0.1:3000` with the SQLite database stored at `./mantis.db`.
 
-You can configure address and database path via environment variables:
+You can configure address, base URL, and database path via environment variables:
 ```bash
 export MANTIS_ADDR="0.0.0.0:3000"
+export MANTIS_BASE_URL="http://127.0.0.1:3000"
 export MANTIS_DB_PATH="/path/to/mantis.db"
 cargo run
 ```

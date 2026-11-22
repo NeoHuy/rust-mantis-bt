@@ -829,27 +829,24 @@ impl Db {
             // Lockout period has elapsed: clear lock config and reset failure counter
             let _ = self.set_config("login_locked_until", 0, user.id, "0");
             let conn = self.conn();
-            let _ = conn.execute(
+            conn.execute(
                 "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
                 params![user.id],
-            );
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         if !crate::auth::verify_password(password, &user.password) {
-            let base_count = if locked_until > 0 && locked_until <= now {
-                0
-            } else {
-                user.failed_login_count
-            };
-            let new_count = base_count + 1;
-            {
-                let conn = self.conn();
-                conn.execute(
-                    "UPDATE mantis_user_table SET failed_login_count = ?1 WHERE id = ?2",
-                    params![new_count, user.id],
+            let conn = self.conn();
+            let new_count: i32 = conn
+                .query_row(
+                    "UPDATE mantis_user_table SET failed_login_count = failed_login_count + 1 WHERE id = ?1 RETURNING failed_login_count",
+                    params![user.id],
+                    |row| row.get(0),
                 )
                 .map_err(|e| e.to_string())?;
-            }
+            drop(conn);
+
             if new_count >= max_failed_logins {
                 self.set_config(
                     "login_locked_until",
@@ -861,10 +858,11 @@ impl Db {
                 // Reset failed_login_count to 0 so when the lockout period expires,
                 // the user gets a fresh set of attempts instead of locking on a single wrong attempt
                 let conn = self.conn();
-                let _ = conn.execute(
+                conn.execute(
                     "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
                     params![user.id],
-                );
+                )
+                .map_err(|e| e.to_string())?;
             }
             return Ok(None);
         }

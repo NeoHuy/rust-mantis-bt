@@ -75,7 +75,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ## 3. Repository Architecture & Code Layout
 
-Code is organized into specialized MVC layers with 1:1 companion unit test files (`<module>.rs` + `<module>_test.rs`) across MVC and core modules:
+Code is organized into specialized MVC layers with 1:1 companion unit test files (`<module>.rs` + `<module>_test.rs`) across MVC and core modules; integration subsystems (`src/mailer.rs`, `src/mcp/*`) are covered by dedicated integration tests in `tests/` (`tests/test_sendgrid_mailer.rs`, `tests/mcp_test.rs`).
 
 ```text
 src/
@@ -86,8 +86,8 @@ src/
 ├── jira.rs (+ jira_test.rs)    # Jira Cloud REST API client & issue synchronization
 ├── mailer.rs                   # SendGrid email queue background dispatcher
 ├── mcp/                        # Model Context Protocol (MCP) SSE server & tool dispatcher
-│   ├── mod.rs                  # McpState & /mcp/sse, /mcp/messages router
-│   ├── handlers.rs             # SSE & JSON-RPC HTTP handlers + PAT token auth
+│   ├── mod.rs                  # /mcp/sse & /mcp/messages router (re-exports McpState from handlers.rs)
+│   ├── handlers.rs             # McpState, SSE & JSON-RPC HTTP handlers + PAT token auth
 │   ├── protocol.rs             # JSON-RPC / MCP protocol types & error codes
 │   ├── session.rs              # SessionManager for active SSE client streams
 │   └── tools.rs                # Tool definitions & permission-checked DB dispatch
@@ -109,7 +109,8 @@ docs/                           # Design specifications and implementation plans
 ### Runtime Environment Variables
 - **Core & Storage:**
   - `MANTIS_DB_PATH`: SQLite database file path (default: `mantis.db`).
-  - `MANTIS_ADDR`: Bind address and port (default: `127.0.0.1:3000`).
+  - `MANTIS_ADDR`: Bind address and port (default: `127.0.0.1:3000`; also used as the fallback host for `MANTIS_BASE_URL`).
+  - `MANTIS_BASE_URL`: Base URL for issue links in notification emails (`Db::resolve_base_url` in `src/db.rs`; defaults to `http://<MANTIS_ADDR>`).
   - `MANTIS_MAX_FILE_SIZE`: Maximum upload size in bytes for bug attachments.
   - `MANTIS_UPLOAD_DIR`: Optional directory path for attachment storage.
 - **MCP Server:**
@@ -180,7 +181,7 @@ When tasked with implementing a feature or fixing a bug, follow this execution s
    - Escape user-generated content before rendering inside HTML templates using `views::html_escape`.
    - When generating CSV exports, sanitize fields starting with `=`, `+`, `-`, or `@` to prevent spreadsheet formula injection.
    - Never nest `<form>` tags inside edit pages (verified by `test_no_nested_forms_in_edit_pages`).
-   - Strip `\r` and `\n` characters from error messages placed into redirect `Location` headers or query strings to prevent header injection and `HeaderValue` panics.
+   - Strip `\r` and `\n` characters from error messages placed into redirect `Location` headers or query strings to prevent header injection and `HeaderValue` panics (see `sanitize_error_message` in `src/controllers/jira.rs`; reuse or extract into a shared helper when other controllers need it).
 
 3. **Robust Error Handling:**
    - Do **NOT** use `.unwrap()` or `.expect()` in production controller or MCP paths. Propagate errors with `?` or handle them gracefully with appropriate HTTP status, JSON-RPC error, or user notification.

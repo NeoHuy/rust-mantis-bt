@@ -143,9 +143,16 @@ pub async fn csrf_protection_middleware(
 
     let host_hdr = headers
         .get("x-forwarded-host")
-        .or_else(|| headers.get(axum::http::header::HOST))
         .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
         .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim())
+        })
         .or_else(|| request.uri().authority().map(|a| a.as_str()));
 
     let public_origin = std::env::var("MANTIS_PUBLIC_ORIGIN")
@@ -167,7 +174,16 @@ pub async fn csrf_protection_middleware(
             .unwrap_or(false);
         let matches_public = public_origin
             .as_deref()
-            .map(|po| trimmed_origin.eq_ignore_ascii_case(po))
+            .map(|po| {
+                if let (Some(a1), Some(a2)) = (
+                    extract_url_authority(po),
+                    extract_url_authority(trimmed_origin),
+                ) {
+                    a1.eq_ignore_ascii_case(&a2)
+                } else {
+                    trimmed_origin.eq_ignore_ascii_case(po)
+                }
+            })
             .unwrap_or(false);
 
         if !matches_host && !matches_public {
@@ -183,7 +199,16 @@ pub async fn csrf_protection_middleware(
             .unwrap_or(false);
         let matches_public = public_origin
             .as_deref()
-            .map(|po| referer_val.trim().starts_with(po))
+            .map(|po| {
+                if let (Some(a1), Some(a2)) = (
+                    extract_url_authority(po),
+                    extract_url_authority(referer_val.trim()),
+                ) {
+                    a1.eq_ignore_ascii_case(&a2)
+                } else {
+                    false
+                }
+            })
             .unwrap_or(false);
 
         if !matches_host && !matches_public {

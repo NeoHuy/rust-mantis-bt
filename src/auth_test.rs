@@ -533,6 +533,26 @@ fn test_rehash_preserves_concurrent_password_change() {
         .unwrap()
         .unwrap();
     assert!(logged_in.password.starts_with("pbkdf2_sha256$"));
+
+    // If an admin resets password concurrently, old password cannot authenticate
+    db.update_user(
+        uid,
+        "Conc",
+        "c@example.com",
+        Some("admin_new_pass"),
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(db
+        .authenticate("concurrent_user", "my_old_pass")
+        .unwrap()
+        .is_none());
+    assert!(db
+        .authenticate("concurrent_user", "admin_new_pass")
+        .unwrap()
+        .is_some());
 }
 
 #[test]

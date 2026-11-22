@@ -147,7 +147,21 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
             .into_response();
     }
 
-    match db.signup_user(&form.username, realname, &form.email, &form.password) {
+    let username = form.username;
+    let email = form.email;
+    let password = form.password;
+    let realname_owned = realname.to_string();
+    let db_signup = db.clone();
+    let u_clone = username.clone();
+    let e_clone = email.clone();
+
+    let signup_res = tokio::task::spawn_blocking(move || {
+        db_signup.signup_user(&u_clone, &realname_owned, &e_clone, &password)
+    })
+    .await
+    .unwrap_or_else(|_| Err("Signup task failed".to_string()));
+
+    match signup_res {
         Ok(user) => {
             let cookie_val = make_cookie_header(
                 "MANTIS_STRING_COOKIE",
@@ -163,7 +177,7 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
         }
         Err(err_msg) => (
             StatusCode::BAD_REQUEST,
-            views::auth::render_signup_page(Some(&err_msg), &form.username, realname, &form.email),
+            views::auth::render_signup_page(Some(&err_msg), &username, realname, &email),
         )
             .into_response(),
     }

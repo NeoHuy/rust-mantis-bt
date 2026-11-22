@@ -142,7 +142,13 @@ pub fn render_manage_jira_page(
         cached_epics_html.push_str("</tbody></table>");
     }
 
-    let token_hint = if !config.api_token.is_empty() {
+    let env_token_active = std::env::var("MANTIS_JIRA_API_TOKEN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    let token_hint = if env_token_active {
+        r#"<small style="color:#2b6cb0; display:block; margin-top:2px;">(Supplied via <code>MANTIS_JIRA_API_TOKEN</code> environment variable — takes precedence over database value)</small>"#
+    } else if !config.api_token.is_empty() {
         r#"<small style="color:#777; display:block; margin-top:2px;">(API Token currently saved. Leave blank to keep existing token)</small>"#
     } else {
         ""

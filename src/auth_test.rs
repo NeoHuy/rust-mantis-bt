@@ -19,18 +19,55 @@ fn test_generate_cookie_string() {
 #[test]
 fn test_auth_password_hashing_sha256_format_and_legacy_plain() {
     let hashed = hash_password("secret_password");
-    assert!(hashed.starts_with("sha256$"));
+    assert!(hashed.starts_with("pbkdf2_sha256$"));
     let parts: Vec<&str> = hashed.split('$').collect();
-    assert_eq!(parts.len(), 3);
-    assert_eq!(parts[0], "sha256");
-    assert_eq!(parts[1].len(), 32); // 16 bytes salt as hex
-    assert_eq!(parts[2].len(), 64); // sha256 output as hex
+    assert_eq!(parts.len(), 4);
+    assert_eq!(parts[0], "pbkdf2_sha256");
+    let iters: u32 = parts[1].parse().unwrap();
+    assert!(iters >= pbkdf2_iterations());
+    assert_eq!(parts[2].len(), 32); // 16 bytes salt as hex
+    assert_eq!(parts[3].len(), 64); // pbkdf2-hmac-sha256 32 bytes as hex
     assert!(verify_password("secret_password", &hashed));
     assert!(!verify_password("wrong_password", &hashed));
+    assert!(!needs_rehash(&hashed));
 
-    // Legacy plain fallback
-    assert!(verify_password("plain_text", "plain_text"));
-    assert!(!verify_password("wrong_text", "plain_text"));
+    // Legacy sha256$ format still verifies and triggers needs_rehash
+    let legacy_salt = "0123456789abcdef0123456789abcdef";
+    let mut legacy_hasher = Sha256::new();
+    legacy_hasher.update(legacy_salt.as_bytes());
+    legacy_hasher.update(b"secret_password");
+    let legacy_hash = format!(
+        "sha256${}${}",
+        legacy_salt,
+        hex_encode(&legacy_hasher.finalize())
+    );
+    assert!(verify_password("secret_password", &legacy_hash));
+    assert!(needs_rehash(&legacy_hash));
+
+    // Plaintext fallback is disabled by default
+    assert!(!verify_password("plain_text", "plain_text"));
+    assert!(!verify_password("", ""));
+}
+
+#[test]
+fn test_pbkdf2_hmac_sha256_rfc6070_vectors() {
+    let d1 = pbkdf2_hmac_sha256(b"password", b"salt", 1);
+    assert_eq!(
+        hex_encode(&d1),
+        "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+    );
+
+    let d2 = pbkdf2_hmac_sha256(b"password", b"salt", 2);
+    assert_eq!(
+        hex_encode(&d2),
+        "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
+    );
+
+    let d4096 = pbkdf2_hmac_sha256(b"password", b"salt", 4096);
+    assert_eq!(
+        hex_encode(&d4096),
+        "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a"
+    );
 }
 
 #[test]
@@ -397,6 +434,125 @@ fn test_is_session_expired_and_cookie_attributes() {
     assert!(hdr.contains("SameSite=Lax"));
     assert!(hdr.contains("HttpOnly"));
     assert!(hdr.contains("Max-Age=60"));
+}
+
+#[test]
+fn test_authenticate_auto_rehashes_legacy_passwords() {
+    let db = Db::open_in_memory().unwrap();
+    let uid_md5 = db
+        .create_user("md5user", "MD5", "md5@example.com", "temp", 25, true, false)
+        .unwrap();
+    let uid_sha = db
+        .create_user("shauser", "SHA", "sha@example.com", "temp", 25, true, false)
+        .unwrap();
+
+    // Seed legacy MD5 and legacy salted SHA-256 directly in DB
+    let md5_pw = md5_hex("legacy_pass");
+    let salt = "abcdef0123456789abcdef0123456789";
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(b"legacy_pass");
+    let sha_pw = format!("sha256${}${}", salt, hex_encode(&hasher.finalize()));
+
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET password = ?1 WHERE id = ?2",
+            rusqlite::params![md5_pw, uid_md5],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE mantis_user_table SET password = ?1 WHERE id = ?2",
+            rusqlite::params![sha_pw, uid_sha],
+        )
+        .unwrap();
+    }
+
+    // Logging in upgrades both passwords to pbkdf2_sha256$
+    let u_md5 = db.authenticate("md5user", "legacy_pass").unwrap().unwrap();
+    assert!(u_md5.password.starts_with("pbkdf2_sha256$"));
+    assert!(!needs_rehash(&u_md5.password));
+    let u_md5_db = db.get_user_by_id(uid_md5).unwrap().unwrap();
+    assert!(u_md5_db.password.starts_with("pbkdf2_sha256$"));
+
+    let u_sha = db.authenticate("shauser", "legacy_pass").unwrap().unwrap();
+    assert!(u_sha.password.starts_with("pbkdf2_sha256$"));
+    assert!(!needs_rehash(&u_sha.password));
+    let u_sha_db = db.get_user_by_id(uid_sha).unwrap().unwrap();
+    assert!(u_sha_db.password.starts_with("pbkdf2_sha256$"));
+}
+
+#[test]
+fn test_csrf_token_generation_and_verification() {
+    let cookie = generate_cookie_string();
+    let token = csrf_token_for_session(&cookie);
+    assert_eq!(token.len(), 64);
+    assert!(verify_csrf_token(&cookie, &token));
+    assert!(!verify_csrf_token(&cookie, "invalid_token"));
+    assert!(!verify_csrf_token("", &token));
+    assert!(!verify_csrf_token(&cookie, ""));
+}
+
+#[test]
+fn test_dummy_password_hash_timing_parity() {
+    let dummy = dummy_password_hash();
+    assert!(dummy.starts_with("pbkdf2_sha256$"));
+    // Dummy hash must be valid PBKDF2 structure and fail gracefully
+    assert!(!verify_password("wrong_password", &dummy));
+}
+
+#[test]
+fn test_rehash_preserves_concurrent_password_change() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user(
+            "concurrent_user",
+            "Conc",
+            "c@example.com",
+            "temp",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    // Set legacy hash directly
+    let md5_pw = md5_hex("my_old_pass");
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET password = ?1 WHERE id = ?2",
+            rusqlite::params![md5_pw, uid],
+        )
+        .unwrap();
+    }
+
+    // Authenticate updates password hash to PBKDF2
+    let logged_in = db
+        .authenticate("concurrent_user", "my_old_pass")
+        .unwrap()
+        .unwrap();
+    assert!(logged_in.password.starts_with("pbkdf2_sha256$"));
+
+    // If an admin resets password concurrently, old password cannot authenticate
+    db.update_user(
+        uid,
+        "Conc",
+        "c@example.com",
+        Some("admin_new_pass"),
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(db
+        .authenticate("concurrent_user", "my_old_pass")
+        .unwrap()
+        .is_none());
+    assert!(db
+        .authenticate("concurrent_user", "admin_new_pass")
+        .unwrap()
+        .is_some());
 }
 
 #[test]

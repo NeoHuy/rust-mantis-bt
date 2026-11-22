@@ -110,15 +110,28 @@ pub async fn manage_user_create(
     let enabled = parse_bool(form.enabled.as_deref());
     let protected = parse_bool(form.protected.as_deref());
 
-    match db.create_user(
-        &form.username,
-        form.realname.as_deref().unwrap_or(""),
-        form.email.as_deref().unwrap_or(""),
-        &form.password,
-        form.access_level,
-        enabled,
-        protected,
-    ) {
+    let db_create = db.clone();
+    let username = form.username.clone();
+    let realname = form.realname.clone().unwrap_or_default();
+    let email = form.email.clone().unwrap_or_default();
+    let password = form.password.clone();
+    let access_level = form.access_level;
+
+    let create_res = tokio::task::spawn_blocking(move || {
+        db_create.create_user(
+            &username,
+            &realname,
+            &email,
+            &password,
+            access_level,
+            enabled,
+            protected,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| Err("Create user task failed".to_string()));
+
+    match create_res {
         Ok(_) => Redirect::to("/manage_user_page").into_response(),
         Err(e) => views::users::render_user_create_error(&ctx, &e).into_response(),
     }
@@ -165,17 +178,28 @@ pub async fn manage_user_update(
 
     let enabled = parse_bool(form.enabled.as_deref());
     let protected = parse_bool(form.protected.as_deref());
-    let password = form.password.as_deref().filter(|p| !p.trim().is_empty());
+    let password = form.password.clone().filter(|p| !p.trim().is_empty());
 
-    match db.update_user(
-        id,
-        form.realname.as_deref().unwrap_or(""),
-        form.email.as_deref().unwrap_or(""),
-        password,
-        form.access_level,
-        enabled,
-        protected,
-    ) {
+    let db_update = db.clone();
+    let realname = form.realname.clone().unwrap_or_default();
+    let email = form.email.clone().unwrap_or_default();
+    let access_level = form.access_level;
+
+    let update_res = tokio::task::spawn_blocking(move || {
+        db_update.update_user(
+            id,
+            &realname,
+            &email,
+            password.as_deref(),
+            access_level,
+            enabled,
+            protected,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| Err("Update user task failed".to_string()));
+
+    match update_res {
         Ok(_) => Redirect::to("/manage_user_page").into_response(),
         Err(e) => views::users::render_user_update_error(&ctx, id, &e).into_response(),
     }

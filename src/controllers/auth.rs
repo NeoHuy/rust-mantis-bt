@@ -49,7 +49,7 @@ pub fn router() -> Router<Db> {
         .route("/login", get(login_page).post(login_submit))
         .route("/signup_page", get(signup_page))
         .route("/signup", post(signup_submit))
-        .route("/logout", get(logout).post(logout))
+        .route("/logout", post(logout))
         .route("/set_project", post(set_project))
         .route("/account_page", get(account_page))
         .route("/account_update", post(account_update))
@@ -69,7 +69,14 @@ pub async fn login_page(headers: HeaderMap, State(db): State<Db>) -> Response {
 }
 
 pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> Response {
-    match db.authenticate(&form.username, &form.password) {
+    let username = form.username;
+    let password = form.password;
+    let db_auth = db.clone();
+    let auth_res = tokio::task::spawn_blocking(move || db_auth.authenticate(&username, &password))
+        .await
+        .unwrap_or_else(|_| Err("Authentication task failed".to_string()));
+
+    match auth_res {
         Ok(Some(user)) => {
             let cookie_val = make_cookie_header(
                 "MANTIS_STRING_COOKIE",
@@ -140,7 +147,21 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
             .into_response();
     }
 
-    match db.signup_user(&form.username, realname, &form.email, &form.password) {
+    let username = form.username;
+    let email = form.email;
+    let password = form.password;
+    let realname_owned = realname.to_string();
+    let db_signup = db.clone();
+    let u_clone = username.clone();
+    let e_clone = email.clone();
+
+    let signup_res = tokio::task::spawn_blocking(move || {
+        db_signup.signup_user(&u_clone, &realname_owned, &e_clone, &password)
+    })
+    .await
+    .unwrap_or_else(|_| Err("Signup task failed".to_string()));
+
+    match signup_res {
         Ok(user) => {
             let cookie_val = make_cookie_header(
                 "MANTIS_STRING_COOKIE",
@@ -156,7 +177,7 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
         }
         Err(err_msg) => (
             StatusCode::BAD_REQUEST,
-            views::auth::render_signup_page(Some(&err_msg), &form.username, realname, &form.email),
+            views::auth::render_signup_page(Some(&err_msg), &username, realname, &email),
         )
             .into_response(),
     }
@@ -228,7 +249,7 @@ pub async fn account_update(
     ctx: AuthContext,
     Form(form): Form<AccountUpdateForm>,
 ) -> Response {
-    let new_password = form.password.as_ref().filter(|p| !p.trim().is_empty());
+    let new_password = form.password.as_deref().filter(|p| !p.trim().is_empty());
     if let Some(pass) = new_password {
         let confirm = form.password_confirm.as_deref().unwrap_or("");
         if pass != confirm {
@@ -244,10 +265,15 @@ pub async fn account_update(
             )
                 .into_response();
         }
-        let current_pw = form.current_password.as_deref().unwrap_or("");
-        if current_pw.trim().is_empty()
-            || !crate::auth::verify_password(current_pw, &ctx.user.password)
-        {
+        let current_pw = form.current_password.as_deref().unwrap_or("").to_string();
+        let user_pw = ctx.user.password.clone();
+        let pw_valid = tokio::task::spawn_blocking(move || {
+            !current_pw.trim().is_empty() && crate::auth::verify_password(&current_pw, &user_pw)
+        })
+        .await
+        .unwrap_or(false);
+
+        if !pw_valid {
             let content = "<p>Current password is incorrect or missing.</p>";
             return (
                 StatusCode::BAD_REQUEST,
@@ -275,15 +301,30 @@ pub async fn account_update(
         }
     }
 
-    match db.update_user(
-        ctx.user.id,
-        &form.realname,
-        &form.email,
-        new_password.map(|s| s.as_str()),
-        ctx.user.access_level,
-        ctx.user.enabled == 1,
-        ctx.user.protected == 1,
-    ) {
+    let db_update = db.clone();
+    let uid = ctx.user.id;
+    let realname = form.realname.clone();
+    let email = form.email.clone();
+    let access_level = ctx.user.access_level;
+    let enabled = ctx.user.enabled == 1;
+    let protected = ctx.user.protected == 1;
+    let new_pw_owned = new_password.map(|s| s.to_string());
+
+    let update_res = tokio::task::spawn_blocking(move || {
+        db_update.update_user(
+            uid,
+            &realname,
+            &email,
+            new_pw_owned.as_deref(),
+            access_level,
+            enabled,
+            protected,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| Err("Update user task failed".to_string()));
+
+    match update_res {
         Ok(_) => {
             let mut res =
                 Redirect::to("/account_page?msg=Account+updated+successfully").into_response();

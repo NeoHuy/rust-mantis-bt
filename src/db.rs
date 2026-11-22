@@ -780,10 +780,14 @@ impl Db {
             .map_err(|e| e.to_string())?
         {
             Some(u) => u,
-            None => return Ok(None),
+            None => {
+                crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
+                return Ok(None);
+            }
         };
 
         if user.enabled == 0 {
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
             return Ok(None);
         }
 
@@ -810,6 +814,7 @@ impl Db {
             .and_then(|s| s.trim().parse::<i64>().ok())
             .unwrap_or(0);
         if locked_until > now {
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
             return Err(
                 "Account temporarily locked due to too many failed login attempts. Please try again later."
                     .to_string(),
@@ -825,7 +830,14 @@ impl Db {
             .map_err(|e| e.to_string())?;
         }
 
-        if !crate::auth::verify_password(password, &user.password) {
+        let is_pbkdf2 = user.password.starts_with("pbkdf2_sha256$");
+        let pw_matches = crate::auth::verify_password(password, &user.password);
+        if !is_pbkdf2 {
+            // Equalize verification timing with PBKDF2 calculation for non-PBKDF2 legacy hashes
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
+        }
+
+        if !pw_matches {
             let conn = self.conn();
             let new_count: i32 = conn
                 .query_row(
@@ -857,16 +869,36 @@ impl Db {
         }
 
         let new_cookie = crate::auth::generate_cookie_string();
+        let rehashed = if crate::auth::needs_rehash(&user.password) {
+            Some(crate::auth::hash_password(password))
+        } else {
+            None
+        };
 
         {
             let conn = self.conn();
-            conn.execute(
-                "UPDATE mantis_user_table
-                 SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2
-                 WHERE id = ?3",
-                params![now, new_cookie, user.id],
-            )
-            .map_err(|e| e.to_string())?;
+            let rows = if let Some(ref new_pw_hash) = rehashed {
+                conn.execute(
+                    "UPDATE mantis_user_table
+                     SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2, password = ?3
+                     WHERE id = ?4 AND password = ?5",
+                    params![now, new_cookie, new_pw_hash, user.id, user.password],
+                )
+                .map_err(|e| e.to_string())?
+            } else {
+                conn.execute(
+                    "UPDATE mantis_user_table
+                     SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2
+                     WHERE id = ?3 AND password = ?4",
+                    params![now, new_cookie, user.id, user.password],
+                )
+                .map_err(|e| e.to_string())?
+            };
+
+            if rows == 0 {
+                // Password was updated concurrently by an admin, do not issue session for old password
+                return Ok(None);
+            }
         }
 
         let _ = self.set_config("login_locked_until", 0, user.id, "0");
@@ -876,6 +908,9 @@ impl Db {
         updated.failed_login_count = 0;
         updated.last_visit = now;
         updated.cookie_string = new_cookie;
+        if let Some(new_pw_hash) = rehashed {
+            updated.password = new_pw_hash;
+        }
         Ok(Some(updated))
     }
 
@@ -996,6 +1031,13 @@ impl Db {
         enabled: bool,
         protected: bool,
     ) -> Result<(), String> {
+        let hashed_pw_and_cookie = new_password.map(|pw| {
+            (
+                crate::auth::hash_password(pw),
+                crate::auth::generate_cookie_string(),
+            )
+        });
+
         let conn = self.conn();
         let existing = match Self::query_user_by_id(&conn, id).map_err(|e| e.to_string())? {
             Some(u) => u,
@@ -1027,9 +1069,7 @@ impl Db {
         let enabled_val = if enabled { 1 } else { 0 };
         let protected_val = if protected { 1 } else { 0 };
 
-        if let Some(pw) = new_password {
-            let hashed_pw = crate::auth::hash_password(pw);
-            let new_cookie = crate::auth::generate_cookie_string();
+        if let Some((hashed_pw, new_cookie)) = hashed_pw_and_cookie {
             conn.execute(
                 "UPDATE mantis_user_table
                  SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6, cookie_string = ?7, failed_login_count = 0
@@ -5338,6 +5378,16 @@ impl Db {
         Ok(affected > 0)
     }
 
+    pub fn resolve_jira_api_token(env_token: Option<&str>, db_token: Option<String>) -> String {
+        if let Some(tok) = env_token {
+            let trimmed = tok.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        db_token.unwrap_or_default()
+    }
+
     pub fn get_jira_config(&self, project_id: i64) -> rusqlite::Result<JiraResolvedConfig> {
         let enabled_val = self
             .get_config("jira_enabled", 0, 0)?
@@ -5345,7 +5395,9 @@ impl Db {
         let enabled = enabled_val == "1" || enabled_val.eq_ignore_ascii_case("true");
         let base_url = self.get_config("jira_base_url", 0, 0)?.unwrap_or_default();
         let email = self.get_config("jira_email", 0, 0)?.unwrap_or_default();
-        let api_token = self.get_config("jira_api_token", 0, 0)?.unwrap_or_default();
+        let env_token = std::env::var("MANTIS_JIRA_API_TOKEN").ok();
+        let db_token = self.get_config("jira_api_token", 0, 0)?;
+        let api_token = Self::resolve_jira_api_token(env_token.as_deref(), db_token);
         let default_issue_type = self
             .get_config("jira_default_issue_type", 0, 0)?
             .unwrap_or_else(|| "Bug".to_string());

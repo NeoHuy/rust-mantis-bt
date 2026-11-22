@@ -13,5 +13,5 @@
 
 - **Git:** Never commit directly to `main` or `develop`; branch from `origin/develop` and target PRs to `develop`.
 - **Architecture & Tests:** Enforce strict MVC separation (`src/models/`, `src/controllers/`, `src/views/`); maintain 1:1 `*_test.rs` unit test files for MVC/core modules and integration tests in `tests/` for integration subsystems (`src/mailer.rs`, `src/mcp/*`).
-- **Safety:** Always parameterize SQL with `rusqlite::params![...]`; never use `.unwrap()` or `.expect()` in controller, MCP, or production paths.
+- **Safety:** Always parameterize SQL with `rusqlite::params![...]`; never use `.unwrap()` or `.expect()` in controller, MCP, or production paths; adhere to PBKDF2 password hashing, CSRF middleware (send `X-CSRF-Token` for AJAX), and strict CSP.
 - **Verification Gate:** Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` before completion.

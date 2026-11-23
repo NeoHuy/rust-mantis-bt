@@ -286,3 +286,38 @@ fn test_bug_enums_as_str() {
     assert_eq!(BugSeverity::Minor.as_str(), "minor");
     assert_eq!(BugReproducibility::Always.as_str(), "always");
 }
+
+#[test]
+fn test_bug_filter_json_backward_compatibility() {
+    // Existing JSON format stored in mantis_filters_table without sort, dir, per_page
+    let legacy_json = r#"{"project_id":1,"search":"deadlock","status":10,"hide_status":80,"priority":40,"severity":60,"category_id":2,"reporter_id":3,"handler_id":-1,"tag_id":4,"monitored_by":5}"#;
+    let bf: BugFilter = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(bf.project_id, Some(1));
+    assert_eq!(bf.search.as_deref(), Some("deadlock"));
+    assert_eq!(bf.status, Some(10));
+    assert_eq!(bf.hide_status, Some(80));
+    assert_eq!(bf.priority, Some(40));
+    assert_eq!(bf.severity, Some(60));
+    assert_eq!(bf.category_id, Some(2));
+    assert_eq!(bf.reporter_id, Some(3));
+    assert_eq!(bf.handler_id, Some(-1));
+    assert_eq!(bf.tag_id, Some(4));
+    assert_eq!(bf.monitored_by, Some(5));
+    // Defaults for newly added fields
+    assert_eq!(bf.sort, None);
+    assert_eq!(bf.dir, None);
+    assert_eq!(bf.per_page, None);
+
+    // New JSON format with sort, dir, per_page
+    let new_json =
+        r#"{"project_id":1,"search":"crash","sort":"priority","dir":"asc","per_page":50}"#;
+    let bf2: BugFilter = serde_json::from_str(new_json).unwrap();
+    assert_eq!(bf2.sort.as_deref(), Some("priority"));
+    assert_eq!(bf2.dir.as_deref(), Some("asc"));
+    assert_eq!(bf2.per_page, Some(50));
+
+    // Roundtrip serialization
+    let serialized = serde_json::to_string(&bf2).unwrap();
+    let deserialized: BugFilter = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(bf2, deserialized);
+}

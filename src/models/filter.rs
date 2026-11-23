@@ -23,4 +23,10 @@ pub struct BugFilter {
     pub handler_id: Option<i64>,
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
+    #[serde(default)]
+    pub sort: Option<String>,
+    #[serde(default)]
+    pub dir: Option<String>,
+    #[serde(default)]
+    pub per_page: Option<usize>,
 }

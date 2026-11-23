@@ -1269,6 +1269,45 @@ fn test_signup_user_success_and_validations() {
     // 6. Password too short (< 6 chars)
     let err_short_pass = db.signup_user("shortpassuser", "Name", "short@example.com", "12345");
     assert!(err_short_pass.is_err());
+
+    // 7. Empty realname rejection
+    let err_empty_realname = db.signup_user("realnameuser", "   ", "real@example.com", "secret123");
+    assert!(err_empty_realname.is_err());
+    assert_eq!(
+        err_empty_realname.unwrap_err(),
+        "Real name cannot be empty."
+    );
+}
+
+#[test]
+fn test_realname_required_in_create_and_update_user() {
+    let db = Db::open_in_memory().unwrap();
+    let err_create = db.create_user(
+        "user1",
+        "   ",
+        "u1@example.com",
+        "secret123",
+        25,
+        true,
+        false,
+    );
+    assert!(err_create.is_err());
+    assert_eq!(err_create.unwrap_err(), "Real name cannot be empty");
+
+    let uid = db
+        .create_user(
+            "user1",
+            "Real Name",
+            "u1@example.com",
+            "secret123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let err_update = db.update_user(uid, "   ", "u1@example.com", None, 25, true, false);
+    assert!(err_update.is_err());
+    assert_eq!(err_update.unwrap_err(), "Real name cannot be empty");
 }
 
 #[test]

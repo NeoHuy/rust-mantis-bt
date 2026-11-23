@@ -81,10 +81,15 @@ pub fn render_manage_proj_page(
 
     let mut user_opts = String::from(r#"<option value="0">- None -</option>"#);
     for u in users {
+        let display_name = if !u.realname.trim().is_empty() {
+            &u.realname
+        } else {
+            &u.username
+        };
         user_opts.push_str(&format!(
             r#"<option value="{}">{}</option>"#,
             u.id,
-            html_escape(&u.username)
+            html_escape(display_name)
         ));
     }
 

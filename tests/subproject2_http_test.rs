@@ -607,3 +607,122 @@ async fn test_file_size_limit_and_remaining_actions() {
     assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert!(db.list_bug_files(bug1).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn test_assignee_dropdown_and_history_use_real_name() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    // Create a developer with distinct username and realname
+    let dev_id = db
+        .create_user(
+            "dev_uname",
+            "Developer Real Name",
+            "dev@x.com",
+            "pw123",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    assert_eq!(admin.realname, "Administrator");
+
+    let pid = db.create_project("Test Proj", 10, 10, "", true).unwrap();
+    let bug_id = db
+        .create_bug(
+            pid,
+            1,
+            admin.id,
+            "Test Assignee",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let admin_cookie = login_as_admin(&app).await;
+
+    // 1. GET /view_bug_page/:id should show "Developer Real Name" in the Assign To dropdown, not "dev_uname"
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains(r#"<select name="handler_id""#));
+    assert!(html.contains(&format!(
+        r#"<option value="{}" >Developer Real Name</option>"#,
+        dev_id
+    )));
+    assert!(!html.contains(&format!(
+        r#"<option value="{}" >dev_uname</option>"#,
+        dev_id
+    )));
+
+    // 2. Assign the bug to dev
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_assign/{}", bug_id))
+                .header("cookie", &admin_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("handler_id={}", dev_id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // 3. GET /view_bug_page/:id should show real name in Assigned To and in History table
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+
+    // Assigned To field shows Developer Real Name
+    assert!(html.contains("Developer Real Name"));
+
+    // History log shows:
+    // - User who made change: "Administrator" (admin's realname)
+    // - Change description: "(Unassigned) => Developer Real Name" instead of "0 => 2"
+    assert!(html.contains("(Unassigned) => Developer Real Name"));
+    assert!(!html.contains(&format!("0 => {}", dev_id)));
+}

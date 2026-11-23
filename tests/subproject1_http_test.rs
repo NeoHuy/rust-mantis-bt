@@ -836,11 +836,13 @@ async fn test_user_signup_flow() {
     )
     .unwrap();
     assert!(signup_html.contains("name=\"username\""));
+    assert!(signup_html.contains("name=\"realname\""));
+    assert!(signup_html.contains("Real Name *"));
     assert!(signup_html.contains("name=\"email\""));
     assert!(signup_html.contains("name=\"password\""));
     assert!(signup_html.contains("name=\"password_confirm\""));
 
-    // 3. POST /signup with mismatched passwords returns 400 Bad Request
+    // 3. POST /signup with missing realname returns 400 Bad Request
     let res = app
         .clone()
         .oneshot(
@@ -849,7 +851,32 @@ async fn test_user_signup_flow() {
                 .uri("/signup")
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    "username=newreporter&email=newrep@example.com&password=password123&password_confirm=different",
+                    "username=newreporter2&email=newrep2@example.com&password=password123&password_confirm=password123",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let err_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(err_html.contains("Real name cannot be empty"));
+
+    // 4. POST /signup with mismatched passwords returns 400 Bad Request
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/signup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "username=newreporter&realname=New+Reporter&email=newrep@example.com&password=password123&password_confirm=different",
                 ))
                 .unwrap(),
         )

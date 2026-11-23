@@ -1,6 +1,30 @@
 use super::*;
 use crate::models::User;
 
+fn dummy_admin_ctx() -> AuthContext {
+    let user = User {
+        id: 1,
+        username: "admin".to_string(),
+        realname: "Administrator".to_string(),
+        email: "admin@example.com".to_string(),
+        password: "hash".to_string(),
+        access_level: 90,
+        enabled: 1,
+        protected: 0,
+        cookie_string: "c1".to_string(),
+        failed_login_count: 0,
+        lost_password_request_count: 0,
+        login_count: 1,
+        last_visit: 0,
+        date_created: 0,
+    };
+    AuthContext {
+        user,
+        active_project_id: 0,
+        visible_projects: vec![],
+    }
+}
+
 #[test]
 fn test_create_user_form_deserialize() {
     let form: CreateUserForm = serde_json::from_str(
@@ -88,4 +112,40 @@ fn test_require_admin_guard() {
         visible_projects: vec![],
     };
     assert!(require_admin(&admin_ctx).is_none());
+}
+
+#[tokio::test]
+async fn test_manage_user_create_rejects_empty_realname() {
+    let db = Db::open_in_memory().unwrap();
+    let ctx = dummy_admin_ctx();
+    let form = CreateUserForm {
+        username: "user2".to_string(),
+        realname: Some("  ".to_string()),
+        email: Some("u2@x.com".to_string()),
+        password: "pw".to_string(),
+        access_level: 25,
+        enabled: None,
+        protected: None,
+    };
+    let resp = manage_user_create(State(db), ctx, Form(form)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_manage_user_update_rejects_empty_realname() {
+    let db = Db::open_in_memory().unwrap();
+    let ctx = dummy_admin_ctx();
+    let uid = db
+        .create_user("u3", "Real", "u3@x.com", "pw", 25, true, false)
+        .unwrap();
+    let form = UpdateUserForm {
+        realname: Some("   ".to_string()),
+        email: Some("u3@x.com".to_string()),
+        password: None,
+        access_level: 25,
+        enabled: None,
+        protected: None,
+    };
+    let resp = manage_user_update(State(db), ctx, axum::extract::Path(uid), Form(form)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

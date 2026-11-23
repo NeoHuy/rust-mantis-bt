@@ -122,6 +122,19 @@ pub async fn signup_submit(State(db): State<Db>, Form(form): Form<SignupForm>) -
 
     let realname = form.realname.as_deref().unwrap_or("").trim();
 
+    if realname.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            views::auth::render_signup_page(
+                Some("Real name cannot be empty."),
+                &form.username,
+                realname,
+                &form.email,
+            ),
+        )
+            .into_response();
+    }
+
     if form.password != form.password_confirm {
         return (
             StatusCode::BAD_REQUEST,

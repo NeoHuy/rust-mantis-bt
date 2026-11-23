@@ -29,6 +29,9 @@ fn test_render_signup_page() {
     assert!(html.contains("value=\"user1\""));
     assert!(html.contains("value=\"Real Name\""));
     assert!(html.contains("value=\"user1@example.com\""));
+    assert!(html.contains("Real Name *"));
+    assert!(html.contains(r#"name="realname""#));
+    assert!(html.contains(r#"id="realname" value="Real Name" placeholder="Real Name" required"#));
 }
 
 #[test]

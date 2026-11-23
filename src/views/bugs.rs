@@ -282,11 +282,16 @@ pub fn render_view_all_bug_page(
         } else {
             ""
         };
+        let h_display = if !u.realname.trim().is_empty() {
+            &u.realname
+        } else {
+            &u.username
+        };
         handler_opts.push_str(&format!(
             r#"<option value="{}" {}>{}</option>"#,
             u.id,
             h_sel,
-            html_escape(&u.username)
+            html_escape(h_display)
         ));
         let m_sel = if filter.monitored_by == Some(u.id) {
             "selected"

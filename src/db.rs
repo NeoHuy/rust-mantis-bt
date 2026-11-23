@@ -624,6 +624,11 @@ impl Db {
         if trimmed_username.is_empty() {
             return Err("Username cannot be empty.".to_string());
         }
+
+        let trimmed_realname = realname.trim();
+        if trimmed_realname.is_empty() {
+            return Err("Real name cannot be empty.".to_string());
+        }
         if trimmed_username.len() > 32 {
             return Err("Username cannot exceed 32 characters.".to_string());
         }
@@ -873,6 +878,11 @@ impl Db {
             return Err("Username cannot be empty".to_string());
         }
 
+        let trimmed_realname = realname.trim();
+        if trimmed_realname.is_empty() {
+            return Err("Real name cannot be empty".to_string());
+        }
+
         let cookie = crate::auth::generate_cookie_string();
         let hashed_pw = crate::auth::hash_password(password);
         let now = std::time::SystemTime::now()
@@ -918,6 +928,11 @@ impl Db {
         enabled: bool,
         protected: bool,
     ) -> Result<(), String> {
+        let trimmed_realname = realname.trim();
+        if trimmed_realname.is_empty() {
+            return Err("Real name cannot be empty".to_string());
+        }
+
         let conn = self.conn();
         let existing = match Self::query_user_by_id(&conn, id).map_err(|e| e.to_string())? {
             Some(u) => u,

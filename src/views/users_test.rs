@@ -61,6 +61,8 @@ fn test_render_user_create_page() {
     let html = out.0;
     assert!(html.contains("Create User"));
     assert!(html.contains(r#"action="/manage_user_create""#));
+    assert!(html.contains("Real Name *"));
+    assert!(html.contains(r#"<input type="text" name="realname" required />"#));
 }
 
 #[test]
@@ -87,6 +89,8 @@ fn test_render_user_edit_page() {
     let html = out.0;
     assert!(html.contains("Edit User: developer"));
     assert!(html.contains("Senior Dev"));
+    assert!(html.contains("Real Name *"));
+    assert!(html.contains(r#"<input type="text" name="realname" value="Senior Dev" required />"#));
     assert!(html.contains(r#"action="/manage_user_update/5""#));
     assert!(html.contains("/manage_user_delete/5"));
 }

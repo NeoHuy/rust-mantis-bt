@@ -65,8 +65,8 @@ pub fn render_signup_page(
                     <input type="text" name="username" id="username" value="{}" placeholder="Username" autofocus required style="width:100%;" />
                 </div>
                 <div style="margin-bottom: 12px;">
-                    <label for="realname" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Real Name</label>
-                    <input type="text" name="realname" id="realname" value="{}" placeholder="Real Name (optional)" style="width:100%;" />
+                    <label for="realname" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Real Name *</label>
+                    <input type="text" name="realname" id="realname" value="{}" placeholder="Real Name" required style="width:100%;" />
                 </div>
                 <div style="margin-bottom: 12px;">
                     <label for="email" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Email *</label>

@@ -262,7 +262,14 @@ pub async fn csv_export(
         .list_users(None, false)
         .unwrap_or_default()
         .into_iter()
-        .map(|u| (u.id, u.username))
+        .map(|u| {
+            let name = if !u.realname.trim().is_empty() {
+                u.realname
+            } else {
+                u.username
+            };
+            (u.id, name)
+        })
         .collect();
 
     let mut out = String::from(
@@ -358,7 +365,14 @@ pub async fn view_all_bug_page(
     let all_users = db.list_users(None, false).unwrap_or_default();
     let users_map: HashMap<i64, String> = all_users
         .iter()
-        .map(|u| (u.id, u.username.clone()))
+        .map(|u| {
+            let name = if !u.realname.trim().is_empty() {
+                u.realname.clone()
+            } else {
+                u.username.clone()
+            };
+            (u.id, name)
+        })
         .collect();
 
     let projects_map: HashMap<i64, String> = ctx
@@ -594,8 +608,17 @@ pub async fn view_bug_page(
         .unwrap_or_else(|| "General".to_string());
 
     let users = db.list_users(None, false).unwrap_or_default();
-    let users_map: HashMap<i64, String> =
-        users.iter().map(|u| (u.id, u.username.clone())).collect();
+    let users_map: HashMap<i64, String> = users
+        .iter()
+        .map(|u| {
+            let name = if !u.realname.trim().is_empty() {
+                u.realname.clone()
+            } else {
+                u.username.clone()
+            };
+            (u.id, name)
+        })
+        .collect();
 
     let reporter_name = users_map
         .get(&bug.reporter_id)
@@ -711,11 +734,16 @@ pub async fn view_bug_page(
             } else {
                 ""
             };
+            let display_name = if !u.realname.trim().is_empty() {
+                &u.realname
+            } else {
+                &u.username
+            };
             user_opts.push_str(&format!(
                 r#"<option value="{}" {}>{}</option>"#,
                 u.id,
                 sel,
-                views::html_escape(&u.username)
+                views::html_escape(display_name)
             ));
         }
         actions_html.push_str(&format!(
@@ -1024,7 +1052,7 @@ pub async fn view_bug_page(
     if history.is_empty() {
         history_html.push_str("<p>No history entries.</p>");
     } else {
-        history_html.push_str(r#"<table class="data-table"><thead><tr><th>Date Modified</th><th>Username</th><th>Field</th><th>Change</th></tr></thead><tbody>"#);
+        history_html.push_str(r#"<table class="data-table"><thead><tr><th>Date Modified</th><th>User</th><th>Field</th><th>Change</th></tr></thead><tbody>"#);
         for h in &history {
             let uname = users_map
                 .get(&h.user_id)
@@ -1032,6 +1060,32 @@ pub async fn view_bug_page(
                 .unwrap_or_else(|| format!("user#{}", h.user_id));
             let change_desc = if h.type_ == 1 && h.field_name.is_empty() {
                 "New Issue".to_string()
+            } else if h.field_name == "handler_id" {
+                let old_name = if h.old_value == "0" || h.old_value.is_empty() {
+                    "(Unassigned)".to_string()
+                } else if let Ok(uid) = h.old_value.parse::<i64>() {
+                    users_map
+                        .get(&uid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("user#{}", uid))
+                } else {
+                    h.old_value.clone()
+                };
+                let new_name = if h.new_value == "0" || h.new_value.is_empty() {
+                    "(Unassigned)".to_string()
+                } else if let Ok(uid) = h.new_value.parse::<i64>() {
+                    users_map
+                        .get(&uid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("user#{}", uid))
+                } else {
+                    h.new_value.clone()
+                };
+                format!(
+                    "{} => {}",
+                    views::html_escape(&old_name),
+                    views::html_escape(&new_name)
+                )
             } else {
                 format!(
                     "{} => {}",

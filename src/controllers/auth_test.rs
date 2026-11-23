@@ -58,3 +58,17 @@ async fn test_logout_clears_cookie() {
     let cookie_val = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
     assert!(cookie_val.contains("Max-Age=0"));
 }
+
+#[tokio::test]
+async fn test_signup_submit_rejects_empty_realname() {
+    let db = Db::open_in_memory().unwrap();
+    let form = SignupForm {
+        username: "testuser".to_string(),
+        realname: Some("   ".to_string()),
+        email: "test@example.com".to_string(),
+        password: "password123".to_string(),
+        password_confirm: "password123".to_string(),
+    };
+    let resp = signup_submit(State(db), Form(form)).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}

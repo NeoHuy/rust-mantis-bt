@@ -116,8 +116,8 @@ pub fn render_user_create_page(ctx: &AuthContext) -> Html<String> {
                         <td class="input-col"><input type="text" name="username" required autofocus /></td>
                     </tr>
                     <tr>
-                        <td class="label-col">Real Name</td>
-                        <td class="input-col"><input type="text" name="realname" /></td>
+                        <td class="label-col">Real Name *</td>
+                        <td class="input-col"><input type="text" name="realname" required /></td>
                     </tr>
                     <tr>
                         <td class="label-col">Email</td>
@@ -221,8 +221,8 @@ pub fn render_user_edit_page(ctx: &AuthContext, target_user: &User) -> Html<Stri
                             <td class="input-col"><input type="text" value="{}" disabled /></td>
                         </tr>
                         <tr>
-                            <td class="label-col">Real Name</td>
-                            <td class="input-col"><input type="text" name="realname" value="{}" /></td>
+                            <td class="label-col">Real Name *</td>
+                            <td class="input-col"><input type="text" name="realname" value="{}" required /></td>
                         </tr>
                         <tr>
                             <td class="label-col">Email</td>

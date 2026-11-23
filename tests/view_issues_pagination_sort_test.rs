@@ -336,6 +336,46 @@ async fn test_http_view_issues_sorting_and_per_page() {
         pos_bug1_asc < pos_bug2_asc,
         "Beta (normal) should precede Zeta (normal)"
     );
+
+    // 3. Lenient per_page query handling: non-numeric or invalid per_page should NOT return 400 Bad Request
+    let res_abc = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page?per_page=abc")
+                .header("cookie", &full_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_abc.status(), StatusCode::OK);
+
+    let res_neg = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page?per_page=-1")
+                .header("cookie", &full_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_neg.status(), StatusCode::OK);
+
+    let res_empty = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page?per_page=")
+                .header("cookie", &full_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_empty.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -401,7 +441,7 @@ async fn test_http_saved_filter_delete_ui_and_permissions() {
                 .header("cookie", &full_cookie_mgr)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
-                    "name=Manager+Public+Filter&search=beta&is_public=1",
+                    "name=Manager+Public+Filter&search=beta&is_public=1&sort=priority&dir=asc&per_page=50",
                 ))
                 .unwrap(),
         )
@@ -415,6 +455,38 @@ async fn test_http_saved_filter_delete_ui_and_permissions() {
         .find(|f| f.name == "Manager Public Filter")
         .unwrap()
         .id;
+
+    // Verify saved-filter sort and per-page are reflected in UI headers and CSV export link
+    let res_filter_view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?filter_id={}", fid_pub))
+                .header("cookie", &full_cookie_mgr)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_filter_view.status(), StatusCode::OK);
+    let html_filter_view = String::from_utf8(
+        axum::body::to_bytes(res_filter_view.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    // Priority column header must show asc arrow '&#9650;' and target 'dir=desc' when clicked
+    assert!(
+        html_filter_view.contains("Priority &#9650;") || html_filter_view.contains("Priority ▲")
+    );
+    assert!(html_filter_view.contains(&format!("filter_id={}", fid_pub)));
+    assert!(html_filter_view.contains("sort=priority"));
+    // CSV export button must include filter_id, sort, and dir
+    assert!(html_filter_view.contains(&format!(
+        r#"href="/csv_export?filter_id={}&sort=priority&dir=asc""#,
+        fid_pub
+    )));
 
     // 3. Reporter 1 views issues page:
     // - Sees fid_rep1 (owner) -> has delete button

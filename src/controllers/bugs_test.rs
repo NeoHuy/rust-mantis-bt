@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::*;
 
 #[test]
 fn test_parse_multipart_file_valid() {

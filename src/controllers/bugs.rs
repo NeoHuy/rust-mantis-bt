@@ -1,6 +1,6 @@
 use crate::auth::AuthContext;
 use crate::db::Db;
-use crate::models::{Bug, BugFilter, BugUpdate};
+use crate::models::{clamp_per_page, sort_bugs, BugFilter, BugUpdate, ListBugsQuery};
 use crate::views;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -10,179 +10,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use std::collections::HashMap;
-
-#[derive(Deserialize, Default, Clone, Debug, PartialEq, Eq)]
-pub struct ListBugsQuery {
-    pub page: Option<i64>,
-    pub filter_id: Option<i64>,
-    pub q: Option<String>,
-    pub search: Option<String>,
-    pub status: Option<i32>,
-    pub hide_status: Option<i32>,
-    pub priority: Option<i32>,
-    pub severity: Option<i32>,
-    pub category_id: Option<i64>,
-    pub reporter_id: Option<i64>,
-    pub handler_id: Option<i64>,
-    pub tag_id: Option<i64>,
-    pub monitored_by: Option<i64>,
-    pub msg: Option<String>,
-    pub err: Option<String>,
-    pub sort: Option<String>,
-    pub dir: Option<String>,
-    pub per_page: Option<usize>,
-}
-
-pub fn url_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push('+'),
-            _ => {
-                out.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    out
-}
-
-pub fn clamp_per_page(val: Option<usize>) -> usize {
-    match val {
-        Some(10) => 10,
-        Some(25) => 25,
-        Some(50) => 50,
-        Some(100) => 100,
-        _ => 25,
-    }
-}
-
-pub fn build_view_all_bug_page_url(q: &ListBugsQuery, page: i64) -> String {
-    let mut params = Vec::new();
-    params.push(format!("page={}", page.max(1)));
-
-    if let Some(fid) = q.filter_id {
-        if fid > 0 {
-            params.push(format!("filter_id={}", fid));
-        }
-    }
-    if let Some(ref q_val) = q.q {
-        if !q_val.trim().is_empty() {
-            params.push(format!("q={}", url_encode(q_val)));
-        }
-    }
-    if let Some(ref s_val) = q.search {
-        if !s_val.trim().is_empty() && q.q.as_deref().map(|s| s.trim()) != Some(s_val.trim()) {
-            params.push(format!("search={}", url_encode(s_val)));
-        }
-    }
-    if let Some(status) = q.status {
-        if status > 0 {
-            params.push(format!("status={}", status));
-        }
-    }
-    if let Some(hide_status) = q.hide_status {
-        if hide_status > 0 {
-            params.push(format!("hide_status={}", hide_status));
-        }
-    }
-    if let Some(priority) = q.priority {
-        if priority > 0 {
-            params.push(format!("priority={}", priority));
-        }
-    }
-    if let Some(severity) = q.severity {
-        if severity > 0 {
-            params.push(format!("severity={}", severity));
-        }
-    }
-    if let Some(category_id) = q.category_id {
-        if category_id > 0 {
-            params.push(format!("category_id={}", category_id));
-        }
-    }
-    if let Some(reporter_id) = q.reporter_id {
-        if reporter_id > 0 {
-            params.push(format!("reporter_id={}", reporter_id));
-        }
-    }
-    if let Some(handler_id) = q.handler_id {
-        if handler_id != 0 {
-            params.push(format!("handler_id={}", handler_id));
-        }
-    }
-    if let Some(tag_id) = q.tag_id {
-        if tag_id > 0 {
-            params.push(format!("tag_id={}", tag_id));
-        }
-    }
-    if let Some(monitored_by) = q.monitored_by {
-        if monitored_by > 0 {
-            params.push(format!("monitored_by={}", monitored_by));
-        }
-    }
-    if let Some(ref sort) = q.sort {
-        if !sort.trim().is_empty() {
-            params.push(format!("sort={}", url_encode(sort)));
-        }
-    }
-    if let Some(ref dir) = q.dir {
-        if !dir.trim().is_empty() {
-            params.push(format!("dir={}", url_encode(dir)));
-        }
-    }
-    if let Some(per_page) = q.per_page {
-        if per_page > 0 {
-            params.push(format!("per_page={}", per_page));
-        }
-    }
-
-    format!("/view_all_bug_page?{}", params.join("&"))
-}
-
-pub fn sort_bugs(bugs: &mut [Bug], sort_key: Option<&str>, dir: Option<&str>) {
-    let is_asc = matches!(dir, Some(d) if d.eq_ignore_ascii_case("asc"));
-
-    let key = match sort_key {
-        Some("id") => "id",
-        Some("priority") => "priority",
-        Some("severity") => "severity",
-        Some("status") => "status",
-        Some("summary") => "summary",
-        Some("last_updated") => "last_updated",
-        _ => "last_updated",
-    };
-
-    bugs.sort_by(|a, b| {
-        // Sticky always pinned at top: sticky == 1 comes before sticky == 0
-        let sticky_cmp = b.sticky.cmp(&a.sticky);
-        if sticky_cmp != std::cmp::Ordering::Equal {
-            return sticky_cmp;
-        }
-
-        let order = match key {
-            "id" => a.id.cmp(&b.id),
-            "priority" => a.priority.cmp(&b.priority),
-            "severity" => a.severity.cmp(&b.severity),
-            "status" => a.status.cmp(&b.status),
-            "summary" => a
-                .summary
-                .to_lowercase()
-                .cmp(&b.summary.to_lowercase())
-                .then_with(|| a.summary.cmp(&b.summary)),
-            "last_updated" => a.last_updated.cmp(&b.last_updated),
-            _ => a.last_updated.cmp(&b.last_updated),
-        };
-
-        if is_asc {
-            order.then_with(|| a.id.cmp(&b.id))
-        } else {
-            order.reverse().then_with(|| b.id.cmp(&a.id))
-        }
-    });
-}
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
@@ -232,14 +59,22 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
                 if ctx.active_project_id > 0 {
                     bf.project_id = Some(ctx.active_project_id);
                 }
-                if q.sort.is_some() {
-                    bf.sort = q.sort.clone();
+                if let Some(ref s) = q.sort {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        bf.sort = Some(trimmed.to_string());
+                    }
                 }
-                if q.dir.is_some() {
-                    bf.dir = q.dir.clone();
+                if let Some(ref d) = q.dir {
+                    let trimmed = d.trim();
+                    if !trimmed.is_empty() {
+                        bf.dir = Some(trimmed.to_string());
+                    }
                 }
-                if q.per_page.is_some() {
-                    bf.per_page = q.per_page;
+                if let Some(pp) = q.per_page {
+                    if pp > 0 {
+                        bf.per_page = Some(clamp_per_page(Some(pp)));
+                    }
                 }
                 return bf;
             }
@@ -267,9 +102,22 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         handler_id: q.handler_id.filter(|&v| v != 0),
         tag_id: q.tag_id.filter(|&v| v > 0),
         monitored_by: q.monitored_by.filter(|&v| v > 0),
-        sort: q.sort.clone().filter(|s| !s.trim().is_empty()),
-        dir: q.dir.clone().filter(|s| !s.trim().is_empty()),
-        per_page: q.per_page.filter(|&v| v > 0),
+        sort: q
+            .sort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        dir: q
+            .dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        per_page: q
+            .per_page
+            .filter(|&v| v > 0)
+            .map(|pp| clamp_per_page(Some(pp))),
     }
 }
 
@@ -426,9 +274,19 @@ pub async fn csv_export(
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
     let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
-    let sort_col = q.sort.as_deref().or(filter.sort.as_deref());
-    let sort_dir = q.dir.as_deref().or(filter.dir.as_deref());
-    sort_bugs(&mut bugs, sort_col, sort_dir);
+    let effective_sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.sort.as_deref());
+    let effective_dir = q
+        .dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.dir.as_deref());
+    sort_bugs(&mut bugs, effective_sort, effective_dir);
 
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
@@ -515,13 +373,43 @@ pub async fn view_all_bug_page(
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
     let page = q.page.unwrap_or(1).max(1);
-    let per_page = clamp_per_page(q.per_page.or(filter.per_page)) as i64;
+
+    let effective_sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.sort.as_deref())
+        .map(|s| s.to_string());
+
+    let effective_dir = q
+        .dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.dir.as_deref())
+        .map(|s| s.to_string());
+
+    let effective_per_page = q
+        .per_page
+        .filter(|&v| v > 0)
+        .or(filter.per_page)
+        .map(|v| clamp_per_page(Some(v)));
+
+    let per_page = clamp_per_page(effective_per_page) as i64;
     let offset = (page - 1) * per_page;
 
     let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
-    let sort_col = q.sort.as_deref().or(filter.sort.as_deref());
-    let sort_dir = q.dir.as_deref().or(filter.dir.as_deref());
-    sort_bugs(&mut bugs, sort_col, sort_dir);
+    sort_bugs(
+        &mut bugs,
+        effective_sort.as_deref(),
+        effective_dir.as_deref(),
+    );
+
+    let mut effective_q = q.clone();
+    effective_q.sort = effective_sort;
+    effective_q.dir = effective_dir;
+    effective_q.per_page = Some(per_page as usize);
 
     let total = bugs.len();
     let paged_bugs: Vec<_> = bugs
@@ -581,7 +469,7 @@ pub async fn view_all_bug_page(
         &saved_filters,
         q.msg.as_deref(),
         q.err.as_deref(),
-        &q,
+        &effective_q,
     )
     .into_response()
 }

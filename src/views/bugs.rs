@@ -1,11 +1,9 @@
 use crate::auth::AuthContext;
-pub use crate::controllers::bugs::{
-    build_view_all_bug_page_url, clamp_per_page, sort_bugs, url_encode, ListBugsQuery,
-};
 use crate::models::{
-    Bug, BugFilter, BugFull, BugPriority, BugReproducibility, BugResolution, BugSeverity,
-    BugStatus, CustomField, CustomFieldValue, JiraLink, ProjectVersion, RelationshipType,
-    SavedFilter, Tag, User, ViewState,
+    build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
+    BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus, CustomField,
+    CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType, SavedFilter, Tag,
+    User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
@@ -592,7 +590,7 @@ pub fn render_view_all_bug_page(
             <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
                 <span>Viewing Issues ({})</span>
                 <div style="display:flex; gap:8px;">
-                    <a class="btn btn-secondary btn-sm" href="/csv_export?q={}&status={}&priority={}&severity={}&tag_id={}&sort={}&dir={}">CSV Export</a>
+                    <a class="btn btn-secondary btn-sm" href="{}">CSV Export</a>
                     <a class="btn btn-sm" href="/bug_report_page">Report Issue</a>
                 </div>
             </div>
@@ -642,13 +640,7 @@ pub fn render_view_all_bug_page(
         saved_filters_html,
         save_filter_form,
         total,
-        html_escape(search_val),
-        filter.status.unwrap_or(0),
-        filter.priority.unwrap_or(0),
-        filter.severity.unwrap_or(0),
-        filter.tag_id.unwrap_or(0),
-        html_escape(cur_sort),
-        html_escape(cur_dir),
+        build_csv_export_url(query),
         th_id,
         th_project,
         th_category,

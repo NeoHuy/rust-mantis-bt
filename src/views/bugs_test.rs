@@ -224,6 +224,12 @@ fn test_render_view_all_bug_page_sort_headers_and_per_page_controls() {
     assert!(html.contains("per_page=100"));
     // 50 is active
     assert!(html.contains(r#"<span class="btn btn-secondary btn-sm" style="font-weight:bold; background:#e0e0e0; pointer-events:none;">50</span>"#));
+
+    // CSV export link preserves sort parameters
+    assert!(
+        html.contains(r#"href="/csv_export?sort=summary&amp;dir=asc""#)
+            || html.contains(r#"href="/csv_export?sort=summary&dir=asc""#)
+    );
 }
 
 #[test]

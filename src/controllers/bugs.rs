@@ -1,6 +1,6 @@
 use crate::auth::AuthContext;
 use crate::db::Db;
-use crate::models::{BugFilter, BugUpdate};
+use crate::models::{clamp_per_page, sort_bugs, BugFilter, BugUpdate, ListBugsQuery};
 use crate::views;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -10,25 +10,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use std::collections::HashMap;
-
-#[derive(Deserialize, Default)]
-pub struct ListBugsQuery {
-    pub page: Option<i64>,
-    pub filter_id: Option<i64>,
-    pub q: Option<String>,
-    pub search: Option<String>,
-    pub status: Option<i32>,
-    pub hide_status: Option<i32>,
-    pub priority: Option<i32>,
-    pub severity: Option<i32>,
-    pub category_id: Option<i64>,
-    pub reporter_id: Option<i64>,
-    pub handler_id: Option<i64>,
-    pub tag_id: Option<i64>,
-    pub monitored_by: Option<i64>,
-    pub msg: Option<String>,
-    pub err: Option<String>,
-}
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
@@ -78,6 +59,23 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
                 if ctx.active_project_id > 0 {
                     bf.project_id = Some(ctx.active_project_id);
                 }
+                if let Some(ref s) = q.sort {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        bf.sort = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(ref d) = q.dir {
+                    let trimmed = d.trim();
+                    if !trimmed.is_empty() {
+                        bf.dir = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(pp) = q.per_page {
+                    if pp > 0 {
+                        bf.per_page = Some(clamp_per_page(Some(pp)));
+                    }
+                }
                 return bf;
             }
         }
@@ -104,6 +102,22 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         handler_id: q.handler_id.filter(|&v| v != 0),
         tag_id: q.tag_id.filter(|&v| v > 0),
         monitored_by: q.monitored_by.filter(|&v| v > 0),
+        sort: q
+            .sort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        dir: q
+            .dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        per_page: q
+            .per_page
+            .filter(|&v| v > 0)
+            .map(|pp| clamp_per_page(Some(pp))),
     }
 }
 
@@ -259,7 +273,20 @@ pub async fn csv_export(
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
-    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    let effective_sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.sort.as_deref());
+    let effective_dir = q
+        .dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.dir.as_deref());
+    sort_bugs(&mut bugs, effective_sort, effective_dir);
 
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
@@ -335,10 +362,6 @@ pub async fn view_all_bug_page(
     ctx: AuthContext,
     Query(q): Query<ListBugsQuery>,
 ) -> Response {
-    let page = q.page.unwrap_or(1).max(1);
-    let per_page: i64 = 25;
-    let offset = (page - 1) * per_page;
-
     if ctx.active_project_id > 0 {
         let eff = db
             .effective_access_level(&ctx.user, ctx.active_project_id)
@@ -349,7 +372,44 @@ pub async fn view_all_bug_page(
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
-    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    let page = q.page.unwrap_or(1).max(1);
+
+    let effective_sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.sort.as_deref())
+        .map(|s| s.to_string());
+
+    let effective_dir = q
+        .dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.dir.as_deref())
+        .map(|s| s.to_string());
+
+    let effective_per_page = q
+        .per_page
+        .filter(|&v| v > 0)
+        .or(filter.per_page)
+        .map(|v| clamp_per_page(Some(v)));
+
+    let per_page = clamp_per_page(effective_per_page) as i64;
+    let offset = (page - 1) * per_page;
+
+    let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    sort_bugs(
+        &mut bugs,
+        effective_sort.as_deref(),
+        effective_dir.as_deref(),
+    );
+
+    let mut effective_q = q.clone();
+    effective_q.sort = effective_sort;
+    effective_q.dir = effective_dir;
+    effective_q.per_page = Some(per_page as usize);
 
     let total = bugs.len();
     let paged_bugs: Vec<_> = bugs
@@ -409,6 +469,7 @@ pub async fn view_all_bug_page(
         &saved_filters,
         q.msg.as_deref(),
         q.err.as_deref(),
+        &effective_q,
     )
     .into_response()
 }

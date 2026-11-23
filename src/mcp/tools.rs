@@ -239,6 +239,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 handler_id: args.get("handler_id").and_then(|v| v.as_i64()),
                 tag_id: None,
                 monitored_by: None,
+                ..Default::default()
             };
 
             let bugs = match db.filter_bugs(&filter, user) {

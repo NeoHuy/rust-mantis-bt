@@ -1,8 +1,9 @@
 use crate::auth::AuthContext;
 use crate::models::{
-    Bug, BugFilter, BugFull, BugPriority, BugReproducibility, BugResolution, BugSeverity,
-    BugStatus, CustomField, CustomFieldValue, JiraLink, ProjectVersion, RelationshipType,
-    SavedFilter, Tag, User, ViewState,
+    build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
+    BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus, CustomField,
+    CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType, SavedFilter, Tag,
+    User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
@@ -139,6 +140,42 @@ pub fn render_my_view_page(
     render_layout("My View", ctx, None, &content)
 }
 
+fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String {
+    let current_sort = q.sort.as_deref().unwrap_or("last_updated");
+    let current_dir = q.dir.as_deref().unwrap_or("desc");
+    let is_active = current_sort == sort_key;
+
+    let next_dir = if is_active {
+        if current_dir.eq_ignore_ascii_case("asc") {
+            "desc"
+        } else {
+            "asc"
+        }
+    } else {
+        "desc"
+    };
+
+    let arrow = if is_active {
+        if current_dir.eq_ignore_ascii_case("asc") {
+            " &#9650;"
+        } else {
+            " &#9660;"
+        }
+    } else {
+        ""
+    };
+
+    let mut target_q = q.clone();
+    target_q.sort = Some(sort_key.to_string());
+    target_q.dir = Some(next_dir.to_string());
+    let url = build_view_all_bug_page_url(&target_q, 1);
+
+    format!(
+        r#"<th><a href="{}" style="color:inherit; text-decoration:none;">{}{}</a></th>"#,
+        url, label, arrow
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_view_all_bug_page(
     ctx: &AuthContext,
@@ -157,6 +194,7 @@ pub fn render_view_all_bug_page(
     saved_filters: &[SavedFilter],
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
+    query: &ListBugsQuery,
 ) -> Html<String> {
     let offset = (page - 1) * per_page;
     let mut rows_html = String::new();
@@ -240,16 +278,16 @@ pub fn render_view_all_bug_page(
 
     let prev_link = if page > 1 {
         format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/view_all_bug_page?page={}">« Prev</a>"#,
-            page - 1
+            r#"<a class="btn btn-secondary btn-sm" href="{}">« Prev</a>"#,
+            build_view_all_bug_page_url(query, page - 1)
         )
     } else {
         String::new()
     };
     let next_link = if (offset as usize) + bugs.len() < total {
         format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/view_all_bug_page?page={}">Next »</a>"#,
-            page + 1
+            r#"<a class="btn btn-secondary btn-sm" href="{}">Next »</a>"#,
+            build_view_all_bug_page_url(query, page + 1)
         )
     } else {
         String::new()
@@ -406,12 +444,54 @@ pub fn render_view_all_bug_page(
 
     let mut saved_filters_html = String::new();
     for sf in saved_filters {
+        let delete_btn = if sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
+            format!(
+                r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete filter?');" title="Delete filter">Delete</button></form>"#,
+                sf.id
+            )
+        } else {
+            String::new()
+        };
         saved_filters_html.push_str(&format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/view_all_bug_page?filter_id={}">{}</a> "#,
+            r#"<span class="saved-filter-item" style="display:inline-flex; align-items:center; gap:2px; margin-right:8px;"><a class="btn btn-secondary btn-sm" href="/view_all_bug_page?filter_id={}">{}</a>{}</span>"#,
             sf.id,
-            html_escape(&sf.name)
+            html_escape(&sf.name),
+            delete_btn
         ));
     }
+
+    let active_per_page = clamp_per_page(query.per_page.or(filter.per_page));
+    let mut per_page_html =
+        String::from(r#"<span style="font-size:12px; margin-right:6px;">Per page:</span>"#);
+    for &cnt in &[10, 25, 50, 100] {
+        if cnt == active_per_page {
+            per_page_html.push_str(&format!(
+                r#"<span class="btn btn-secondary btn-sm" style="font-weight:bold; background:#e0e0e0; pointer-events:none;">{}</span> "#,
+                cnt
+            ));
+        } else {
+            let mut pp_q = query.clone();
+            pp_q.per_page = Some(cnt);
+            let url = build_view_all_bug_page_url(&pp_q, 1);
+            per_page_html.push_str(&format!(
+                r#"<a class="btn btn-secondary btn-sm" href="{}">{}</a> "#,
+                url, cnt
+            ));
+        }
+    }
+
+    let cur_sort = query.sort.as_deref().unwrap_or("");
+    let cur_dir = query.dir.as_deref().unwrap_or("");
+    let cur_per_page_str = active_per_page.to_string();
+
+    let th_id = render_sortable_th(query, "id", "ID");
+    let th_project = "<th>Project</th>";
+    let th_category = "<th>Category</th>";
+    let th_severity = render_sortable_th(query, "severity", "Severity");
+    let th_priority = render_sortable_th(query, "priority", "Priority");
+    let th_status = render_sortable_th(query, "status", "Status");
+    let th_summary = render_sortable_th(query, "summary", "Summary");
+    let th_updated = render_sortable_th(query, "last_updated", "Updated");
 
     let search_val = filter.search.as_deref().unwrap_or("");
     let save_filter_form = if ctx.user.access_level >= 25 {
@@ -422,6 +502,9 @@ pub fn render_view_all_bug_page(
                 <input type="hidden" name="priority" value="{}">
                 <input type="hidden" name="severity" value="{}">
                 <input type="hidden" name="tag_id" value="{}">
+                <input type="hidden" name="sort" value="{}">
+                <input type="hidden" name="dir" value="{}">
+                <input type="hidden" name="per_page" value="{}">
                 <input type="text" name="name" placeholder="Saved filter name" style="max-width:180px;" required>
                 <label><input type="checkbox" name="is_public" value="1"> Public</label>
                 <button type="submit" class="btn btn-secondary btn-sm">Save Current Filter</button>
@@ -430,7 +513,10 @@ pub fn render_view_all_bug_page(
             filter.status.unwrap_or(0),
             filter.priority.unwrap_or(0),
             filter.severity.unwrap_or(0),
-            filter.tag_id.unwrap_or(0)
+            filter.tag_id.unwrap_or(0),
+            html_escape(cur_sort),
+            html_escape(cur_dir),
+            cur_per_page_str
         )
     } else {
         String::new()
@@ -445,6 +531,9 @@ pub fn render_view_all_bug_page(
             </div>
             <div class="panel-body">
                 <form method="GET" action="/view_all_bug_page">
+                    <input type="hidden" name="sort" value="{}">
+                    <input type="hidden" name="dir" value="{}">
+                    <input type="hidden" name="per_page" value="{}">
                     <div class="filter-grid">
                         <div class="filter-cell">
                             <span class="filter-label">Reporter</span>
@@ -501,7 +590,7 @@ pub fn render_view_all_bug_page(
             <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
                 <span>Viewing Issues ({})</span>
                 <div style="display:flex; gap:8px;">
-                    <a class="btn btn-secondary btn-sm" href="/csv_export?q={}&status={}&priority={}&severity={}&tag_id={}">CSV Export</a>
+                    <a class="btn btn-secondary btn-sm" href="{}">CSV Export</a>
                     <a class="btn btn-sm" href="/bug_report_page">Report Issue</a>
                 </div>
             </div>
@@ -509,27 +598,35 @@ pub fn render_view_all_bug_page(
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>ID</th>
-                            <th>Project</th>
-                            <th>Category</th>
-                            <th>Severity</th>
-                            <th>Priority</th>
-                            <th>Status</th>
-                            <th>Summary</th>
-                            <th>Updated</th>
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
                         </tr>
                     </thead>
                     <tbody>
                         {}
                     </tbody>
                 </table>
-                <div style="display:flex; gap:8px; justify-content:flex-end;">
-                    {} {}
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+                    <div style="display:flex; align-items:center;">
+                        {}
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        {} {}
+                    </div>
                 </div>
             </div>
         </div>
         {}"#,
         err_banner,
+        html_escape(cur_sort),
+        html_escape(cur_dir),
+        cur_per_page_str,
         reporter_opts,
         handler_opts,
         monitored_opts,
@@ -543,12 +640,17 @@ pub fn render_view_all_bug_page(
         saved_filters_html,
         save_filter_form,
         total,
-        html_escape(search_val),
-        filter.status.unwrap_or(0),
-        filter.priority.unwrap_or(0),
-        filter.severity.unwrap_or(0),
-        filter.tag_id.unwrap_or(0),
+        build_csv_export_url(query),
+        th_id,
+        th_project,
+        th_category,
+        th_severity,
+        th_priority,
+        th_status,
+        th_summary,
+        th_updated,
         rows_html,
+        per_page_html,
         prev_link,
         next_link,
         render_status_legend()

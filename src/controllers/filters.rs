@@ -35,6 +35,9 @@ pub struct SaveFilterForm {
     pub reporter_id: Option<i64>,
     pub handler_id: Option<i64>,
     pub tag_id: Option<i64>,
+    pub sort: Option<String>,
+    pub dir: Option<String>,
+    pub per_page: Option<usize>,
 }
 
 pub async fn filter_save(
@@ -66,6 +69,9 @@ pub async fn filter_save(
         handler_id: form.handler_id.filter(|&v| v != 0),
         tag_id: form.tag_id.filter(|&v| v > 0),
         monitored_by: None,
+        sort: form.sort.filter(|s| !s.trim().is_empty()),
+        dir: form.dir.filter(|s| !s.trim().is_empty()),
+        per_page: form.per_page.filter(|&v| v > 0),
     };
 
     match db.save_filter(

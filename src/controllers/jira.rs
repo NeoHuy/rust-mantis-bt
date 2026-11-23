@@ -1,6 +1,7 @@
 use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::jira::JiraClient;
+use crate::models::url_encode;
 use crate::views;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::StatusCode;
@@ -656,22 +657,6 @@ fn sanitize_error_message(s: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push('+'),
-            _ => {
-                out.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    out
 }
 
 pub fn router() -> Router<Db> {

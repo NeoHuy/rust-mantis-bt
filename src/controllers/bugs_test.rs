@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::url_encode;
 use crate::models::*;
 
 #[test]
@@ -285,4 +286,11 @@ fn test_sort_bugs_sticky_pinned_first() {
         bugs.iter().map(|b| b.id).collect::<Vec<_>>(),
         vec![2, 3, 4, 1]
     );
+}
+
+#[test]
+fn test_bugs_router_assembly() {
+    let db = Db::open_in_memory().unwrap();
+    let r = router();
+    let _app: axum::Router = r.with_state(db);
 }

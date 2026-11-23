@@ -338,3 +338,275 @@ fn test_render_view_all_bug_page_saved_filter_delete_button_permissions() {
     );
     assert!(html_admin.contains(r#"action="/filter_delete/99""#));
 }
+
+#[test]
+fn test_human_readable_history() {
+    let mut users_map = HashMap::new();
+    users_map.insert(2, "john_dev".to_string());
+
+    let mut categories_map = HashMap::new();
+    categories_map.insert(5, "Database".to_string());
+
+    // Status
+    assert_eq!(
+        format_history_value("status", "10", &users_map, &categories_map),
+        "new"
+    );
+    assert_eq!(
+        format_history_value("status", "50", &users_map, &categories_map),
+        "assigned"
+    );
+
+    // Resolution
+    assert_eq!(
+        format_history_value("resolution", "10", &users_map, &categories_map),
+        "open"
+    );
+    assert_eq!(
+        format_history_value("resolution", "20", &users_map, &categories_map),
+        "fixed"
+    );
+
+    // Priority
+    assert_eq!(
+        format_history_value("priority", "30", &users_map, &categories_map),
+        "normal"
+    );
+    assert_eq!(
+        format_history_value("priority", "50", &users_map, &categories_map),
+        "urgent"
+    );
+
+    // Severity
+    assert_eq!(
+        format_history_value("severity", "50", &users_map, &categories_map),
+        "minor"
+    );
+    assert_eq!(
+        format_history_value("severity", "70", &users_map, &categories_map),
+        "crash"
+    );
+
+    // Reproducibility
+    assert_eq!(
+        format_history_value("reproducibility", "70", &users_map, &categories_map),
+        "have not tried"
+    );
+    assert_eq!(
+        format_history_value("reproducibility", "10", &users_map, &categories_map),
+        "always"
+    );
+
+    // View state
+    assert_eq!(
+        format_history_value("view_state", "10", &users_map, &categories_map),
+        "public"
+    );
+    assert_eq!(
+        format_history_value("view_state", "50", &users_map, &categories_map),
+        "private"
+    );
+
+    // Sticky
+    assert_eq!(
+        format_history_value("sticky", "1", &users_map, &categories_map),
+        "yes"
+    );
+    assert_eq!(
+        format_history_value("sticky", "0", &users_map, &categories_map),
+        "no"
+    );
+
+    // Due date
+    assert_eq!(
+        format_history_value("due_date", "0", &users_map, &categories_map),
+        "none"
+    );
+    assert_eq!(
+        format_history_value("due_date", "1709164800", &users_map, &categories_map),
+        "2024-02-29"
+    );
+
+    // Handler ID
+    assert_eq!(
+        format_history_value("handler_id", "0", &users_map, &categories_map),
+        "none"
+    );
+    assert_eq!(
+        format_history_value("handler_id", "2", &users_map, &categories_map),
+        "john_dev"
+    );
+    assert_eq!(
+        format_history_value("handler_id", "99", &users_map, &categories_map),
+        "user#99"
+    );
+
+    // Category ID
+    assert_eq!(
+        format_history_value("category_id", "0", &users_map, &categories_map),
+        "none"
+    );
+    assert_eq!(
+        format_history_value("category_id", "5", &users_map, &categories_map),
+        "Database"
+    );
+    assert_eq!(
+        format_history_value("category_id", "99", &users_map, &categories_map),
+        "category#99"
+    );
+
+    // Test render_bug_history_html empty
+    let empty_html = render_bug_history_html(&[], &users_map, &categories_map);
+    assert!(empty_html.contains("No history entries."));
+
+    // Test render_bug_history_html with changes
+    let history = vec![
+        BugHistory {
+            id: 1,
+            user_id: 2,
+            bug_id: 10,
+            date_modified: 1700000000,
+            field_name: "".to_string(),
+            old_value: "".to_string(),
+            new_value: "".to_string(),
+            type_: 1,
+        },
+        BugHistory {
+            id: 2,
+            user_id: 2,
+            bug_id: 10,
+            date_modified: 1700000100,
+            field_name: "status".to_string(),
+            old_value: "10".to_string(),
+            new_value: "50".to_string(),
+            type_: 0,
+        },
+        BugHistory {
+            id: 3,
+            user_id: 2,
+            bug_id: 10,
+            date_modified: 1700000200,
+            field_name: "sticky".to_string(),
+            old_value: "0".to_string(),
+            new_value: "1".to_string(),
+            type_: 0,
+        },
+    ];
+
+    let rendered = render_bug_history_html(&history, &users_map, &categories_map);
+    assert!(rendered.contains("New Issue"));
+    assert!(rendered.contains("new =&gt; assigned"));
+    assert!(rendered.contains("no =&gt; yes"));
+    assert!(rendered.contains("john_dev"));
+}
+
+#[test]
+fn test_view_bug_page_build_due_date_overdue_and_sticky() {
+    let dummy_user = User {
+        id: 1,
+        username: "admin".to_string(),
+        realname: "Admin".to_string(),
+        email: "admin@example.com".to_string(),
+        password: "".to_string(),
+        enabled: 1,
+        protected: 0,
+        access_level: 90,
+        login_count: 0,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: "".to_string(),
+        last_visit: 0,
+        date_created: 0,
+    };
+
+    let ctx = AuthContext {
+        user: dummy_user,
+        active_project_id: 1,
+        visible_projects: Vec::new(),
+    };
+
+    let bug = Bug {
+        id: 42,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 70,
+        status: 10, // New (< 80)
+        resolution: 10,
+        os: "macOS".to_string(),
+        os_build: "14.5".to_string(),
+        platform: "arm64".to_string(),
+        version: "1.0".to_string(),
+        fixed_in_version: "".to_string(),
+        build: "build-beta-9".to_string(),
+        view_state: 10,
+        summary: "Important issue".to_string(),
+        sticky: 1,
+        target_version: "".to_string(),
+        category_id: 1,
+        date_submitted: 1700000000,
+        due_date: 86400, // Past epoch (1970-01-02), overdue!
+        last_updated: 1700000000,
+    };
+
+    let full = BugFull {
+        bug: bug.clone(),
+        description: "Desc".to_string(),
+        steps_to_reproduce: "".to_string(),
+        additional_information: "".to_string(),
+    };
+
+    let html = render_view_bug_page(
+        &ctx,
+        &full,
+        "SampleProj",
+        "General",
+        "admin",
+        "none",
+        &[],
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        None,
+        "",
+        None,
+        None,
+    );
+
+    let html_str = html.0;
+    assert!(html_str.contains("build-beta-9"));
+    assert!(html_str.contains("1970-01-02"));
+    assert!(html_str.contains("Overdue"));
+    assert!(html_str.contains("[Sticky]"));
+
+    // Check sticky in render_view_all_bug_page
+    let view_all_html = render_view_all_bug_page(
+        &ctx,
+        &[bug],
+        1,
+        1,
+        50,
+        &BugFilter::default(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &ListBugsQuery::default(),
+    );
+    assert!(view_all_html.0.contains("[Sticky]"));
+}

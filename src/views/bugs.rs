@@ -1,15 +1,173 @@
 use crate::auth::AuthContext;
 use crate::models::{
     build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
-    BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus, CustomField,
-    CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType, SavedFilter, Tag,
-    User, ViewState,
+    BugHistory, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus,
+    CustomField, CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType,
+    SavedFilter, Tag, User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
-use crate::views::{format_timestamp, render_status_badge, render_status_legend, status_color};
+use crate::views::{
+    format_date, format_timestamp, render_status_badge, render_status_legend, status_color,
+};
 use axum::response::Html;
 use std::collections::HashMap;
+
+pub fn format_history_value(
+    field_name: &str,
+    val: &str,
+    users_map: &HashMap<i64, String>,
+    categories_map: &HashMap<i64, String>,
+) -> String {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    match field_name {
+        "status" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(st) = BugStatus::from_i32(code) {
+                    return st.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "resolution" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(res) = BugResolution::from_i32(code) {
+                    return res.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "priority" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(pr) = BugPriority::from_i32(code) {
+                    return pr.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "severity" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(sev) = BugSeverity::from_i32(code) {
+                    return sev.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "reproducibility" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(rep) = BugReproducibility::from_i32(code) {
+                    return rep.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "view_state" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(vs) = ViewState::from_i32(code) {
+                    return vs.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "sticky" => {
+            if trimmed == "1" {
+                "yes".to_string()
+            } else if trimmed == "0" {
+                "no".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        "due_date" => {
+            if let Ok(ts) = trimmed.parse::<i64>() {
+                if ts > 0 {
+                    let d = format_date(ts);
+                    if !d.is_empty() {
+                        return d;
+                    }
+                } else if ts == 0 {
+                    return "none".to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "handler_id" => {
+            if let Ok(uid) = trimmed.parse::<i64>() {
+                if uid == 0 {
+                    return "none".to_string();
+                }
+                if let Some(uname) = users_map.get(&uid) {
+                    return uname.clone();
+                }
+                return format!("user#{}", uid);
+            }
+            trimmed.to_string()
+        }
+        "category_id" => {
+            if let Ok(cid) = trimmed.parse::<i64>() {
+                if cid == 0 {
+                    return "none".to_string();
+                }
+                if let Some(cname) = categories_map.get(&cid) {
+                    return cname.clone();
+                }
+                return format!("category#{}", cid);
+            }
+            trimmed.to_string()
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+pub fn render_bug_history_html(
+    history: &[BugHistory],
+    users_map: &HashMap<i64, String>,
+    categories_map: &HashMap<i64, String>,
+) -> String {
+    if history.is_empty() {
+        return "<p>No history entries.</p>".to_string();
+    }
+    let mut history_html = String::from(
+        r#"<table class="data-table"><thead><tr><th>Date Modified</th><th>Username</th><th>Field</th><th>Change</th></tr></thead><tbody>"#,
+    );
+    for h in history {
+        let uname = users_map
+            .get(&h.user_id)
+            .cloned()
+            .unwrap_or_else(|| format!("user#{}", h.user_id));
+        let change_desc = if h.type_ == 1 && h.field_name.is_empty() {
+            "New Issue".to_string()
+        } else {
+            let formatted_old =
+                format_history_value(&h.field_name, &h.old_value, users_map, categories_map);
+            let formatted_new =
+                format_history_value(&h.field_name, &h.new_value, users_map, categories_map);
+            format!(
+                "{} =&gt; {}",
+                html_escape(&formatted_old),
+                html_escape(&formatted_new)
+            )
+        };
+        history_html.push_str(&format!(
+            r#"<tr>
+                <td style="width:150px; white-space:nowrap;">{}</td>
+                <td style="width:150px;">{}</td>
+                <td style="width:180px;">{}</td>
+                <td>{}</td>
+            </tr>"#,
+            format_timestamp(h.date_modified),
+            html_escape(&uname),
+            html_escape(&h.field_name),
+            change_desc
+        ));
+    }
+    history_html.push_str("</tbody></table>");
+    history_html
+}
 
 pub fn status_label(v: i32) -> &'static str {
     BugStatus::from_i32(v)
@@ -226,6 +384,11 @@ pub fn render_view_all_bug_page(
             } else {
                 ""
             };
+            let sticky_badge = if b.sticky == 1 {
+                r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:10px; font-weight:bold; padding:2px 4px; border-radius:3px;">[Sticky]</span>"#
+            } else {
+                ""
+            };
             let jira_badge = if let Some(jl) = jira_links.get(&b.id) {
                 format!(
                     r#" <a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; font-size:10px; text-decoration:none;">Jira: {}</a>"#,
@@ -239,19 +402,20 @@ pub fn render_view_all_bug_page(
 
             rows_html.push_str(&format!(
                 r#"<tr class="{}">
-                    <td style="border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a></td>
+                    <td style="border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}{}{}</td>
-                    <td><a href="/view_bug_page/{}">{}</a>{}{}</td>
+                    <td><a href="/view_bug_page/{}">{}</a>{}{}{}</td>
                     <td style="white-space:nowrap;">{}</td>
                 </tr>"#,
                 row_class,
                 status_color(b.status),
                 b.id,
                 b.id,
+                sticky_badge,
                 html_escape(&proj_name),
                 html_escape(&cat_name),
                 html_escape(severity_label(b.severity)),
@@ -266,6 +430,7 @@ pub fn render_view_all_bug_page(
                 b.id,
                 html_escape(&b.summary),
                 priv_badge,
+                sticky_badge,
                 jira_badge,
                 format_timestamp(b.last_updated)
             ));
@@ -792,6 +957,14 @@ pub fn render_bug_report_page(
                             </td>
                         </tr>
                         <tr>
+                            <td class="label-col">Build</td>
+                            <td class="input-col"><input type="text" name="build" placeholder="Build" style="max-width:200px;"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Due Date</td>
+                            <td class="input-col"><input type="date" name="due_date" style="max-width:200px;"></td>
+                        </tr>
+                        <tr>
                             <td class="label-col">Summary *</td>
                             <td class="input-col"><input type="text" name="summary" required></td>
                         </tr>
@@ -886,6 +1059,33 @@ pub fn render_view_bug_page(
         .map(|v| v.as_str())
         .unwrap_or("public");
 
+    let sticky_badge = if bug.sticky == 1 {
+        r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:11px; font-weight:bold; padding:2px 6px; border-radius:3px; margin-left:6px;">[Sticky]</span>"#
+    } else {
+        ""
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let due_date_html = if bug.due_date > 0 {
+        let d = format_date(bug.due_date);
+        let overdue = if bug.status < 80 && bug.due_date < now {
+            r#" <span class="badge badge-danger" style="background:#d9534f; color:#fff; font-size:11px; padding:2px 6px; border-radius:3px; margin-left:6px;">Overdue</span>"#
+        } else {
+            ""
+        };
+        format!("{}{}", html_escape(&d), overdue)
+    } else {
+        "-".to_string()
+    };
+    let build_str = if bug.build.trim().is_empty() {
+        "-".to_string()
+    } else {
+        html_escape(&bug.build)
+    };
+
     let status_badge = render_status_badge(bug.status, status_label(bug.status));
 
     let content = format!(
@@ -906,7 +1106,7 @@ pub fn render_view_bug_page(
                     </thead>
                     <tbody>
                         <tr>
-                            <td>{:07}{}</td>
+                            <td>{:07}{}{}</td>
                             <td>{}</td>
                             <td>{}</td>
                             <td>{}</td>
@@ -950,8 +1150,14 @@ pub fn render_view_bug_page(
                             <td class="input-col">{}</td>
                         </tr>
                         <tr>
+                            <td class="label-col">Build</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Due Date</td>
+                            <td class="input-col" colspan="3">{}</td>
+                        </tr>
+                        <tr>
                             <td class="label-col">Summary</td>
-                            <td class="input-col" colspan="5"><strong>{:07}: {}</strong></td>
+                            <td class="input-col" colspan="5"><strong>{:07}: {}</strong>{}</td>
                         </tr>
                         <tr>
                             <td class="label-col">Description</td>
@@ -1017,6 +1223,7 @@ pub fn render_view_bug_page(
         bug.id,
         bug.id,
         jira_badge,
+        sticky_badge,
         html_escape(proj_name),
         html_escape(cat_name),
         html_escape(view_state_str),
@@ -1035,8 +1242,11 @@ pub fn render_view_bug_page(
         html_escape(&bug.version),
         html_escape(&bug.target_version),
         html_escape(&bug.fixed_in_version),
+        build_str,
+        due_date_html,
         bug.id,
         html_escape(&bug.summary),
+        sticky_badge,
         html_escape(&full.description),
         html_escape(&full.steps_to_reproduce),
         html_escape(&full.additional_information),
@@ -1127,6 +1337,26 @@ pub fn render_update_bug_page(
                             <td class="input-col"><input type="text" name="target_version" value="{}"></td>
                         </tr>
                         <tr>
+                            <td class="label-col">Platform</td>
+                            <td class="input-col"><input type="text" name="platform" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">OS</td>
+                            <td class="input-col"><input type="text" name="os" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">OS Build</td>
+                            <td class="input-col"><input type="text" name="os_build" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Build</td>
+                            <td class="input-col"><input type="text" name="build" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Due Date</td>
+                            <td class="input-col"><input type="date" name="due_date" value="{}"></td>
+                        </tr>
+                        <tr>
                             <td class="label-col">View Status</td>
                             <td class="input-col">
                                 <select name="view_state">
@@ -1207,6 +1437,11 @@ pub fn render_update_bug_page(
         html_escape(&bug.version),
         html_escape(&bug.fixed_in_version),
         html_escape(&bug.target_version),
+        html_escape(&bug.platform),
+        html_escape(&bug.os),
+        html_escape(&bug.os_build),
+        html_escape(&bug.build),
+        html_escape(&format_date(bug.due_date)),
         if bug.view_state == 10 { "selected" } else { "" },
         if bug.view_state == 50 { "selected" } else { "" },
         html_escape(&bug.summary),

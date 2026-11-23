@@ -1301,6 +1301,16 @@ impl Db {
         Ok(())
     }
 
+    pub fn set_project_access_min(&self, project_id: i64, access_min: i32) -> Result<(), String> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE mantis_project_table SET access_min = ?1 WHERE id = ?2",
+            params![access_min, project_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn delete_project(&self, id: i64) -> Result<(), String> {
         let conn = self.conn();
         let existing = match Self::query_project_by_id(&conn, id).map_err(|e| e.to_string())? {
@@ -1462,6 +1472,33 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_project_descendant_ids(&self, project_id: i64) -> rusqlite::Result<Vec<i64>> {
+        let conn = self.conn();
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        let mut results = Vec::new();
+
+        visited.insert(project_id);
+        queue.push_back(project_id);
+        results.push(project_id);
+
+        let mut stmt = conn
+            .prepare("SELECT child_id FROM mantis_project_hierarchy_table WHERE parent_id = ?1")?;
+
+        while let Some(curr) = queue.pop_front() {
+            let children = stmt.query_map(params![curr], |row| row.get::<_, i64>(0))?;
+            for child in children {
+                let cid = child?;
+                if visited.insert(cid) {
+                    results.push(cid);
+                    queue.push_back(cid);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     pub fn list_project_users(&self, project_id: i64) -> rusqlite::Result<Vec<(User, i32)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
@@ -1525,11 +1562,16 @@ impl Db {
         }
 
         // 3. Project status & enabled check
-        let mut stmt =
-            conn.prepare("SELECT enabled, view_state FROM mantis_project_table WHERE id = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT enabled, view_state, access_min FROM mantis_project_table WHERE id = ?1",
+        )?;
         let mut rows = stmt.query(params![project_id])?;
-        let (enabled, view_state) = match rows.next()? {
-            Some(row) => (row.get::<_, i32>(0)?, row.get::<_, i32>(1)?),
+        let (enabled, view_state, access_min) = match rows.next()? {
+            Some(row) => (
+                row.get::<_, i32>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+            ),
             None => return Ok(0),
         };
 
@@ -1549,6 +1591,9 @@ impl Db {
         // 5. View state access level
         if view_state == 10 {
             // Public
+            if user.access_level < access_min {
+                return Ok(0);
+            }
             return Ok(user.access_level);
         } else if view_state == 50 {
             // Private
@@ -1824,6 +1869,14 @@ impl Db {
                 status: row.get(4)?,
             })
         })?;
+        rows.collect()
+    }
+
+    pub fn list_all_categories(&self) -> rusqlite::Result<Vec<(i64, String)>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT id, name FROM mantis_category_table ORDER BY id ASC")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
     }
 
@@ -2189,6 +2242,34 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
 
+        let mut initial_handler_id = 0i64;
+        let mut initial_status = 10i32;
+
+        if category_id > 0 {
+            let cat_user_id: Option<i64> = conn
+                .query_row(
+                    "SELECT user_id FROM mantis_category_table WHERE id = ?1",
+                    params![category_id],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            if let Some(uid) = cat_user_id {
+                if uid > 0 {
+                    if let Ok(Some(u)) = Self::query_user_by_id(&conn, uid) {
+                        if u.enabled == 1 {
+                            let eff = Self::query_effective_access_level(&conn, &u, project_id)
+                                .unwrap_or(0);
+                            if eff >= 55 {
+                                initial_handler_id = uid;
+                                initial_status = 50;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         conn.execute(
             "INSERT INTO mantis_bug_table (
                 project_id, reporter_id, handler_id, duplicate_id,
@@ -2196,13 +2277,15 @@ impl Db {
                 category_id, date_submitted, last_updated, os, os_build,
                 platform, version, fixed_in_version, target_version, build,
                 summary, view_state, sticky, due_date
-            ) VALUES (?1, ?2, 0, 0, ?3, ?4, ?5, 10, 10, ?6, ?7, ?7, ?8, ?9, ?10, ?11, '', '', '', ?12, ?13, 0, 0)",
+            ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, 10, ?8, ?9, ?9, ?10, ?11, ?12, ?13, '', '', '', ?14, ?15, 0, 0)",
             params![
                 project_id,
                 reporter_id,
+                initial_handler_id,
                 priority,
                 severity,
                 reproducibility,
+                initial_status,
                 category_id,
                 now,
                 os,
@@ -2495,14 +2578,75 @@ impl Db {
             None => cur_add_info.clone(),
         };
 
+        let new_os = match fields.os {
+            Some(ref v) => {
+                if *v != bug.os {
+                    changes.push(("os", bug.os.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => bug.os.clone(),
+        };
+
+        let new_os_build = match fields.os_build {
+            Some(ref v) => {
+                if *v != bug.os_build {
+                    changes.push(("os_build", bug.os_build.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => bug.os_build.clone(),
+        };
+
+        let new_platform = match fields.platform {
+            Some(ref v) => {
+                if *v != bug.platform {
+                    changes.push(("platform", bug.platform.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => bug.platform.clone(),
+        };
+
+        let new_build = match fields.build {
+            Some(ref v) => {
+                if *v != bug.build {
+                    changes.push(("build", bug.build.clone(), v.clone()));
+                }
+                v.clone()
+            }
+            None => bug.build.clone(),
+        };
+
+        let new_due_date = match fields.due_date {
+            Some(v) => {
+                if v != bug.due_date {
+                    changes.push(("due_date", bug.due_date.to_string(), v.to_string()));
+                }
+                v
+            }
+            None => bug.due_date,
+        };
+
+        let new_sticky = match fields.sticky {
+            Some(v) => {
+                if v != bug.sticky {
+                    changes.push(("sticky", bug.sticky.to_string(), v.to_string()));
+                }
+                v
+            }
+            None => bug.sticky,
+        };
+
         if !changes.is_empty() {
             conn.execute(
                 "UPDATE mantis_bug_table
                  SET summary = ?1, category_id = ?2, priority = ?3, severity = ?4,
                      reproducibility = ?5, version = ?6, target_version = ?7,
                      fixed_in_version = ?8, view_state = ?9, handler_id = ?10,
-                     last_updated = ?11
-                 WHERE id = ?12",
+                     os = ?11, os_build = ?12, platform = ?13, build = ?14,
+                     due_date = ?15, sticky = ?16, last_updated = ?17
+                 WHERE id = ?18",
                 params![
                     new_summary,
                     new_category_id,
@@ -2514,6 +2658,12 @@ impl Db {
                     new_fixed_in_version,
                     new_view_state,
                     new_handler_id,
+                    new_os,
+                    new_os_build,
+                    new_platform,
+                    new_build,
+                    new_due_date,
+                    new_sticky,
                     now,
                     id,
                 ],
@@ -4080,7 +4230,18 @@ impl Db {
                 if eff < 10 {
                     return Ok(Vec::new());
                 }
-                self.list_bugs(pid, 0, 50_000)?
+                let pids = self.list_project_descendant_ids(pid)?;
+                let mut candidates = Vec::new();
+                for sub_pid in pids {
+                    candidates.extend(self.list_bugs(sub_pid, 0, 50_000)?);
+                }
+                candidates.sort_by(|a, b| {
+                    b.sticky
+                        .cmp(&a.sticky)
+                        .then_with(|| b.last_updated.cmp(&a.last_updated))
+                        .then_with(|| b.id.cmp(&a.id))
+                });
+                candidates
             } else {
                 self.list_bugs(0, 0, 50_000)?
             }

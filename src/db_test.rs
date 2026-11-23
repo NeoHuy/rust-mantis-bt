@@ -2322,3 +2322,328 @@ fn test_email_templates_and_notification_full_coverage() {
     let remaining = db.list_queued_emails().unwrap();
     assert_eq!(remaining.len(), 0);
 }
+
+#[test]
+fn test_db_bug_update_fields_and_history() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let pid = db
+        .create_project("BugUpdateProj", 10, 10, "Test project", true)
+        .unwrap();
+
+    let bug_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            0,
+            "Initial summary",
+            "Initial description",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "1.0",
+            "Linux",
+            "6.8",
+            "x86_64",
+            10,
+        )
+        .unwrap();
+
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.build, "");
+    assert_eq!(bug.due_date, 0);
+    assert_eq!(bug.sticky, 0);
+    assert_eq!(bug.os, "Linux");
+    assert_eq!(bug.os_build, "6.8");
+    assert_eq!(bug.platform, "x86_64");
+
+    // Update build, due_date, sticky, os, os_build, platform
+    let update = BugUpdate {
+        os: Some("macOS".to_string()),
+        os_build: Some("14.5".to_string()),
+        platform: Some("arm64".to_string()),
+        build: Some("build-101".to_string()),
+        due_date: Some(1750000000),
+        sticky: Some(1),
+        ..Default::default()
+    };
+
+    let changes = db.update_bug_fields(bug_id, admin.id, update).unwrap();
+    assert_eq!(changes.len(), 6);
+
+    let updated = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(updated.os, "macOS");
+    assert_eq!(updated.os_build, "14.5");
+    assert_eq!(updated.platform, "arm64");
+    assert_eq!(updated.build, "build-101");
+    assert_eq!(updated.due_date, 1750000000);
+    assert_eq!(updated.sticky, 1);
+
+    // Verify history records
+    let history = db.list_bug_history(bug_id).unwrap();
+    let field_names: Vec<&str> = history.iter().map(|h| h.field_name.as_str()).collect();
+    assert!(field_names.contains(&"os"));
+    assert!(field_names.contains(&"os_build"));
+    assert!(field_names.contains(&"platform"));
+    assert!(field_names.contains(&"build"));
+    assert!(field_names.contains(&"due_date"));
+    assert!(field_names.contains(&"sticky"));
+
+    let sticky_hist = history.iter().find(|h| h.field_name == "sticky").unwrap();
+    assert_eq!(sticky_hist.old_value, "0");
+    assert_eq!(sticky_hist.new_value, "1");
+
+    let due_hist = history.iter().find(|h| h.field_name == "due_date").unwrap();
+    assert_eq!(due_hist.old_value, "0");
+    assert_eq!(due_hist.new_value, "1750000000");
+}
+
+#[test]
+fn test_db_category_default_assignee() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let pid = db
+        .create_project("CatAssignProj", 10, 10, "Test project", true)
+        .unwrap();
+
+    // 1. Create developer user (access 55)
+    let dev_id = db
+        .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
+        .unwrap();
+
+    // 2. Create category with user_id = dev_id
+    let cat_id = db.add_category(pid, "Backend", dev_id).unwrap();
+
+    // 3. Create bug with this category -> auto assigned to dev_id with status 50
+    let bug_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            cat_id,
+            "Auto assigned bug",
+            "Description",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.handler_id, dev_id);
+    assert_eq!(bug.status, 50); // Assigned
+
+    // 4. Category with reporter user (access 25 < 55) -> not auto-assigned
+    let rep_id = db
+        .create_user(
+            "rep1",
+            "Reporter One",
+            "rep1@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let cat2_id = db.add_category(pid, "Frontend", rep_id).unwrap();
+    let bug2_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            cat2_id,
+            "Unassigned bug (reporter)",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let bug2 = db.get_bug(bug2_id).unwrap().unwrap();
+    assert_eq!(bug2.handler_id, 0);
+    assert_eq!(bug2.status, 10); // New
+
+    // 5. Category with disabled user (enabled = 0) -> not auto-assigned
+    let dis_dev_id = db
+        .create_user(
+            "dev_dis",
+            "Disabled Dev",
+            "dis@example.com",
+            "pw",
+            55,
+            false,
+            false,
+        )
+        .unwrap();
+    let cat3_id = db.add_category(pid, "DevOps", dis_dev_id).unwrap();
+    let bug3_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            cat3_id,
+            "Unassigned bug (disabled)",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let bug3 = db.get_bug(bug3_id).unwrap().unwrap();
+    assert_eq!(bug3.handler_id, 0);
+    assert_eq!(bug3.status, 10);
+}
+
+#[test]
+fn test_db_project_access_min_enforcement() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+
+    // Create public project (view_state = 10) with access_min = 40 (Updater)
+    let pid = db
+        .create_project("RestrictedPublic", 10, 10, "Min access 40", true)
+        .unwrap();
+    db.set_project_access_min(pid, 40).unwrap();
+
+    // Create user with access_level 25 (Reporter)
+    let rep_id = db
+        .create_user("rep_user", "", "rep@example.com", "pw", 25, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+
+    // Create user with access_level 40 (Updater)
+    let upd_id = db
+        .create_user("upd_user", "", "upd@example.com", "pw", 40, true, false)
+        .unwrap();
+    let upd = db.get_user_by_id(upd_id).unwrap().unwrap();
+
+    // Reporter (< access_min) gets effective access 0
+    assert_eq!(db.effective_access_level(&rep, pid).unwrap(), 0);
+
+    // Updater (>= access_min) gets effective access 40
+    assert_eq!(db.effective_access_level(&upd, pid).unwrap(), 40);
+
+    // Admin always gets 90
+    assert_eq!(db.effective_access_level(&admin, pid).unwrap(), 90);
+
+    // Explicit override in mantis_project_user_list_table grants access to Reporter
+    db.set_project_user(pid, rep_id, 55).unwrap();
+    assert_eq!(db.effective_access_level(&rep, pid).unwrap(), 55);
+}
+
+#[test]
+fn test_db_subproject_descendants_and_bug_rollup() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+
+    // Root project A
+    let proj_a = db.create_project("ProjectA", 10, 10, "Root", true).unwrap();
+    // Subproject B (child of A)
+    let proj_b = db
+        .create_project("ProjectB", 10, 10, "Child of A", true)
+        .unwrap();
+    // Subproject C (child of B)
+    let proj_c = db
+        .create_project("ProjectC", 10, 10, "Child of B", true)
+        .unwrap();
+
+    db.add_subproject(proj_a, proj_b, true).unwrap();
+    db.add_subproject(proj_b, proj_c, true).unwrap();
+
+    let descendants = db.list_project_descendant_ids(proj_a).unwrap();
+    assert_eq!(descendants, vec![proj_a, proj_b, proj_c]);
+
+    // Create bugs in A, B, C
+    let bug_a = db
+        .create_bug(
+            proj_a, admin.id, 0, "Bug in A", "Desc A", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+    let bug_b = db
+        .create_bug(
+            proj_b, admin.id, 0, "Bug in B", "Desc B", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+    let bug_c = db
+        .create_bug(
+            proj_c, admin.id, 0, "Bug in C", "Desc C", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    // Filter bugs on project A -> rolls up bugs from A, B, and C
+    let filter_a = BugFilter {
+        project_id: Some(proj_a),
+        ..Default::default()
+    };
+    let results = db.filter_bugs(&filter_a, &admin).unwrap();
+    let result_ids: Vec<i64> = results.iter().map(|b| b.id).collect();
+    assert!(result_ids.contains(&bug_a));
+    assert!(result_ids.contains(&bug_b));
+    assert!(result_ids.contains(&bug_c));
+
+    // Create private subproject D (child of A, view_state = 50)
+    let proj_d = db
+        .create_project("ProjectD_Private", 10, 50, "Private child of A", true)
+        .unwrap();
+    db.add_subproject(proj_a, proj_d, true).unwrap();
+    let bug_d = db
+        .create_bug(
+            proj_d,
+            admin.id,
+            0,
+            "Bug in D Private",
+            "Desc D",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Reporter user with no access to private project D
+    let rep_id = db
+        .create_user(
+            "rep_rollup",
+            "",
+            "rep_rollup@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+
+    let rep_results = db.filter_bugs(&filter_a, &rep).unwrap();
+    let rep_result_ids: Vec<i64> = rep_results.iter().map(|b| b.id).collect();
+    assert!(rep_result_ids.contains(&bug_a));
+    assert!(rep_result_ids.contains(&bug_b));
+    assert!(rep_result_ids.contains(&bug_c));
+    assert!(!rep_result_ids.contains(&bug_d)); // Private subproject isolated!
+}

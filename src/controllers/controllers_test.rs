@@ -21,6 +21,26 @@ fn test_parse_bool() {
     assert!(!parse_bool(None));
 }
 
+#[test]
+fn test_sanitize_error_message_and_url_encode() {
+    assert_eq!(sanitize_error_message("Normal error"), "Normal error");
+    assert_eq!(
+        sanitize_error_message("Line 1\r\nLine 2\tTabbed"),
+        "Line 1  Line 2 Tabbed"
+    );
+    assert_eq!(
+        sanitize_error_message("   padded message   "),
+        "padded message"
+    );
+    let long_str = "a".repeat(150);
+    let sanitized = sanitize_error_message(&long_str);
+    assert_eq!(sanitized.chars().count(), 120);
+    assert!(sanitized.ends_with("..."));
+
+    assert_eq!(url_encode("hello world"), "hello+world");
+    assert_eq!(url_encode("foo@bar=1&baz=2"), "foo%40bar%3D1%26baz%3D2");
+}
+
 #[tokio::test]
 async fn test_security_headers_middleware() {
     use axum::body::Body;

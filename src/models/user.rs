@@ -56,3 +56,13 @@ pub struct User {
     pub last_visit: i64,
     pub date_created: i64,
 }
+
+impl User {
+    pub fn display_name(&self) -> &str {
+        if !self.realname.trim().is_empty() {
+            &self.realname
+        } else {
+            &self.username
+        }
+    }
+}

@@ -262,14 +262,7 @@ pub async fn csv_export(
         .list_users(None, false)
         .unwrap_or_default()
         .into_iter()
-        .map(|u| {
-            let name = if !u.realname.trim().is_empty() {
-                u.realname
-            } else {
-                u.username
-            };
-            (u.id, name)
-        })
+        .map(|u| (u.id, u.display_name().to_string()))
         .collect();
 
     let mut out = String::from(
@@ -365,14 +358,7 @@ pub async fn view_all_bug_page(
     let all_users = db.list_users(None, false).unwrap_or_default();
     let users_map: HashMap<i64, String> = all_users
         .iter()
-        .map(|u| {
-            let name = if !u.realname.trim().is_empty() {
-                u.realname.clone()
-            } else {
-                u.username.clone()
-            };
-            (u.id, name)
-        })
+        .map(|u| (u.id, u.display_name().to_string()))
         .collect();
 
     let projects_map: HashMap<i64, String> = ctx
@@ -610,14 +596,7 @@ pub async fn view_bug_page(
     let users = db.list_users(None, false).unwrap_or_default();
     let users_map: HashMap<i64, String> = users
         .iter()
-        .map(|u| {
-            let name = if !u.realname.trim().is_empty() {
-                u.realname.clone()
-            } else {
-                u.username.clone()
-            };
-            (u.id, name)
-        })
+        .map(|u| (u.id, u.display_name().to_string()))
         .collect();
 
     let reporter_name = users_map
@@ -734,16 +713,11 @@ pub async fn view_bug_page(
             } else {
                 ""
             };
-            let display_name = if !u.realname.trim().is_empty() {
-                &u.realname
-            } else {
-                &u.username
-            };
             user_opts.push_str(&format!(
                 r#"<option value="{}" {}>{}</option>"#,
                 u.id,
                 sel,
-                views::html_escape(display_name)
+                views::html_escape(u.display_name())
             ));
         }
         actions_html.push_str(&format!(

@@ -902,7 +902,7 @@ impl Db {
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, 0, ?9)",
             params![
                 trimmed_username,
-                realname,
+                trimmed_realname,
                 email,
                 hashed_pw,
                 enabled_val,
@@ -970,7 +970,7 @@ impl Db {
                 "UPDATE mantis_user_table
                  SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6
                  WHERE id = ?7",
-                params![realname, email, hashed_pw, access_level, enabled_val, protected_val, id],
+                params![trimmed_realname, email, hashed_pw, access_level, enabled_val, protected_val, id],
             ).map_err(|e| e.to_string())?;
         } else {
             conn.execute(
@@ -978,7 +978,7 @@ impl Db {
                  SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5
                  WHERE id = ?6",
                 params![
-                    realname,
+                    trimmed_realname,
                     email,
                     access_level,
                     enabled_val,

@@ -193,7 +193,7 @@ pub fn render_account_page(ctx: &AuthContext, flash: Option<&str>) -> Html<Strin
                             <td class="input-col"><input type="text" value="{}" disabled /></td>
                         </tr>
                         <tr>
-                            <td class="label-col">Real Name</td>
+                            <td class="label-col">Real Name *</td>
                             <td class="input-col"><input type="text" name="realname" value="{}" required /></td>
                         </tr>
                         <tr>

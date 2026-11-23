@@ -269,3 +269,42 @@ fn test_jira_status_mapping_serialization() {
     let deserialized: JiraStatusMapping = serde_json::from_str(&json).unwrap();
     assert_eq!(mapping, deserialized);
 }
+
+#[test]
+fn test_user_display_name() {
+    let u1 = User {
+        id: 1,
+        username: "jdoe".to_string(),
+        realname: "John Doe".to_string(),
+        email: "j@example.com".to_string(),
+        password: "".to_string(),
+        enabled: 1,
+        protected: 0,
+        access_level: 25,
+        login_count: 0,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: "".to_string(),
+        last_visit: 0,
+        date_created: 0,
+    };
+    assert_eq!(u1.display_name(), "John Doe");
+
+    let u2 = User {
+        id: 2,
+        username: "guest".to_string(),
+        realname: "   ".to_string(),
+        email: "g@example.com".to_string(),
+        password: "".to_string(),
+        enabled: 1,
+        protected: 0,
+        access_level: 25,
+        login_count: 0,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: "".to_string(),
+        last_visit: 0,
+        date_created: 0,
+    };
+    assert_eq!(u2.display_name(), "guest");
+}

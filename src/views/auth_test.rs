@@ -82,6 +82,7 @@ fn test_render_account_page() {
     let out = render_account_page(&ctx, Some("Account updated"));
     let html = out.0;
     assert!(html.contains("Edit Account"));
+    assert!(html.contains("Real Name *"));
     assert!(html.contains("Alice Smith"));
     assert!(html.contains("alice@example.com"));
     assert!(html.contains("developer"));

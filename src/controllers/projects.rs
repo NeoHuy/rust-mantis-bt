@@ -171,13 +171,7 @@ pub async fn manage_proj_page(State(db): State<Db>, ctx: AuthContext) -> Respons
             db.get_user_by_id(c.user_id)
                 .ok()
                 .flatten()
-                .map(|u| {
-                    if !u.realname.trim().is_empty() {
-                        u.realname
-                    } else {
-                        u.username
-                    }
-                })
+                .map(|u| u.display_name().to_string())
                 .unwrap_or_else(|| c.user_id.to_string())
         } else {
             "-".to_string()
@@ -260,13 +254,7 @@ pub async fn manage_proj_edit_page(
             db.get_user_by_id(c.user_id)
                 .ok()
                 .flatten()
-                .map(|u| {
-                    if !u.realname.trim().is_empty() {
-                        u.realname
-                    } else {
-                        u.username
-                    }
-                })
+                .map(|u| u.display_name().to_string())
                 .unwrap_or_else(|| c.user_id.to_string())
         } else {
             "-".to_string()

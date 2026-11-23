@@ -1,36 +1,17 @@
 # Gemini & Antigravity Rules: rust-mantis-bt
 
-@[AGENTS.md](AGENTS.md)
+@AGENTS.md
 
 ---
 
-## Directives for Gemini & Antigravity Agents
+## Antigravity & Worktree Notes
 
-1. **Git Isolation:**
-   - Always verify current branch / worktree before modifying files.
-   - For new tasks, base the branch or worktree on `origin/develop`:
-     ```bash
-     git fetch origin
-     git checkout -b <type>/<task-name> origin/develop
-     ```
-   - Target PRs to `develop`, never `main`.
+- Always verify your active git branch or worktree is based on `origin/develop` before modifying files.
+- Use `<type>/<name>` (see branch prefixes in `AGENTS.md` §2.2) and target PRs to `develop`, never `main`.
 
-2. **MVC Architecture & 1:1 Test Layout:**
-   - Adhere strictly to the MVC layer separation:
-     - Domain entities in `src/models/`
-     - Request orchestration & routing in `src/controllers/`
-     - HTML presentation in `src/views/`
-   - Maintain 1:1 companion unit test files (`*_test.rs`) alongside each module using `#[cfg(test)] #[path = "<name>_test.rs"] mod tests;`.
+## Critical Rules (Fallback)
 
-3. **Quality Verification Before Completion:**
-   - Run the mandatory trio before finalizing any task:
-     ```bash
-     cargo fmt --check
-     cargo clippy --all-targets --all-features -- -D warnings
-     cargo test
-     ```
-
-4. **Code Safety & Parameterization:**
-   - Parameterize all SQL queries using `rusqlite::params!`.
-   - Never construct raw SQL query strings using formatting.
-   - Never use `.unwrap()` or `.expect()` in route controllers or production code.
+- **Git:** Never commit directly to `main` or `develop`; branch from `origin/develop` and target PRs to `develop`.
+- **Architecture & Tests:** Enforce strict MVC separation (`src/models/`, `src/controllers/`, `src/views/`); maintain 1:1 `*_test.rs` unit test files for MVC/core modules and integration tests in `tests/` for integration subsystems (`src/mailer.rs`, `src/mcp/*`).
+- **Safety:** Always parameterize SQL with `rusqlite::params![...]`; never use `.unwrap()` or `.expect()` in controller, MCP, or production paths; adhere to PBKDF2 password hashing, CSRF middleware (send `X-CSRF-Token` for AJAX), and strict CSP.
+- **Verification Gate:** Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` before completion.

@@ -16,15 +16,15 @@ See [AGENTS.md](../AGENTS.md) for full project rules and architecture.
 
 ### 2. Architecture & Patterns (MVC)
 - **Controllers (`src/controllers/`):** Axum 0.7 request orchestration and routing. Sub-routers in domain files (`src/controllers/*.rs`) merged in `src/controllers/mod.rs`. Handlers parse requests, verify permissions, call DB methods, invoke views, and return responses.
-- **Views (`src/views/`):** Server-side rendered HTML templates and layout (`src/views/layout.rs`). Render page content and escape user input with `views::html_escape` to prevent XSS.
+- **Views (`src/views/`):** Server-side rendered HTML templates and layout (`src/views/layout.rs`). Reuse shared helpers in `src/views/mod.rs` (`render_error_page`, `render_access_denied_page`, `render_not_found_page`), escape user input with `views::html_escape`, and never nest `<form>` tags inside edit pages.
 - **Models (`src/models/`):** Pure domain structs, enums, validation, and DTOs partitioned by domain (`src/models/*.rs`) and re-exported in `src/models/mod.rs`.
 - **Data Layer (`src/db.rs`):** SQLite with bundled `rusqlite`. Queries must **always** use parameterized `rusqlite::params![...]` (no SQL string formatting). Migrations must be idempotent.
-- **Security & Permissions:** Access levels in `src/auth.rs` and `src/models/user.rs` (Viewer=10, Reporter=25, Updater=40, Developer=55, Manager=70, Administrator=90). Guard controllers with `ctx.user.access_level`.
-- **Integrations:** Jira Cloud REST API client in `src/jira.rs`, with dedicated controllers and views.
-- **Testing Layout:** Maintain 1:1 companion unit test files (`*_test.rs`) alongside each module using `#[cfg(test)] #[path = "<name>_test.rs"] mod tests;`. HTTP integration tests live in `tests/`.
+- **Security & Permissions:** In-house PBKDF2-HMAC-SHA256 password hashing with rehash on login. Access levels in `src/auth.rs` and `src/models/user.rs` (Viewer=10, Reporter=25, Updater=40, Developer=55, Manager=70, Administrator=90). Extract `AuthContext` (session/project cookies) for web routes and `ApiAuth` (Bearer PAT) for `/api/rest/*`. Guard global admin actions (`< 90`) and manager actions (`< 70`) via `ctx.user.access_level` (returning `views::render_access_denied_page(&ctx)` or `forbidden`), and project-scoped actions via `db.effective_access_level(&ctx.user, project_id)`. Global middleware enforces CSRF validation on mutating web routes (send `X-CSRF-Token` for AJAX calls; `/api/rest/*` and `/mcp*` exempt) and restrictive CSP headers ('self' and inline only; no external CDNs). Replace CR/LF/TAB and truncate error messages placed into redirect `Location` headers.
+- **Integrations:** Jira Cloud REST API client (`src/jira.rs`), SendGrid email dispatcher (`src/mailer.rs`), and MCP SSE server (`src/mcp/` with Bearer PAT auth and per-project `effective_access_level` checks).
+- **Testing Layout:** Maintain 1:1 companion unit test files (`*_test.rs`) for MVC and core modules using `#[cfg(test)] #[path = "<name>_test.rs"] mod tests;`. Integration tests live in `tests/`.
 
 ### 3. Rust Code Standards
-- Avoid `.unwrap()` / `.expect()` in controller code or production paths; propagate errors with `?` or return clean error responses.
+- Avoid `.unwrap()` / `.expect()` in controller, MCP, or production paths; propagate errors with `?` or return clean error responses.
 - Keep dependencies lean. Do not add new crates to `Cargo.toml` without explicit instruction.
 
 ### 4. Verification Gate

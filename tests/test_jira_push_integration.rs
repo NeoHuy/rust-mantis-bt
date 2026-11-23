@@ -8,16 +8,48 @@ async fn spawn_mock_jira(
     status_code: StatusCode,
     body_json: serde_json::Value,
 ) -> (String, tokio::sync::oneshot::Sender<()>) {
-    let app = axum::Router::new().route(
-        "/rest/api/2/issue",
-        axum::routing::post(move || async move {
-            (
-                status_code,
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                serde_json::to_string(&body_json).unwrap(),
-            )
-        }),
-    );
+    let default_key = body_json
+        .get("key")
+        .and_then(|k| k.as_str())
+        .unwrap_or("PROJ-789")
+        .to_string();
+    let body_str = serde_json::to_string(&body_json).unwrap();
+    let app = axum::Router::new()
+        .route(
+            "/rest/api/2/issue",
+            axum::routing::post(move || {
+                let s = body_str.clone();
+                async move {
+                    (
+                        status_code,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        s,
+                    )
+                }
+            }),
+        )
+        .route(
+            "/rest/api/2/issue/:key",
+            axum::routing::get(move |axum::extract::Path(k): axum::extract::Path<String>| {
+                let resp_key = if k.is_empty() { default_key.clone() } else { k };
+                async move {
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        serde_json::to_string(&json!({
+                            "id": "10055",
+                            "key": resp_key,
+                            "fields": {
+                                "summary": "Mock Issue",
+                                "issuetype": {"name": "Bug"},
+                                "status": {"name": "To Do"}
+                            }
+                        }))
+                        .unwrap(),
+                    )
+                }
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -63,6 +95,7 @@ async fn login(app: &axum::Router, username: &str, password: &str) -> String {
 #[tokio::test]
 async fn test_jira_push_success() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db
         .create_project("Core Project", 10, 10, "Desc", true)
         .unwrap();
@@ -152,6 +185,7 @@ async fn test_jira_push_success() {
 #[tokio::test]
 async fn test_jira_push_already_linked() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev2", "Dev 2", "d2@x.com", "pass", 55, true, false)
@@ -168,6 +202,7 @@ async fn test_jira_push_already_linked() {
         "ALREADY-1",
         "http://jira/browse/ALREADY-1",
         "Bug",
+        "",
         dev_id,
     )
     .unwrap();
@@ -197,6 +232,7 @@ async fn test_jira_push_already_linked() {
 #[tokio::test]
 async fn test_jira_push_permission_denied() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let rep_id = db
         .create_user(
@@ -237,6 +273,7 @@ async fn test_jira_push_permission_denied() {
 #[tokio::test]
 async fn test_jira_push_jira_error_keeps_bug_state() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev3", "Dev 3", "d3@x.com", "pass", 55, true, false)
@@ -302,6 +339,7 @@ async fn test_jira_push_jira_error_keeps_bug_state() {
 #[tokio::test]
 async fn test_jira_push_effective_access_level() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     // Private project
     let priv_proj_id = db
         .create_project("Private Proj", 10, 50, "Desc", true)
@@ -389,6 +427,7 @@ async fn test_jira_push_effective_access_level() {
 #[tokio::test]
 async fn test_jira_push_handles_multiline_error_without_panic() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev4", "Dev 4", "d4@x.com", "pass", 55, true, false)
@@ -446,6 +485,7 @@ async fn test_jira_push_handles_multiline_error_without_panic() {
 #[tokio::test]
 async fn test_jira_link_cascade_on_bug_delete() {
     let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
     let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
     let dev_id = db
         .create_user("dev5", "Dev 5", "d5@x.com", "pass", 55, true, false)
@@ -470,8 +510,15 @@ async fn test_jira_link_cascade_on_bug_delete() {
         )
         .unwrap();
 
-    db.create_jira_link(bug_id, "DEL-1", "http://jira/browse/DEL-1", "Bug", dev_id)
-        .unwrap();
+    db.create_jira_link(
+        bug_id,
+        "DEL-1",
+        "http://jira/browse/DEL-1",
+        "Bug",
+        "",
+        dev_id,
+    )
+    .unwrap();
     assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_some());
 
     // Delete bug
@@ -479,4 +526,321 @@ async fn test_jira_link_cascade_on_bug_delete() {
 
     // Link must be cleanly deleted by cascade foreign key
     assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
+}
+
+async fn spawn_full_mock_jira() -> (String, tokio::sync::oneshot::Sender<()>) {
+    let app = axum::Router::new()
+        .route(
+            "/rest/api/2/issue",
+            axum::routing::post(
+                |axum::extract::Json(body): axum::extract::Json<serde_json::Value>| async move {
+                    let parent_key = body["fields"]["parent"]["key"].as_str().unwrap_or("");
+                    let res = json!({
+                        "id": "10099",
+                        "key": if parent_key == "JBC-10" { "JBC-105" } else { "JBC-99" },
+                        "self": "http://jira.local/rest/api/2/issue/10099"
+                    });
+                    (
+                        StatusCode::CREATED,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        serde_json::to_string(&res).unwrap(),
+                    )
+                },
+            ),
+        )
+        .route(
+            "/rest/api/2/issue/:key",
+            axum::routing::get(
+                |axum::extract::Path(key): axum::extract::Path<String>| async move {
+                    let status_name = if key == "JBC-88" {
+                        "Done"
+                    } else if key == "JBC-105" {
+                        "To Do"
+                    } else {
+                        "In Progress"
+                    };
+                    let res = json!({
+                        "id": "10099",
+                        "key": key,
+                        "fields": {
+                            "summary": "Mock Issue Summary",
+                            "issuetype": { "name": "Task" },
+                            "status": { "name": status_name }
+                        }
+                    });
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        serde_json::to_string(&res).unwrap(),
+                    )
+                },
+            ),
+        )
+        .route(
+            "/rest/api/3/search/jql",
+            axum::routing::get(|| async {
+                let res = json!({
+                    "issues": [
+                        {
+                            "id": "10",
+                            "key": "JBC-10",
+                            "fields": { "summary": "Core Epic" }
+                        }
+                    ]
+                });
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    serde_json::to_string(&res).unwrap(),
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async {
+                let _ = rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    (format!("http://{}", addr), tx)
+}
+
+#[tokio::test]
+async fn test_jira_sync_existing_ticket_by_key_updates_mantis_status() {
+    let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
+    let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
+    let dev_id = db
+        .create_user(
+            "dev_sync1",
+            "Dev Sync 1",
+            "ds1@x.com",
+            "pass",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id, dev_id, 1, "Sync Bug", "Desc", "", "", 10, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    let (mock_url, _shutdown) = spawn_full_mock_jira().await;
+    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "JBC")
+        .unwrap();
+
+    let app = build_router(db.clone());
+    let cookie = login(&app, "dev_sync1", "pass").await;
+
+    // Link by typing just "99" (normalized to JBC-99)
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/view_bug_page/{}/jira_sync", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("jira_key=99"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Verify DB link and status update
+    let link = db
+        .get_jira_link_by_bug_id(bug_id)
+        .unwrap()
+        .expect("Link should exist");
+    assert_eq!(link.jira_key, "JBC-99");
+    assert_eq!(link.jira_status, "In Progress");
+    assert_eq!(link.issue_type, "Task");
+
+    // Bug status should now be 50 (assigned) due to "In Progress"
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.status, 50);
+
+    // Bugnote was created
+    let notes = db.list_bugnotes(bug_id, 90).unwrap();
+    assert!(notes
+        .iter()
+        .any(|n| n.note.contains("Linked to Jira issue [JBC-99]")));
+}
+
+#[tokio::test]
+async fn test_jira_sync_refresh_existing_link_and_unlink() {
+    let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
+    let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
+    let dev_id = db
+        .create_user(
+            "dev_sync2",
+            "Dev Sync 2",
+            "ds2@x.com",
+            "pass",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            dev_id,
+            1,
+            "Sync Bug 2",
+            "Desc",
+            "",
+            "",
+            50,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let (mock_url, _shutdown) = spawn_full_mock_jira().await;
+    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "JBC")
+        .unwrap();
+
+    // Create existing link pointing to JBC-88
+    db.create_jira_link(
+        bug_id,
+        "JBC-88",
+        &format!("{}/browse/JBC-88", mock_url),
+        "Task",
+        "In Progress",
+        dev_id,
+    )
+    .unwrap();
+
+    let app = build_router(db.clone());
+    let cookie = login(&app, "dev_sync2", "pass").await;
+
+    // Refresh sync
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/view_bug_page/{}/jira_sync", bug_id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let link = db.get_jira_link_by_bug_id(bug_id).unwrap().unwrap();
+    assert_eq!(link.jira_status, "Done");
+
+    // Bug status updated to 80 (resolved) due to "Done"
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.status, 80);
+
+    // Now test Unlink
+    let unlink_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/view_bug_page/{}/jira_unlink", bug_id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(unlink_res.status(), StatusCode::SEE_OTHER);
+    assert!(db.get_jira_link_by_bug_id(bug_id).unwrap().is_none());
+
+    let notes = db.list_bugnotes(bug_id, 90).unwrap();
+    assert!(notes
+        .iter()
+        .any(|n| n.note.contains("Unlinked Jira issue JBC-88")));
+}
+
+#[tokio::test]
+async fn test_jira_sync_create_new_ticket_with_epic() {
+    let db = Db::open_in_memory().unwrap();
+    db.set_allow_local_jira(true);
+    let proj_id = db.create_project("Project", 10, 10, "", true).unwrap();
+    let dev_id = db
+        .create_user(
+            "dev_sync3",
+            "Dev Sync 3",
+            "ds3@x.com",
+            "pass",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            dev_id,
+            1,
+            "Create with Epic",
+            "Desc",
+            "",
+            "",
+            10,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let (mock_url, _shutdown) = spawn_full_mock_jira().await;
+    db.save_jira_global_config(true, &mock_url, "bot@x.com", Some("tok"), "Bug", "JBC")
+        .unwrap();
+
+    let app = build_router(db.clone());
+    let cookie = login(&app, "dev_sync3", "pass").await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/view_bug_page/{}/jira_sync", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("epic_key=JBC-10&issue_type=Story"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let link = db.get_jira_link_by_bug_id(bug_id).unwrap().unwrap();
+    assert_eq!(link.jira_key, "JBC-105");
+    assert_eq!(link.issue_type, "Story");
+    assert_eq!(link.jira_status, "To Do");
+
+    // Bug status updated to 30 (acknowledged) due to "To Do"
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.status, 30);
 }

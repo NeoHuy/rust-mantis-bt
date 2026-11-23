@@ -1,18 +1,53 @@
 use crate::models::{
-    ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugRelationship, BugTag, BugUpdate,
-    Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig,
-    NewsItem, PluginItem, Project, ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
+    ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugPriority, BugRelationship,
+    BugReproducibility, BugResolution, BugSeverity, BugStatus, BugTag, BugUpdate, Bugnote,
+    Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig, NewsItem,
+    PluginItem, Project, ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Db(Arc<Mutex<Connection>>);
+pub struct Db {
+    conn: Arc<Mutex<Connection>>,
+    allow_local_jira: Arc<std::sync::atomic::AtomicBool>,
+    base_url: Arc<String>,
+}
 
 impl Db {
+    pub(crate) fn from_connection(conn: Connection) -> Self {
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+            allow_local_jira: Arc::new(std::sync::atomic::AtomicBool::new(
+                crate::jira::env_allow_local_jira(),
+            )),
+            base_url: Arc::new(Self::resolve_base_url()),
+        }
+    }
+
+    pub fn allow_local_jira(&self) -> bool {
+        self.allow_local_jira
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_allow_local_jira(&self, allow: bool) {
+        self.allow_local_jira
+            .store(allow, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
-        self.0.lock().expect("db lock poisoned")
+        self.conn.lock().expect("db lock poisoned")
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn resolve_base_url() -> String {
+        let addr_str =
+            std::env::var("MANTIS_ADDR").unwrap_or_else(|_| crate::DEFAULT_MANTIS_ADDR.to_string());
+        std::env::var("MANTIS_BASE_URL").unwrap_or_else(|_| format!("http://{}", addr_str))
     }
 
     pub fn open(path: &str) -> rusqlite::Result<Self> {
@@ -22,7 +57,7 @@ impl Db {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self(Arc::new(Mutex::new(conn)));
+        let db = Self::from_connection(conn);
         db.migrate()?;
         Ok(db)
     }
@@ -33,13 +68,30 @@ impl Db {
             "PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;",
         )?;
-        let db = Self(Arc::new(Mutex::new(conn)));
+        let db = Self::from_connection(conn);
         db.migrate()?;
         Ok(db)
     }
 
+    pub fn from_conn(conn: Connection) -> Self {
+        Self::from_connection(conn)
+    }
+
+    pub fn can_view_bug(user_id: i64, user_access: i32, bug: &Bug) -> bool {
+        if user_access < 10 {
+            return false;
+        }
+        if bug.view_state == 50 {
+            user_access >= 55
+                || user_id == bug.reporter_id
+                || (bug.handler_id > 0 && user_id == bug.handler_id)
+        } else {
+            true
+        }
+    }
+
     pub fn migrate(&self) -> rusqlite::Result<()> {
-        let conn = self.conn();
+        let mut conn = self.conn();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS mantis_config_table (
                 config_id TEXT NOT NULL,
@@ -308,18 +360,159 @@ impl Db {
 
             CREATE TABLE IF NOT EXISTS mantis_jira_links_table (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                bug_id INTEGER NOT NULL UNIQUE,
+                bug_id INTEGER NOT NULL,
                 jira_key TEXT NOT NULL,
                 jira_url TEXT NOT NULL,
                 issue_type TEXT NOT NULL DEFAULT 'Bug',
+                jira_status TEXT NOT NULL DEFAULT '',
                 created_by INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY(bug_id) REFERENCES mantis_bug_table(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_jira_links_bug_id ON mantis_jira_links_table(bug_id);
-            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);",
+            CREATE INDEX IF NOT EXISTS idx_jira_links_key ON mantis_jira_links_table(jira_key);
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_epics_cache_table (
+                project_key TEXT PRIMARY KEY,
+                epics_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table (
+                jira_status TEXT PRIMARY KEY COLLATE NOCASE,
+                mantis_status INTEGER NOT NULL
+            );",
         )?;
+
+        // Idempotent migration for mantis_jira_epics_cache_table: ensure expires_at column exists
+        let has_expires_at = {
+            let mut stmt = conn.prepare("PRAGMA table_info(mantis_jira_epics_cache_table)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                Ok(name)
+            })?;
+            let mut found = false;
+            for name in rows.flatten() {
+                if name == "expires_at" {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if !has_expires_at {
+            conn.execute(
+                "ALTER TABLE mantis_jira_epics_cache_table ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+
+        // Idempotent migration for mantis_jira_links_table: ensure unique index on bug_id exists
+        let has_unique_bug_id_idx: bool = {
+            let mut stmt = conn.prepare("PRAGMA index_list(mantis_jira_links_table)")?;
+            let rows = stmt.query_map([], |row| {
+                let name: String = row.get(1)?;
+                let unique: i64 = row.get(2)?;
+                Ok((name, unique))
+            })?;
+            let mut found = false;
+            for (name, unique) in rows.flatten() {
+                if (name == "idx_jira_links_bug_id_unique"
+                    || name.starts_with("sqlite_autoindex_mantis_jira_links_table"))
+                    && unique == 1
+                {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+
+        if !has_unique_bug_id_idx {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM mantis_jira_links_table WHERE id NOT IN (SELECT MAX(id) FROM mantis_jira_links_table GROUP BY bug_id)",
+                [],
+            )?;
+            tx.execute("DROP INDEX IF EXISTS idx_jira_links_bug_id", [])?;
+            tx.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_jira_links_bug_id_unique ON mantis_jira_links_table(bug_id)",
+                [],
+            )?;
+            tx.commit()?;
+        }
+
+        // Idempotent migration for mantis_jira_status_mapping_table: ensure COLLATE NOCASE
+        let needs_nocase_migration = {
+            let table_sql: Option<String> = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='mantis_jira_status_mapping_table'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match table_sql {
+                Some(sql) => !sql.to_uppercase().contains("NOCASE"),
+                None => false,
+            }
+        };
+
+        if needs_nocase_migration {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table_mig (
+                    jira_status TEXT PRIMARY KEY COLLATE NOCASE,
+                    mantis_status INTEGER NOT NULL
+                )",
+                [],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO mantis_jira_status_mapping_table_mig (jira_status, mantis_status)
+                 SELECT TRIM(jira_status), mantis_status FROM mantis_jira_status_mapping_table",
+                [],
+            )?;
+            tx.execute("DROP TABLE mantis_jira_status_mapping_table", [])?;
+            tx.execute(
+                "ALTER TABLE mantis_jira_status_mapping_table_mig RENAME TO mantis_jira_status_mapping_table",
+                [],
+            )?;
+            tx.commit()?;
+        }
+
+        // Seed default Jira status mappings if table is empty
+        let status_map_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mantis_jira_status_mapping_table",
+            [],
+            |row| row.get(0),
+        )?;
+        if status_map_count == 0 {
+            let defaults = [
+                ("To Do", 30),
+                ("Open", 30),
+                ("In Progress", 50),
+                ("In Review", 20),
+                ("Done", 80),
+                ("Closed", 90),
+            ];
+            for (j_status, m_status) in defaults {
+                let _ = conn.execute(
+                    "INSERT OR IGNORE INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                    params![j_status, m_status],
+                );
+            }
+        }
+
+        // Ensure jira_status column exists in mantis_jira_links_table for existing databases
+        let has_jira_status = conn
+            .prepare("SELECT jira_status FROM mantis_jira_links_table LIMIT 1")
+            .is_ok();
+        if !has_jira_status {
+            let _ = conn.execute(
+                "ALTER TABLE mantis_jira_links_table ADD COLUMN jira_status TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+        }
 
         // Default administrator seed if user table is empty
         let user_count: i64 =
@@ -351,7 +544,7 @@ impl Db {
                     0,  // lost_password_request_count
                     0,  // failed_login_count
                     cookie,
-                    0,   // last_visit
+                    now, // last_visit
                     now, // date_created
                 ],
             )?;
@@ -396,22 +589,7 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![username])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
@@ -437,22 +615,7 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![trimmed])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
@@ -548,6 +711,25 @@ impl Db {
             .ok_or_else(|| "Failed to retrieve newly created user.".to_string())
     }
 
+    fn map_user_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
+        Ok(User {
+            id: row.get(0)?,
+            username: row.get(1)?,
+            realname: row.get(2)?,
+            email: row.get(3)?,
+            password: row.get(4)?,
+            enabled: row.get(5)?,
+            protected: row.get(6)?,
+            access_level: row.get(7)?,
+            login_count: row.get(8)?,
+            lost_password_request_count: row.get(9)?,
+            failed_login_count: row.get(10)?,
+            cookie_string: row.get(11)?,
+            last_visit: row.get(12)?,
+            date_created: row.get(13)?,
+        })
+    }
+
     fn query_user_by_id(conn: &Connection, id: i64) -> rusqlite::Result<Option<User>> {
         let mut stmt = conn.prepare(
             "SELECT id, username, realname, email, password, enabled, protected, access_level,
@@ -558,22 +740,7 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![id])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
@@ -590,25 +757,21 @@ impl Db {
         )?;
         let mut rows = stmt.query(params![cookie])?;
         if let Some(row) = rows.next()? {
-            Ok(Some(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            }))
+            Ok(Some(Self::map_user_row(row)?))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn rotate_user_cookie(&self, user_id: i64) -> Result<String, String> {
+        let new_cookie = crate::auth::generate_cookie_string();
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET cookie_string = ?1 WHERE id = ?2",
+            params![new_cookie, user_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(new_cookie)
     }
 
     pub fn authenticate(&self, username: &str, password: &str) -> Result<Option<User>, String> {
@@ -617,19 +780,14 @@ impl Db {
             .map_err(|e| e.to_string())?
         {
             Some(u) => u,
-            None => return Ok(None),
+            None => {
+                crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
+                return Ok(None);
+            }
         };
 
         if user.enabled == 0 {
-            return Ok(None);
-        }
-
-        if !crate::auth::verify_password(password, &user.password) {
-            let conn = self.conn();
-            conn.execute(
-                "UPDATE mantis_user_table SET failed_login_count = failed_login_count + 1 WHERE id = ?1",
-                params![user.id],
-            ).map_err(|e| e.to_string())?;
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
             return Ok(None);
         }
 
@@ -638,21 +796,121 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        {
+        let max_failed_logins = std::env::var("MANTIS_MAX_FAILED_LOGINS")
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
+            .map(|v| v.max(1))
+            .unwrap_or(5);
+        let lockout_secs = std::env::var("MANTIS_LOCKOUT_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .map(|v| v.max(1))
+            .unwrap_or(900);
+
+        let locked_until = self
+            .get_config("login_locked_until", 0, user.id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        if locked_until > now {
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
+            return Err(
+                "Account temporarily locked due to too many failed login attempts. Please try again later."
+                    .to_string(),
+            );
+        } else if locked_until > 0 {
+            // Lockout period has elapsed: clear lock config and reset failure counter
+            let _ = self.set_config("login_locked_until", 0, user.id, "0");
             let conn = self.conn();
             conn.execute(
-                "UPDATE mantis_user_table
-                 SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1
-                 WHERE id = ?2",
-                params![now, user.id],
+                "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+                params![user.id],
             )
             .map_err(|e| e.to_string())?;
         }
+
+        let is_pbkdf2 = user.password.starts_with("pbkdf2_sha256$");
+        let pw_matches = crate::auth::verify_password(password, &user.password);
+        if !is_pbkdf2 {
+            // Equalize verification timing with PBKDF2 calculation for non-PBKDF2 legacy hashes
+            crate::auth::verify_password(password, &crate::auth::dummy_password_hash());
+        }
+
+        if !pw_matches {
+            let conn = self.conn();
+            let new_count: i32 = conn
+                .query_row(
+                    "UPDATE mantis_user_table SET failed_login_count = failed_login_count + 1 WHERE id = ?1 RETURNING failed_login_count",
+                    params![user.id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            drop(conn);
+
+            if new_count >= max_failed_logins {
+                self.set_config(
+                    "login_locked_until",
+                    0,
+                    user.id,
+                    &(now + lockout_secs).to_string(),
+                )
+                .map_err(|e| e.to_string())?;
+                // Reset failed_login_count to 0 so when the lockout period expires,
+                // the user gets a fresh set of attempts instead of locking on a single wrong attempt
+                let conn = self.conn();
+                conn.execute(
+                    "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+                    params![user.id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            return Ok(None);
+        }
+
+        let new_cookie = crate::auth::generate_cookie_string();
+        let rehashed = if crate::auth::needs_rehash(&user.password) {
+            Some(crate::auth::hash_password(password))
+        } else {
+            None
+        };
+
+        {
+            let conn = self.conn();
+            let rows = if let Some(ref new_pw_hash) = rehashed {
+                conn.execute(
+                    "UPDATE mantis_user_table
+                     SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2, password = ?3
+                     WHERE id = ?4 AND password = ?5",
+                    params![now, new_cookie, new_pw_hash, user.id, user.password],
+                )
+                .map_err(|e| e.to_string())?
+            } else {
+                conn.execute(
+                    "UPDATE mantis_user_table
+                     SET login_count = login_count + 1, failed_login_count = 0, last_visit = ?1, cookie_string = ?2
+                     WHERE id = ?3 AND password = ?4",
+                    params![now, new_cookie, user.id, user.password],
+                )
+                .map_err(|e| e.to_string())?
+            };
+
+            if rows == 0 {
+                // Password was updated concurrently by an admin, do not issue session for old password
+                return Ok(None);
+            }
+        }
+
+        let _ = self.set_config("login_locked_until", 0, user.id, "0");
 
         let mut updated = user;
         updated.login_count += 1;
         updated.failed_login_count = 0;
         updated.last_visit = now;
+        updated.cookie_string = new_cookie;
+        if let Some(new_pw_hash) = rehashed {
+            updated.password = new_pw_hash;
+        }
         Ok(Some(updated))
     }
 
@@ -695,24 +953,7 @@ impl Db {
         let mut stmt = conn.prepare(&sql)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            Ok(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            })
-        })?;
+        let rows = stmt.query_map(params_refs.as_slice(), Self::map_user_row)?;
         rows.collect()
     }
 
@@ -748,7 +989,7 @@ impl Db {
                 username, realname, email, password, enabled, protected,
                 access_level, login_count, lost_password_request_count, failed_login_count,
                 cookie_string, last_visit, date_created
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, 0, ?9)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, 0, ?8, ?9, ?10)",
             params![
                 trimmed_username,
                 realname,
@@ -759,11 +1000,24 @@ impl Db {
                 access_level,
                 cookie,
                 now,
+                now,
             ],
         )
         .map_err(|e| e.to_string())?;
 
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn unlock_user(&self, id: i64) -> Result<(), String> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE mantis_user_table SET failed_login_count = 0 WHERE id = ?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
+        drop(conn);
+        let _ = self.set_config("login_locked_until", 0, id, "0");
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -777,6 +1031,13 @@ impl Db {
         enabled: bool,
         protected: bool,
     ) -> Result<(), String> {
+        let hashed_pw_and_cookie = new_password.map(|pw| {
+            (
+                crate::auth::hash_password(pw),
+                crate::auth::generate_cookie_string(),
+            )
+        });
+
         let conn = self.conn();
         let existing = match Self::query_user_by_id(&conn, id).map_err(|e| e.to_string())? {
             Some(u) => u,
@@ -808,18 +1069,29 @@ impl Db {
         let enabled_val = if enabled { 1 } else { 0 };
         let protected_val = if protected { 1 } else { 0 };
 
-        if let Some(pw) = new_password {
-            let hashed_pw = crate::auth::hash_password(pw);
+        if let Some((hashed_pw, new_cookie)) = hashed_pw_and_cookie {
             conn.execute(
                 "UPDATE mantis_user_table
-                 SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6
-                 WHERE id = ?7",
-                params![realname, email, hashed_pw, access_level, enabled_val, protected_val, id],
-            ).map_err(|e| e.to_string())?;
+                 SET realname = ?1, email = ?2, password = ?3, access_level = ?4, enabled = ?5, protected = ?6, cookie_string = ?7, failed_login_count = 0
+                 WHERE id = ?8",
+                params![
+                    realname,
+                    email,
+                    hashed_pw,
+                    access_level,
+                    enabled_val,
+                    protected_val,
+                    new_cookie,
+                    id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            drop(conn);
+            let _ = self.set_config("login_locked_until", 0, id, "0");
         } else {
             conn.execute(
                 "UPDATE mantis_user_table
-                 SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5
+                 SET realname = ?1, email = ?2, access_level = ?3, enabled = ?4, protected = ?5, failed_login_count = 0
                  WHERE id = ?6",
                 params![
                     realname,
@@ -831,6 +1103,8 @@ impl Db {
                 ],
             )
             .map_err(|e| e.to_string())?;
+            drop(conn);
+            let _ = self.set_config("login_locked_until", 0, id, "0");
         }
 
         Ok(())
@@ -1200,22 +1474,7 @@ impl Db {
              ORDER BY u.username ASC",
         )?;
         let rows = stmt.query_map(params![project_id], |row| {
-            let user = User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            };
+            let user = Self::map_user_row(row)?;
             let access_level: i32 = row.get(14)?;
             Ok((user, access_level))
         })?;
@@ -1246,6 +1505,15 @@ impl Db {
     }
 
     pub fn effective_access_level(&self, user: &User, project_id: i64) -> rusqlite::Result<i32> {
+        let conn = self.conn();
+        Self::query_effective_access_level(&conn, user, project_id)
+    }
+
+    pub(crate) fn query_effective_access_level(
+        conn: &Connection,
+        user: &User,
+        project_id: i64,
+    ) -> rusqlite::Result<i32> {
         // 1. All Projects context
         if project_id == 0 {
             return Ok(user.access_level);
@@ -1255,8 +1523,6 @@ impl Db {
         if user.access_level >= 90 {
             return Ok(90);
         }
-
-        let conn = self.conn();
 
         // 3. Project status & enabled check
         let mut stmt =
@@ -1966,16 +2232,13 @@ impl Db {
 
         // Record new bug creation in history (type = 1)
         let _ = self.record_history(&conn, bug_id, reporter_id, "", "", "", 1);
-        self.notify_bug_event(
-            &conn,
-            bug_id,
-            reporter_id,
-            &format!("[Issue #{:07}] New: {}", bug_id, trimmed_summary),
-            &format!(
-                "Issue #{:07} reported: {}\n\n{}",
-                bug_id, trimmed_summary, description
-            ),
-        );
+
+        let project_name = Self::helper_project_name(&conn, project_id);
+        let action_header = "The following issue has been SUBMITTED.";
+        if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, None) {
+            let subject = format!("[{} {:07}] New: {}", project_name, bug_id, trimmed_summary);
+            self.notify_bug_event(&conn, bug_id, &subject, &body);
+        }
 
         Ok(bug_id)
     }
@@ -2020,10 +2283,13 @@ impl Db {
         }))
     }
 
+    /// Returns raw unfiltered bugs for a project (or all projects when project_id <= 0).
+    ///
+    /// Note: `list_bugs` is an unfiltered query; user-facing callers and `filter_bugs`
+    /// must filter results using `Db::can_view_bug` to enforce visibility rules.
     pub fn list_bugs(
         &self,
         project_id: i64,
-        user_access: i32,
         offset: i64,
         limit: i64,
     ) -> rusqlite::Result<Vec<Bug>> {
@@ -2036,14 +2302,11 @@ impl Db {
                         platform, version, fixed_in_version, target_version, build,
                         summary, view_state, sticky, due_date
                  FROM mantis_bug_table
-                 WHERE project_id = ?1 AND (view_state = 10 OR ?2 >= 55)
+                 WHERE project_id = ?1
                  ORDER BY sticky DESC, last_updated DESC, id DESC
-                 LIMIT ?3 OFFSET ?4",
+                 LIMIT ?2 OFFSET ?3",
             )?;
-            let rows = stmt.query_map(
-                params![project_id, user_access, limit, offset],
-                Self::map_bug_row,
-            )?;
+            let rows = stmt.query_map(params![project_id, limit, offset], Self::map_bug_row)?;
             rows.collect()
         } else {
             let mut stmt = conn.prepare(
@@ -2053,11 +2316,10 @@ impl Db {
                         platform, version, fixed_in_version, target_version, build,
                         summary, view_state, sticky, due_date
                  FROM mantis_bug_table
-                 WHERE (view_state = 10 OR ?1 >= 55)
                  ORDER BY sticky DESC, last_updated DESC, id DESC
-                 LIMIT ?2 OFFSET ?3",
+                 LIMIT ?1 OFFSET ?2",
             )?;
-            let rows = stmt.query_map(params![user_access, limit, offset], Self::map_bug_row)?;
+            let rows = stmt.query_map(params![limit, offset], Self::map_bug_row)?;
             rows.collect()
         }
     }
@@ -2350,24 +2612,74 @@ impl Db {
             .map_err(|e| e.to_string())?;
         }
 
-        if let Some(note_text) = note {
+        let note_id_opt = if let Some(note_text) = note {
             let trimmed = note_text.trim();
             if !trimmed.is_empty() {
-                Self::insert_bugnote_inner(&conn, self, bug_id, user_id, trimmed, 10, 0)
-                    .map_err(|e| e.to_string())?;
+                Some(
+                    Self::insert_bugnote_inner(&conn, self, bug_id, user_id, trimmed, 10, 0, false)
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        self.notify_bug_event(
-            &conn,
-            bug_id,
-            user_id,
-            &format!("[Issue #{:07}] Status changed to {}", bug_id, new_status),
-            &format!(
-                "Issue #{:07} ({}) status changed from {} to {} (resolution {}).",
-                bug_id, bug.summary, bug.status, new_status, resolution
-            ),
-        );
+        let project_name = Self::helper_project_name(&conn, bug.project_id);
+        let actor = Self::helper_user_by_id(&conn, user_id);
+        let actor_name = actor
+            .as_ref()
+            .map(|u| u.username.as_str())
+            .unwrap_or("(Unknown)");
+
+        let (action_header, subject) = if bug.status != new_status {
+            let new_status_name = crate::views::bugs::status_label(new_status);
+            let action_header = match new_status {
+                80 => "The following issue has been RESOLVED.",
+                90 => "The following issue has been CLOSED.",
+                _ => "The following issue has been UPDATED.",
+            };
+            let subject = format!(
+                "[{} {:07}] Status changed to {}: {}",
+                project_name, bug_id, new_status_name, bug.summary
+            );
+            (action_header, subject)
+        } else if bug.resolution != resolution {
+            let res_name = BugResolution::from_i32(resolution)
+                .map(|r| r.as_str())
+                .unwrap_or("updated");
+            (
+                "The following issue has been UPDATED.",
+                format!(
+                    "[{} {:07}] Resolution changed to {}: {}",
+                    project_name, bug_id, res_name, bug.summary
+                ),
+            )
+        } else if note_id_opt.is_some() {
+            (
+                "The following issue has been UPDATED.",
+                format!("[{} {:07}] Updated: {}", project_name, bug_id, bug.summary),
+            )
+        } else {
+            // Nothing changed and no note added -> skip sending email
+            return Ok(());
+        };
+
+        let note_ctx = if let (Some(nid), Some(nt)) = (note_id_opt, note) {
+            let trimmed = nt.trim();
+            if !trimmed.is_empty() {
+                Some((nid, actor_name, now, trimmed))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, note_ctx) {
+            self.notify_bug_event(&conn, bug_id, &subject, &body);
+        }
 
         Ok(())
     }
@@ -2378,13 +2690,14 @@ impl Db {
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Bug {} not found", bug_id))?;
 
-        if handler_id > 0
-            && Self::query_user_by_id(&conn, handler_id)
+        let handler_user = if handler_id > 0 {
+            let u = Self::query_user_by_id(&conn, handler_id)
                 .map_err(|e| e.to_string())?
-                .is_none()
-        {
-            return Err(format!("User {} not found", handler_id));
-        }
+                .ok_or_else(|| format!("User {} not found", handler_id))?;
+            Some(u)
+        } else {
+            None
+        };
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2431,20 +2744,41 @@ impl Db {
             .map_err(|e| e.to_string())?;
         }
 
-        self.notify_bug_event(
-            &conn,
-            bug_id,
-            user_id,
-            &format!("[Issue #{:07}] Assigned: {}", bug_id, bug.summary),
-            &format!(
-                "Issue #{:07} ({}) assigned to user #{}.",
-                bug_id, bug.summary, handler_id
-            ),
-        );
+        let project_name = Self::helper_project_name(&conn, bug.project_id);
+
+        let (action_header, subject) = if let Some(ref h) = handler_user {
+            (
+                "The following issue has been ASSIGNED.",
+                format!(
+                    "[{} {:07}] Assigned to {}: {}",
+                    project_name, bug_id, h.username, bug.summary
+                ),
+            )
+        } else {
+            (
+                "The following issue has been UNASSIGNED.",
+                format!(
+                    "[{} {:07}] Unassigned: {}",
+                    project_name, bug_id, bug.summary
+                ),
+            )
+        };
+
+        let prev_handler_id = bug.handler_id;
+        let extra_recipients = if prev_handler_id > 0 && prev_handler_id != handler_id {
+            vec![prev_handler_id]
+        } else {
+            vec![]
+        };
+
+        if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, None) {
+            self.notify_bug_event_filtered(&conn, bug_id, 0, &extra_recipients, &subject, &body);
+        }
 
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_bugnote_inner(
         conn: &Connection,
         db: &Db,
@@ -2453,6 +2787,7 @@ impl Db {
         note: &str,
         view_state: i32,
         time_tracking: i32,
+        notify: bool,
     ) -> rusqlite::Result<i64> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2502,13 +2837,39 @@ impl Db {
             )?;
         }
 
-        db.notify_bug_event(
-            conn,
-            bug_id,
-            reporter_id,
-            &format!("[Issue #{:07}] Note added", bug_id),
-            &format!("Note added to Issue #{:07}:\n\n{}", bug_id, note),
-        );
+        if notify {
+            let bug_opt = Self::query_bug_by_id(conn, bug_id).ok().flatten();
+            let (project_id, bug_summary) = match bug_opt {
+                Some(ref b) => (b.project_id, b.summary.clone()),
+                None => (0, format!("Issue #{}", bug_id)),
+            };
+            let project_name = Self::helper_project_name(conn, project_id);
+
+            let actor = Self::helper_user_by_id(conn, reporter_id);
+            let actor_name = actor
+                .as_ref()
+                .map(|u| u.username.as_str())
+                .unwrap_or("(Unknown)");
+
+            let action_header = "A NOTE has been added to this issue.";
+            let note_ctx = Some((note_id, actor_name, now, note));
+            let body = db
+                .build_mantis_email_body(conn, bug_id, action_header, note_ctx)
+                .unwrap_or_default();
+
+            let min_access = if view_state == 50 { 55 } else { 0 };
+            db.notify_bug_event_filtered(
+                conn,
+                bug_id,
+                min_access,
+                &[],
+                &format!(
+                    "[{} {:07}] Note added by {}: {}",
+                    project_name, bug_id, actor_name, bug_summary
+                ),
+                &body,
+            );
+        }
 
         Ok(note_id)
     }
@@ -2552,6 +2913,7 @@ impl Db {
             trimmed,
             view_state,
             time_tracking,
+            true,
         )
         .map_err(|e| e.to_string())
     }
@@ -2641,8 +3003,7 @@ impl Db {
         rows.collect()
     }
 
-    pub fn list_bug_history(&self, bug_id: i64) -> rusqlite::Result<Vec<BugHistory>> {
-        let conn = self.conn();
+    pub fn query_bug_history(conn: &Connection, bug_id: i64) -> rusqlite::Result<Vec<BugHistory>> {
         let mut stmt = conn.prepare(
             "SELECT id, user_id, bug_id, date_modified, field_name, old_value, new_value, type
              FROM mantis_bug_history_table
@@ -2662,6 +3023,11 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn list_bug_history(&self, bug_id: i64) -> rusqlite::Result<Vec<BugHistory>> {
+        let conn = self.conn();
+        Self::query_bug_history(&conn, bug_id)
     }
 
     pub fn add_bug_relationship(
@@ -3703,24 +4069,7 @@ impl Db {
              WHERE bm.bug_id = ?1
              ORDER BY u.username ASC",
         )?;
-        let rows = stmt.query_map(params![bug_id], |row| {
-            Ok(User {
-                id: row.get(0)?,
-                username: row.get(1)?,
-                realname: row.get(2)?,
-                email: row.get(3)?,
-                password: row.get(4)?,
-                enabled: row.get(5)?,
-                protected: row.get(6)?,
-                access_level: row.get(7)?,
-                login_count: row.get(8)?,
-                lost_password_request_count: row.get(9)?,
-                failed_login_count: row.get(10)?,
-                cookie_string: row.get(11)?,
-                last_visit: row.get(12)?,
-                date_created: row.get(13)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![bug_id], Self::map_user_row)?;
         rows.collect()
     }
 
@@ -3731,12 +4080,12 @@ impl Db {
                 if eff < 10 {
                     return Ok(Vec::new());
                 }
-                self.list_bugs(pid, eff, 0, 50_000)?
+                self.list_bugs(pid, 0, 50_000)?
             } else {
-                self.list_bugs(0, 90, 0, 50_000)?
+                self.list_bugs(0, 0, 50_000)?
             }
         } else {
-            self.list_bugs(0, 90, 0, 50_000)?
+            self.list_bugs(0, 0, 50_000)?
         };
 
         let search_kw = filter
@@ -3748,7 +4097,7 @@ impl Db {
         let mut results = Vec::new();
         for b in all_candidates {
             let eff = self.effective_access_level(user, b.project_id)?;
-            if eff < 10 || (b.view_state == 50 && eff < 55) {
+            if !Self::can_view_bug(user.id, eff, &b) {
                 continue;
             }
             if let Some(st) = filter.status {
@@ -3843,6 +4192,431 @@ impl Db {
 
     // ─── Sub-project 4: Email Queue, Time Tracking & Project News ────────────
 
+    fn format_user_display(u: Option<&User>) -> String {
+        match u {
+            Some(user) => {
+                let r = user.realname.trim();
+                if !r.is_empty() && r != user.username {
+                    format!("{} ({})", user.username, r)
+                } else {
+                    user.username.clone()
+                }
+            }
+            None => "(Unassigned)".to_string(),
+        }
+    }
+
+    fn helper_user_by_id(conn: &Connection, id: i64) -> Option<User> {
+        if id <= 0 {
+            return None;
+        }
+        Self::query_user_by_id(conn, id).ok().flatten()
+    }
+
+    fn helper_project_name(conn: &Connection, id: i64) -> String {
+        match Self::query_project_by_id(conn, id) {
+            Ok(Some(p)) => p.name,
+            _ => format!("Project #{}", id),
+        }
+    }
+
+    fn helper_category_name(conn: &Connection, category_id: i64) -> String {
+        if category_id <= 0 {
+            return "General".to_string();
+        }
+        conn.query_row(
+            "SELECT name FROM mantis_category_table WHERE id = ?1",
+            params![category_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "General".to_string())
+    }
+
+    fn format_transition<F>(old: &str, new: &str, label: F) -> String
+    where
+        F: Fn(i32) -> &'static str,
+    {
+        let old_name = old.parse::<i32>().ok().map(&label).unwrap_or(old);
+        let new_name = new.parse::<i32>().ok().map(&label).unwrap_or(new);
+        format!("{} => {}", old_name, new_name)
+    }
+
+    fn format_history_field_change(
+        conn: &Connection,
+        h: &BugHistory,
+        user_cache: &mut HashMap<i64, String>,
+        cat_cache: &HashMap<i64, String>,
+    ) -> (String, String) {
+        if h.type_ == 1 && (h.field_name.is_empty() || h.field_name == "new_bug") {
+            return ("New Issue".to_string(), String::new());
+        }
+
+        match h.field_name.as_str() {
+            "status" => (
+                "Status".to_string(),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::status_label,
+                ),
+            ),
+            "resolution" => (
+                "Resolution".to_string(),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::resolution_label,
+                ),
+            ),
+            "priority" => (
+                "Priority".to_string(),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::priority_label,
+                ),
+            ),
+            "severity" => (
+                "Severity".to_string(),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::severity_label,
+                ),
+            ),
+            "reproducibility" => (
+                "Reproducibility".to_string(),
+                Self::format_transition(
+                    &h.old_value,
+                    &h.new_value,
+                    crate::views::bugs::reproducibility_label,
+                ),
+            ),
+            "handler_id" => {
+                let old_id = h.old_value.parse::<i64>().unwrap_or(0);
+                let new_id = h.new_value.parse::<i64>().unwrap_or(0);
+                let old_name = if old_id > 0 {
+                    user_cache
+                        .entry(old_id)
+                        .or_insert_with(|| {
+                            Self::helper_user_by_id(conn, old_id)
+                                .map(|u| u.username)
+                                .unwrap_or_else(|| format!("user#{}", old_id))
+                        })
+                        .clone()
+                } else {
+                    String::new()
+                };
+                let new_name = if new_id > 0 {
+                    user_cache
+                        .entry(new_id)
+                        .or_insert_with(|| {
+                            Self::helper_user_by_id(conn, new_id)
+                                .map(|u| u.username)
+                                .unwrap_or_else(|| format!("user#{}", new_id))
+                        })
+                        .clone()
+                } else {
+                    String::new()
+                };
+
+                let change = if old_name.is_empty() && !new_name.is_empty() {
+                    format!("=> {}", new_name)
+                } else if !old_name.is_empty() && new_name.is_empty() {
+                    format!("{} =>", old_name)
+                } else {
+                    format!("{} => {}", old_name, new_name)
+                };
+                ("Assigned To".to_string(), change)
+            }
+            "file_added" => (format!("File Added: {}", h.new_value), String::new()),
+            "file_deleted" => (format!("File Deleted: {}", h.old_value), String::new()),
+            "bugnote_added" => {
+                let note_id = h.new_value.parse::<i64>().unwrap_or(0);
+                (format!("Note Added: {:07}", note_id), String::new())
+            }
+            "category_id" => {
+                let old_id = h.old_value.parse::<i64>().unwrap_or(0);
+                let new_id = h.new_value.parse::<i64>().unwrap_or(0);
+                let old_cat = cat_cache
+                    .get(&old_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("General");
+                let new_cat = cat_cache
+                    .get(&new_id)
+                    .map(|s| s.as_str())
+                    .unwrap_or("General");
+                (
+                    "Category".to_string(),
+                    format!("{} => {}", old_cat, new_cat),
+                )
+            }
+            _ => {
+                let field = match h.field_name.as_str() {
+                    "summary" => "Summary",
+                    "view_state" => "View Status",
+                    "target_version" => "Target Version",
+                    "fixed_in_version" => "Fixed in Version",
+                    "version" => "Product Version",
+                    _ => &h.field_name,
+                };
+                (
+                    field.to_string(),
+                    format!("{} => {}", h.old_value, h.new_value),
+                )
+            }
+        }
+    }
+
+    pub fn query_bug_history_for_email(
+        conn: &Connection,
+        bug_id: i64,
+        max_rows: usize,
+    ) -> rusqlite::Result<Vec<(BugHistory, String)>> {
+        // Query private note IDs for this bug so they are excluded from the email history table
+        let mut private_notes = HashSet::new();
+        if let Ok(mut note_stmt) = conn
+            .prepare("SELECT id FROM mantis_bugnote_table WHERE bug_id = ?1 AND view_state = 50")
+        {
+            if let Ok(note_rows) = note_stmt.query_map(params![bug_id], |row| row.get::<_, i64>(0))
+            {
+                for nid in note_rows.flatten() {
+                    private_notes.insert(nid);
+                }
+            }
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT h.id, h.user_id, h.bug_id, h.date_modified, h.field_name, h.old_value, h.new_value, h.type,
+                    COALESCE(u.username, '')
+             FROM mantis_bug_history_table h
+             LEFT JOIN mantis_user_table u ON h.user_id = u.id
+             WHERE h.bug_id = ?1
+             ORDER BY h.date_modified DESC, h.id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![bug_id, max_rows as i64], |row| {
+            Ok((
+                BugHistory {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    bug_id: row.get(2)?,
+                    date_modified: row.get(3)?,
+                    field_name: row.get(4)?,
+                    old_value: row.get(5)?,
+                    new_value: row.get(6)?,
+                    type_: row.get(7)?,
+                },
+                row.get::<_, String>(8)?,
+            ))
+        })?;
+
+        let mut result = Vec::new();
+        for item in rows.flatten() {
+            // Hide private note additions to prevent leaking private note IDs/activity
+            if item.0.field_name == "bugnote_added" {
+                if let Ok(nid) = item.0.new_value.parse::<i64>() {
+                    if private_notes.contains(&nid) {
+                        continue;
+                    }
+                }
+            }
+            result.push(item);
+        }
+        result.reverse();
+        Ok(result)
+    }
+
+    pub fn build_mantis_email_body(
+        &self,
+        conn: &Connection,
+        bug_id: i64,
+        action_header: &str,
+        current_note: Option<(i64, &str, i64, &str)>,
+    ) -> rusqlite::Result<String> {
+        let bug = match Self::query_bug_by_id(conn, bug_id)? {
+            Some(b) => b,
+            None => return Ok(String::new()),
+        };
+
+        let (description, steps_to_reproduce, additional_information) = conn
+            .query_row(
+                "SELECT description, steps_to_reproduce, additional_information
+                 FROM mantis_bug_text_table
+                 WHERE id = ?1",
+                params![bug_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap_or_else(|_| (String::new(), String::new(), String::new()));
+
+        let project_name = Self::helper_project_name(conn, bug.project_id);
+        let reporter = Self::helper_user_by_id(conn, bug.reporter_id);
+        let reporter_display = Self::format_user_display(reporter.as_ref());
+
+        let handler = if bug.handler_id > 0 {
+            Self::helper_user_by_id(conn, bug.handler_id)
+        } else {
+            None
+        };
+        let handler_display = handler
+            .as_ref()
+            .map(|u| Self::format_user_display(Some(u)))
+            .unwrap_or_default();
+
+        let category_name = Self::helper_category_name(conn, bug.category_id);
+        let repro_str = BugReproducibility::from_i32(bug.reproducibility)
+            .map(|r| r.as_str())
+            .unwrap_or("always");
+        let sev_str = BugSeverity::from_i32(bug.severity)
+            .map(|s| s.as_str())
+            .unwrap_or("minor");
+        let prio_str = BugPriority::from_i32(bug.priority)
+            .map(|p| p.as_str())
+            .unwrap_or("normal");
+        let status_str = BugStatus::from_i32(bug.status)
+            .map(|s| s.as_str())
+            .unwrap_or("new");
+        let res_str = BugResolution::from_i32(bug.resolution)
+            .map(|r| r.as_str())
+            .unwrap_or("open");
+
+        let date_submitted_str = crate::views::format_timestamp(bug.date_submitted);
+        let last_updated_str = crate::views::format_timestamp(bug.last_updated);
+
+        let bug_url = format!(
+            "{}/view_bug_page/{}",
+            self.base_url.trim_end_matches('/'),
+            bug.id
+        );
+
+        const SEP: &str = "======================================================================";
+
+        let mut body = String::new();
+        body.push_str(action_header);
+        body.push('\n');
+        body.push_str(SEP);
+        body.push('\n');
+        body.push_str(&bug_url);
+        body.push('\n');
+        body.push_str(SEP);
+        body.push('\n');
+
+        body.push_str(&format!("{:<28}{}\n", "Reported By:", reporter_display));
+        body.push_str(&format!("{:<28}{}\n", "Assigned To:", handler_display));
+        body.push_str(SEP);
+        body.push('\n');
+
+        body.push_str(&format!("{:<28}{}\n", "Project:", project_name));
+        body.push_str(&format!("{:<28}{}\n", "Issue ID:", bug.id));
+        body.push_str(&format!("{:<28}{}\n", "Category:", category_name));
+        body.push_str(&format!("{:<28}{}\n", "Reproducibility:", repro_str));
+        body.push_str(&format!("{:<28}{}\n", "Severity:", sev_str));
+        body.push_str(&format!("{:<28}{}\n", "Priority:", prio_str));
+        body.push_str(&format!("{:<28}{}\n", "Status:", status_str));
+        if bug.resolution > 0 {
+            body.push_str(&format!("{:<28}{}\n", "Resolution:", res_str));
+        }
+        body.push_str(SEP);
+        body.push('\n');
+
+        body.push_str(&format!(
+            "{:<28}{}\n",
+            "Date Submitted:", date_submitted_str
+        ));
+        body.push_str(&format!("{:<28}{}\n", "Last Modified:", last_updated_str));
+        body.push_str(SEP);
+        body.push('\n');
+
+        body.push_str(&format!("{:<28}{}\n", "Summary:", bug.summary));
+        body.push_str("Description:\n");
+        body.push_str(&description);
+        body.push('\n');
+
+        if !steps_to_reproduce.trim().is_empty() {
+            body.push_str("\nSteps to Reproduce:\n");
+            body.push_str(&steps_to_reproduce);
+            body.push('\n');
+        }
+
+        if !additional_information.trim().is_empty() {
+            body.push_str("\nAdditional Information:\n");
+            body.push_str(&additional_information);
+            body.push('\n');
+        }
+
+        if let Some((note_id, author_name, note_date, note_text)) = current_note {
+            let note_sep = "----------------------------------------------------------------------";
+            let date_str = crate::views::format_timestamp(note_date);
+            body.push_str(SEP);
+            body.push_str("\n\n");
+            body.push_str(note_sep);
+            body.push('\n');
+            body.push_str(&format!(" ({:07}) {} {}\n", note_id, author_name, date_str));
+            body.push_str(note_sep);
+            body.push('\n');
+            body.push_str(note_text);
+            body.push('\n');
+        }
+
+        let history = Self::query_bug_history_for_email(conn, bug_id, 100).unwrap_or_default();
+        if !history.is_empty() {
+            // Pre-fetch categories for the project to avoid per-row queries
+            let mut cat_cache = HashMap::new();
+            if let Ok(mut cat_stmt) = conn
+                .prepare("SELECT id, name FROM mantis_category_table WHERE project_id IN (0, ?1)")
+            {
+                if let Ok(cat_rows) = cat_stmt.query_map(params![bug.project_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                }) {
+                    for (cid, cname) in cat_rows.flatten() {
+                        cat_cache.insert(cid, cname);
+                    }
+                }
+            }
+
+            let mut user_cache = HashMap::new();
+
+            body.push_str(SEP);
+            body.push_str("\nIssue History\n");
+            body.push_str(&format!(
+                "{:<17}{:<15}{:<25}{}\n",
+                "Date Modified", "Username", "Field", "Change"
+            ));
+            body.push_str(SEP);
+            body.push('\n');
+
+            for (h, username) in history {
+                let uname = if !username.is_empty() {
+                    &username
+                } else {
+                    "(Unknown)"
+                };
+                let date_str = crate::views::format_timestamp(h.date_modified);
+
+                let (field, change) =
+                    Self::format_history_field_change(conn, &h, &mut user_cache, &cat_cache);
+                if change.is_empty() {
+                    body.push_str(&format!("{:<17}{:<15}{}\n", date_str, uname, field));
+                } else {
+                    body.push_str(&format!(
+                        "{:<17}{:<15}{:<25}{}\n",
+                        date_str, uname, field, change
+                    ));
+                }
+            }
+            body.push_str(SEP);
+            body.push('\n');
+        }
+
+        Ok(body)
+    }
+
     pub fn enqueue_email(
         &self,
         conn: &Connection,
@@ -3854,6 +4628,10 @@ impl Db {
         if trimmed.is_empty() {
             return Ok(0);
         }
+        let clean_subject: String = subject
+            .chars()
+            .filter(|&c| c != '\r' && c != '\n')
+            .collect();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3861,7 +4639,7 @@ impl Db {
         conn.execute(
             "INSERT INTO mantis_email_table (email, subject, metadata, body, submitted)
              VALUES (?1, ?2, '', ?3, ?4)",
-            params![trimmed, subject, body, now],
+            params![trimmed, clean_subject, body, now],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -3870,7 +4648,18 @@ impl Db {
         &self,
         conn: &Connection,
         bug_id: i64,
-        _actor_id: i64,
+        event_subject: &str,
+        event_body: &str,
+    ) {
+        self.notify_bug_event_filtered(conn, bug_id, 0, &[], event_subject, event_body);
+    }
+
+    pub fn notify_bug_event_filtered(
+        &self,
+        conn: &Connection,
+        bug_id: i64,
+        min_access: i32,
+        extra_recipients: &[i64],
         event_subject: &str,
         event_body: &str,
     ) {
@@ -3879,31 +4668,61 @@ impl Db {
             _ => return,
         };
 
+        let needs_access_check = bug.view_state == 50 || min_access > 10;
+        let can_receive = |u: &User| -> bool {
+            if u.enabled == 0 || u.email.trim().is_empty() {
+                return false;
+            }
+            if needs_access_check {
+                let eff_access =
+                    Self::query_effective_access_level(conn, u, bug.project_id).unwrap_or(0);
+                if !Self::can_view_bug(u.id, eff_access, &bug) {
+                    return false;
+                }
+                if min_access > 10 && eff_access < min_access {
+                    return false;
+                }
+            }
+            true
+        };
+
         let mut recipients = HashSet::new();
         if let Ok(Some(reporter)) = Self::query_user_by_id(conn, bug.reporter_id) {
-            if reporter.enabled != 0 && !reporter.email.trim().is_empty() {
+            if can_receive(&reporter) {
                 recipients.insert(reporter.email.trim().to_string());
             }
         }
         if bug.handler_id > 0 {
             if let Ok(Some(handler)) = Self::query_user_by_id(conn, bug.handler_id) {
-                if handler.enabled != 0 && !handler.email.trim().is_empty() {
+                if can_receive(&handler) {
                     recipients.insert(handler.email.trim().to_string());
                 }
             }
         }
 
+        // Include any extra recipients (such as previous handler during reassignment)
+        for &uid in extra_recipients {
+            if uid > 0 {
+                if let Ok(Some(extra_u)) = Self::query_user_by_id(conn, uid) {
+                    if can_receive(&extra_u) {
+                        recipients.insert(extra_u.email.trim().to_string());
+                    }
+                }
+            }
+        }
+
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT u.email
+            "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected,
+                    u.access_level, u.login_count, u.lost_password_request_count, u.failed_login_count,
+                    u.cookie_string, u.last_visit, u.date_created
              FROM mantis_bug_monitor_table bm
              JOIN mantis_user_table u ON bm.user_id = u.id
              WHERE bm.bug_id = ?1 AND u.enabled != 0",
         ) {
-            if let Ok(rows) = stmt.query_map(params![bug_id], |row| row.get::<_, String>(0)) {
-                for email in rows.flatten() {
-                    let trimmed = email.trim();
-                    if !trimmed.is_empty() {
-                        recipients.insert(trimmed.to_string());
+            if let Ok(rows) = stmt.query_map(params![bug_id], Self::map_user_row) {
+                for u in rows.flatten() {
+                    if can_receive(&u) {
+                        recipients.insert(u.email.trim().to_string());
                     }
                 }
             }
@@ -4145,6 +4964,31 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_all_api_tokens(&self) -> rusqlite::Result<Vec<(ApiToken, String, String)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.user_id, t.name, t.hash, t.date_created, t.date_used,
+                    COALESCE(u.username, ''), COALESCE(u.realname, '')
+             FROM mantis_api_token_table t
+             LEFT JOIN mantis_user_table u ON t.user_id = u.id
+             ORDER BY t.date_created DESC, t.id DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let token = ApiToken {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                name: row.get(2)?,
+                hash: row.get(3)?,
+                date_created: row.get(4)?,
+                date_used: row.get(5)?,
+            };
+            let username: String = row.get(6)?;
+            let realname: String = row.get(7)?;
+            Ok((token, username, realname))
+        })?;
+        rows.collect()
+    }
+
     pub fn revoke_api_token(&self, id: i64, user_id: i64) -> rusqlite::Result<bool> {
         let conn = self.conn();
         let rows = conn.execute(
@@ -4154,7 +4998,23 @@ impl Db {
         Ok(rows > 0)
     }
 
+    pub fn revoke_api_token_by_id(&self, id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let rows = conn.execute(
+            "DELETE FROM mantis_api_token_table WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(rows > 0)
+    }
+
     pub fn authenticate_api_token(&self, raw_token: &str) -> rusqlite::Result<Option<User>> {
+        Ok(self.authenticate_api_token_full(raw_token)?.map(|(_, u)| u))
+    }
+
+    pub fn authenticate_api_token_full(
+        &self,
+        raw_token: &str,
+    ) -> rusqlite::Result<Option<(i64, User)>> {
         let trimmed = raw_token.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -4190,7 +5050,7 @@ impl Db {
             params![now, token_id],
         );
 
-        Ok(Some(user))
+        Ok(Some((token_id, user)))
     }
 
     pub fn list_plugins(&self) -> rusqlite::Result<Vec<PluginItem>> {
@@ -4253,6 +5113,7 @@ impl Db {
         jira_key: &str,
         jira_url: &str,
         issue_type: &str,
+        jira_status: &str,
         user_id: i64,
     ) -> rusqlite::Result<i64> {
         let conn = self.conn();
@@ -4261,9 +5122,9 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
         conn.execute(
-            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
         )?;
         Ok(conn.last_insert_rowid())
     }
@@ -4271,8 +5132,8 @@ impl Db {
     pub fn get_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<Option<JiraLink>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, bug_id, jira_key, jira_url, issue_type, created_by, created_at
-             FROM mantis_jira_links_table WHERE bug_id = ?1",
+            "SELECT id, bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at
+             FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
         )?;
         let mut rows = stmt.query(params![bug_id])?;
         if let Some(row) = rows.next()? {
@@ -4282,12 +5143,40 @@ impl Db {
                 jira_key: row.get(2)?,
                 jira_url: row.get(3)?,
                 issue_type: row.get(4)?,
-                created_by: row.get(5)?,
-                created_at: row.get(6)?,
+                jira_status: row.get(5)?,
+                created_by: row.get(6)?,
+                created_at: row.get(7)?,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    pub fn claim_jira_link_pending(&self, bug_id: i64, user_id: i64) -> rusqlite::Result<bool> {
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let affected = conn.execute(
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, '__PENDING__', '', '', '', ?2, ?3)
+             ON CONFLICT(bug_id) DO UPDATE SET
+                 created_by = excluded.created_by,
+                 created_at = excluded.created_at
+             WHERE mantis_jira_links_table.jira_key = '__PENDING__' AND (excluded.created_at - mantis_jira_links_table.created_at) > 60",
+            params![bug_id, user_id, now],
+        )?;
+        Ok(affected > 0)
+    }
+
+    pub fn release_jira_link_pending(&self, bug_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key = '__PENDING__'",
+            params![bug_id],
+        )?;
+        Ok(())
     }
 
     pub fn delete_jira_link_by_bug_id(&self, bug_id: i64) -> rusqlite::Result<bool> {
@@ -4299,14 +5188,33 @@ impl Db {
         Ok(affected > 0)
     }
 
-    pub fn record_jira_push_success(
+    fn resolve_jira_status_internal(conn: &rusqlite::Connection, jira_status: &str) -> i32 {
+        let trimmed = jira_status.trim();
+        if trimmed.is_empty() {
+            return 0;
+        }
+        let mapped: Option<i32> = conn
+            .query_row(
+                "SELECT mantis_status FROM mantis_jira_status_mapping_table WHERE jira_status = ?1",
+                params![trimmed],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        mapped.unwrap_or_else(|| crate::jira::map_jira_status_to_mantis(trimmed))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_jira_sync_success(
         &self,
         bug_id: i64,
         jira_key: &str,
         jira_url: &str,
         issue_type: &str,
+        jira_status: &str,
         user_id: i64,
         username: &str,
+        is_new_link: bool,
     ) -> Result<(), String> {
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -4316,19 +5224,142 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        // 1. Insert jira link
+        // Query existing link to track changes and previous status
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT jira_key, jira_status FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
+                params![bug_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let (existing_key, existing_status) = match existing {
+            Some((k, s)) => (k, s),
+            None => (String::new(), String::new()),
+        };
+
+        // 1. Insert or update jira link via UPSERT to prevent concurrency duplicate inserts
         tx.execute(
-            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, created_by, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![bug_id, jira_key, jira_url, issue_type, user_id, now],
+            "INSERT INTO mantis_jira_links_table (bug_id, jira_key, jira_url, issue_type, jira_status, created_by, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(bug_id) DO UPDATE SET
+                 jira_key = excluded.jira_key,
+                 jira_url = excluded.jira_url,
+                 issue_type = excluded.issue_type,
+                 jira_status = excluded.jira_status,
+                 created_by = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_by ELSE mantis_jira_links_table.created_by END,
+                 created_at = CASE WHEN mantis_jira_links_table.jira_key = '__PENDING__' THEN excluded.created_at ELSE mantis_jira_links_table.created_at END",
+            params![bug_id, jira_key, jira_url, issue_type, jira_status, user_id, now],
         )
         .map_err(|e| e.to_string())?;
 
-        // 2. Insert bugnote text & bugnote
-        let note_text = format!(
-            "Created Jira issue [{}]({}) by {}.",
-            jira_key, jira_url, username
-        );
+        // 2. Map status to mantis and update bug if status changes
+        let old_status: i32 = tx
+            .query_row(
+                "SELECT status FROM mantis_bug_table WHERE id = ?1",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let trimmed_jira_status = jira_status.trim();
+        let mut status_changed = false;
+        if !trimmed_jira_status.is_empty() {
+            let mapped_status = Self::resolve_jira_status_internal(&tx, trimmed_jira_status);
+            // Prevent reopening/downgrading resolved or closed bugs (status >= 80) if mapped status is lower
+            let is_resolved_or_closed_downgrade = old_status >= 80 && mapped_status < old_status;
+            if !is_resolved_or_closed_downgrade && old_status != mapped_status {
+                tx.execute(
+                    "UPDATE mantis_bug_table SET status = ?1, last_updated = ?2 WHERE id = ?3",
+                    params![mapped_status, now, bug_id],
+                )
+                .map_err(|e| e.to_string())?;
+
+                tx.execute(
+                    "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
+                     VALUES (?1, ?2, ?3, 'status', ?4, ?5, 0)",
+                    params![user_id, bug_id, now, old_status.to_string(), mapped_status.to_string()],
+                )
+                .map_err(|e| e.to_string())?;
+
+                status_changed = true;
+            }
+        }
+
+        // 3. Insert bugnote ONLY if something changed or it's a new link
+        let key_changed = existing_key != jira_key;
+        let jira_status_changed = existing_status != jira_status;
+        let should_add_note = is_new_link || status_changed || key_changed || jira_status_changed;
+
+        if should_add_note {
+            let note_text = if is_new_link {
+                format!(
+                    "Linked to Jira issue [{}]({}) (Status: {}) by {}.",
+                    jira_key, jira_url, jira_status, username
+                )
+            } else {
+                format!(
+                    "Synced with Jira issue [{}]({}) (Status: {}) by {}.",
+                    jira_key, jira_url, jira_status, username
+                )
+            };
+
+            tx.execute(
+                "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
+                params![note_text],
+            )
+            .map_err(|e| e.to_string())?;
+            let text_id = tx.last_insert_rowid();
+
+            tx.execute(
+                "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+                 VALUES (?1, ?2, ?3, 10, ?4, ?4, 0, '', 0)",
+                params![bug_id, user_id, text_id, now],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn delete_jira_link_with_note(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        username: &str,
+    ) -> Result<bool, String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let existing_key: Option<String> = tx
+            .query_row(
+                "SELECT jira_key FROM mantis_jira_links_table WHERE bug_id = ?1 AND jira_key != '__PENDING__'",
+                params![bug_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let key_str = match existing_key {
+            Some(k) => k,
+            None => return Ok(false),
+        };
+
+        let affected = tx
+            .execute(
+                "DELETE FROM mantis_jira_links_table WHERE bug_id = ?1",
+                params![bug_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let note_text = format!("Unlinked Jira issue {} by {}.", key_str, username);
         tx.execute(
             "INSERT INTO mantis_bugnote_text_table (note) VALUES (?1)",
             params![note_text],
@@ -4343,32 +5374,18 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
 
-        // 3. Update bug status to 30 (acknowledged) if currently 10
-        let current_status: i32 = tx
-            .query_row(
-                "SELECT status FROM mantis_bug_table WHERE id = ?1",
-                params![bug_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-
-        if current_status == 10 {
-            tx.execute(
-                "UPDATE mantis_bug_table SET status = 30, last_updated = ?1 WHERE id = ?2",
-                params![now, bug_id],
-            )
-            .map_err(|e| e.to_string())?;
-
-            tx.execute(
-                "INSERT INTO mantis_bug_history_table (user_id, bug_id, date_modified, field_name, old_value, new_value, type)
-                 VALUES (?1, ?2, ?3, 'status', '10', '30', 0)",
-                params![user_id, bug_id, now],
-            )
-            .map_err(|e| e.to_string())?;
-        }
-
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(())
+        Ok(affected > 0)
+    }
+
+    pub fn resolve_jira_api_token(env_token: Option<&str>, db_token: Option<String>) -> String {
+        if let Some(tok) = env_token {
+            let trimmed = tok.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        db_token.unwrap_or_default()
     }
 
     pub fn get_jira_config(&self, project_id: i64) -> rusqlite::Result<JiraResolvedConfig> {
@@ -4378,7 +5395,9 @@ impl Db {
         let enabled = enabled_val == "1" || enabled_val.eq_ignore_ascii_case("true");
         let base_url = self.get_config("jira_base_url", 0, 0)?.unwrap_or_default();
         let email = self.get_config("jira_email", 0, 0)?.unwrap_or_default();
-        let api_token = self.get_config("jira_api_token", 0, 0)?.unwrap_or_default();
+        let env_token = std::env::var("MANTIS_JIRA_API_TOKEN").ok();
+        let db_token = self.get_config("jira_api_token", 0, 0)?;
+        let api_token = Self::resolve_jira_api_token(env_token.as_deref(), db_token);
         let default_issue_type = self
             .get_config("jira_default_issue_type", 0, 0)?
             .unwrap_or_else(|| "Bug".to_string());
@@ -4434,6 +5453,146 @@ impl Db {
         jira_project_key: &str,
     ) -> rusqlite::Result<()> {
         self.set_config("jira_project_key", project_id, 0, jira_project_key)
+    }
+
+    pub fn save_jira_epics_cache(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+    ) -> rusqlite::Result<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        self.save_jira_epics_cache_with_ttl(project_key, epics, now, now + 86400)
+    }
+
+    pub fn save_jira_epics_cache_with_timestamp(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+        updated_at: i64,
+    ) -> rusqlite::Result<()> {
+        self.save_jira_epics_cache_with_ttl(project_key, epics, updated_at, updated_at + 86400)
+    }
+
+    pub fn save_jira_epics_cache_with_ttl(
+        &self,
+        project_key: &str,
+        epics: &[crate::models::JiraEpic],
+        updated_at: i64,
+        expires_at: i64,
+    ) -> rusqlite::Result<()> {
+        let epics_json = serde_json::to_string(epics).unwrap_or_else(|_| "[]".to_string());
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_jira_epics_cache_table (project_key, epics_json, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_key) DO UPDATE SET epics_json = excluded.epics_json, updated_at = excluded.updated_at, expires_at = excluded.expires_at",
+            params![project_key, epics_json, updated_at, expires_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_cached_jira_epics(
+        &self,
+        project_key: &str,
+        max_age_secs: i64,
+    ) -> rusqlite::Result<Option<Vec<crate::models::JiraEpic>>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let conn = self.conn();
+        let res: Option<(String, i64, i64)> = conn
+            .query_row(
+                "SELECT epics_json, updated_at, expires_at FROM mantis_jira_epics_cache_table WHERE project_key = ?1",
+                params![project_key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        match res {
+            Some((json, updated_at, expires_at)) => {
+                let is_fresh = if expires_at > 0 {
+                    now < expires_at
+                } else {
+                    now.saturating_sub(updated_at) <= max_age_secs
+                };
+                if is_fresh || max_age_secs == i64::MAX {
+                    let epics: Vec<crate::models::JiraEpic> =
+                        serde_json::from_str(&json).unwrap_or_default();
+                    Ok(Some(epics))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn list_cached_jira_epics_summary(&self) -> rusqlite::Result<Vec<(String, usize, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT project_key, epics_json, updated_at FROM mantis_jira_epics_cache_table ORDER BY project_key ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let key: String = row.get(0)?;
+            let json: String = row.get(1)?;
+            let updated_at: i64 = row.get(2)?;
+            let count = serde_json::from_str::<Vec<crate::models::JiraEpic>>(&json)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            Ok((key, count, updated_at))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_jira_status_mappings(&self) -> rusqlite::Result<Vec<(String, i32)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT jira_status, mantis_status FROM mantis_jira_status_mapping_table ORDER BY mantis_status ASC, jira_status ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let j: String = row.get(0)?;
+            let m: i32 = row.get(1)?;
+            Ok((j, m))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn save_jira_status_mappings(&self, mappings: &[(String, i32)]) -> rusqlite::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM mantis_jira_status_mapping_table", [])?;
+        let mut seen = std::collections::HashSet::new();
+        for (j_status, m_status) in mappings {
+            let trimmed = j_status.trim();
+            if !trimmed.is_empty() {
+                let lower = trimmed.to_lowercase();
+                if seen.insert(lower) {
+                    tx.execute(
+                        "INSERT INTO mantis_jira_status_mapping_table (jira_status, mantis_status) VALUES (?1, ?2)",
+                        params![trimmed, m_status],
+                    )?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn resolve_jira_status_to_mantis(&self, jira_status: &str) -> i32 {
+        Self::resolve_jira_status_internal(&self.conn(), jira_status)
     }
 }
 

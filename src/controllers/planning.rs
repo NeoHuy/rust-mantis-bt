@@ -170,9 +170,34 @@ pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         return forbidden(&ctx, "Developer access required to view Time Tracking.");
     }
 
-    let entries = db
+    let raw_entries = db
         .list_time_tracking(ctx.active_project_id)
         .unwrap_or_default();
+    let entries: Vec<_> = if ctx.active_project_id > 0 {
+        raw_entries
+    } else {
+        let mut bug_proj_cache: std::collections::HashMap<i64, Option<i64>> =
+            std::collections::HashMap::new();
+        let mut proj_access_cache: std::collections::HashMap<i64, i32> =
+            std::collections::HashMap::new();
+        raw_entries
+            .into_iter()
+            .filter(|e| {
+                let project_id = *bug_proj_cache
+                    .entry(e.bug_id)
+                    .or_insert_with(|| db.get_bug(e.bug_id).ok().flatten().map(|b| b.project_id));
+                match project_id {
+                    Some(pid) => {
+                        let p_eff = *proj_access_cache.entry(pid).or_insert_with(|| {
+                            db.effective_access_level(&ctx.user, pid).unwrap_or(0)
+                        });
+                        p_eff >= 55
+                    }
+                    None => false,
+                }
+            })
+            .collect()
+    };
 
     let mut total_mins = 0i32;
     let mut by_user: BTreeMap<String, i32> = BTreeMap::new();
@@ -197,7 +222,24 @@ pub async fn news_page(
         ctx.user.access_level
     };
 
-    let items = db.list_news(ctx.active_project_id, eff).unwrap_or_default();
+    let mut proj_access_cache: std::collections::HashMap<i64, i32> =
+        std::collections::HashMap::new();
+    let items: Vec<_> = db
+        .list_news(ctx.active_project_id, eff)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| {
+            if n.project_id == 0 {
+                n.view_state == 10 || ctx.user.access_level >= 55
+            } else {
+                let p_eff = *proj_access_cache.entry(n.project_id).or_insert_with(|| {
+                    db.effective_access_level(&ctx.user, n.project_id)
+                        .unwrap_or(0)
+                });
+                p_eff >= 10 && (n.view_state == 10 || p_eff >= 55)
+            }
+        })
+        .collect();
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
         .unwrap_or_default()

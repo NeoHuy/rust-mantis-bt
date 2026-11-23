@@ -108,6 +108,9 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
 }
 
 pub fn router() -> Router<Db> {
+    let upload_limit = max_file_size()
+        .saturating_add(2 * 1024 * 1024)
+        .max(10 * 1024 * 1024);
     Router::new()
         .route("/view_all_bug_page", get(view_all_bug_page))
         .route("/view_bug_page/:id", get(view_bug_page))
@@ -127,7 +130,7 @@ pub fn router() -> Router<Db> {
         )
         .route(
             "/bug_file_add/:bug_id",
-            post(bug_file_add).layer(DefaultBodyLimit::disable()),
+            post(bug_file_add).layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/file/bug/:id/:filename", get(bug_file_download))
         .route("/bug_file_delete/:id", post(bug_file_delete))
@@ -576,7 +579,7 @@ pub async fn view_bug_page(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(ctx.user.id, eff, bug) {
         return forbidden(&ctx, "You do not have permission to view this issue.");
     }
 
@@ -693,9 +696,9 @@ pub async fn view_bug_page(
         }
 
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:4px; align-items:center;">
-                <select name="new_status" style="width:auto;">{}</select>
-                <select name="resolution" style="width:auto;">{}</select>
+            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
+                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
+                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
                 <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
                 <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
             </form>"#,
@@ -748,18 +751,48 @@ pub async fn view_bug_page(
                 project_key: String::new(),
             });
 
-    if jira_link.is_none() && jira_conf.enabled && eff >= 55 {
-        actions_html.push_str(&format!(
-            r#"<form method="POST" action="/view_bug_page/{}/jira_push" style="display:inline-flex; gap:4px; align-items:center;">
-                <select name="issue_type" style="width:auto;">
-                    <option value="Bug">Jira Bug</option>
-                    <option value="Task">Jira Task</option>
-                </select>
-                <button type="submit" class="btn btn-primary btn-sm" style="background:#0052cc; color:#fff; border-color:#0747a6;">Push to Jira</button>
-            </form>"#,
-            bug.id
-        ));
-    }
+    let epics = if jira_conf.enabled && eff >= 55 && jira_link.is_none() {
+        let pkey = jira_conf.project_key.trim();
+        if pkey.is_empty() {
+            vec![]
+        } else if let Ok(Some(cached)) = db.get_cached_jira_epics(pkey, 86400) {
+            cached
+        } else {
+            let client = crate::jira::JiraClient::with_allow_local(db.allow_local_jira());
+            match client.list_epics(&jira_conf).await {
+                Ok(fetched) => {
+                    let _ = db.save_jira_epics_cache(pkey, &fetched);
+                    fetched
+                }
+                Err(_) => {
+                    // Fallback to expired cache if available during transient Jira issues
+                    let fallback = db
+                        .get_cached_jira_epics(pkey, i64::MAX)
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    // Cache the fallback with a short 5-minute TTL
+                    // so transient errors don't lock out epics for a full 24 hours.
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    let _ = db.save_jira_epics_cache_with_ttl(pkey, &fallback, now, now + 300);
+                    fallback
+                }
+            }
+        }
+    } else {
+        vec![]
+    };
+    let jira_section_html = views::jira::render_jira_section(
+        &ctx,
+        bug.id,
+        jira_link.as_ref(),
+        &epics,
+        jira_conf.enabled,
+        eff,
+    );
 
     let mut tags_html = String::new();
     if bug_tags.is_empty() {
@@ -1043,6 +1076,7 @@ pub async fn view_bug_page(
         &note_form_html,
         &history_html,
         jira_link.as_ref(),
+        &jira_section_html,
         q.msg.as_deref(),
         q.err.as_deref(),
     )
@@ -1063,7 +1097,7 @@ pub async fn update_bug_page(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if bug.view_state == 50 && eff < 55 {
+    if !Db::can_view_bug(ctx.user.id, eff, bug) {
         return forbidden(&ctx, "Insufficient access to view private issue.");
     }
     let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == ctx.user.id);
@@ -1120,7 +1154,7 @@ pub async fn update_bug(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if bug.view_state == 50 && eff < 55 {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to view private issue.");
     }
     let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == ctx.user.id);
@@ -1192,7 +1226,7 @@ pub async fn bug_monitor_add(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to monitor this issue.");
     }
     let _ = db.add_bug_monitor(bug_id, ctx.user.id);
@@ -1250,7 +1284,7 @@ pub async fn bug_change_status(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if bug.view_state == 50 && eff < 55 {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to view private issue.");
     }
 
@@ -1358,7 +1392,7 @@ pub async fn bugnote_add(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || (bug.view_state == 50 && eff < 55) {
+    if eff < 25 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Reporter access required to add bugnotes.");
     }
 
@@ -1431,6 +1465,23 @@ pub async fn bug_relationship_add(
         .unwrap_or(0);
     if eff < 55 {
         return forbidden(&ctx, "Developer access required to manage relationships.");
+    }
+
+    let dest_bug = match db.get_bug(form.dest_bug_id) {
+        Ok(Some(b)) => b,
+        _ => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err=Failed+to+add+relationship",
+                bug_id
+            ))
+            .into_response()
+        }
+    };
+    let dest_eff = db
+        .effective_access_level(&ctx.user, dest_bug.project_id)
+        .unwrap_or(0);
+    if dest_eff < 10 || (dest_bug.view_state == 50 && dest_eff < 55) {
+        return forbidden(&ctx, "Insufficient access to target issue.");
     }
 
     match db.add_bug_relationship(bug_id, form.dest_bug_id, form.relationship_type) {
@@ -1548,7 +1599,7 @@ pub async fn bug_file_add(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || (bug.view_state == 50 && eff < 55) {
+    if eff < 25 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Reporter access required to upload attachments.");
     }
 
@@ -1579,6 +1630,38 @@ pub async fn bug_file_add(
     .into_response()
 }
 
+pub(crate) fn sanitize_download_filename(raw: &str) -> String {
+    let base = raw.rsplit(&['/', '\\'][..]).next().unwrap_or(raw);
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c == '"' || c == ';' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(|c: char| c.is_whitespace() || c == '.');
+    if trimmed.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub(crate) fn sanitize_content_type(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().any(|c| c.is_control())
+        || axum::http::HeaderValue::from_str(trimmed).is_err()
+    {
+        "application/octet-stream".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub async fn bug_file_download(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -1598,19 +1681,13 @@ pub async fn bug_file_download(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to download this attachment.");
     }
 
-    let content_type = if meta.file_type.is_empty() {
-        "application/octet-stream".to_string()
-    } else {
-        meta.file_type
-    };
-    let disp = format!(
-        "attachment; filename=\"{}\"",
-        meta.filename.replace('"', "_")
-    );
+    let content_type = sanitize_content_type(&meta.file_type);
+    let safe_filename = sanitize_download_filename(&meta.filename);
+    let disp = format!("attachment; filename=\"{}\"", safe_filename);
 
     (
         StatusCode::OK,

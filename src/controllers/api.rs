@@ -1,4 +1,4 @@
-use crate::auth::{ApiAuth, AuthContext};
+use crate::auth::{make_cookie_header_with_path, parse_cookies, ApiAuth, AuthContext};
 use crate::controllers::parse_bool;
 use crate::db::Db;
 use crate::models::{
@@ -7,7 +7,8 @@ use crate::models::{
 };
 use crate::views;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::header::{HeaderMap, SET_COOKIE};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Json;
@@ -19,7 +20,6 @@ use serde_json::{json, Value};
 pub struct FlashQuery {
     pub msg: Option<String>,
     pub err: Option<String>,
-    pub token: Option<String>,
 }
 
 fn forbidden_html(ctx: &AuthContext, msg: &str) -> Response {
@@ -37,19 +37,60 @@ fn forbidden_html(ctx: &AuthContext, msg: &str) -> Response {
 // ─── Web UI: API Tokens & Plugin Management ─────────────────────────────────
 
 pub async fn api_tokens_page(
+    headers: HeaderMap,
     State(db): State<Db>,
     ctx: AuthContext,
     Query(q): Query<FlashQuery>,
 ) -> Response {
+    if ctx.user.access_level < 25 {
+        return forbidden_html(
+            &ctx,
+            "Reporter (25) or higher access level required to manage API tokens",
+        );
+    }
+
     let tokens = db.list_api_tokens(ctx.user.id).unwrap_or_default();
-    views::api::render_api_tokens_page(
+    let all_tokens = if ctx.user.access_level >= 90 {
+        db.list_all_api_tokens().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let cookies = parse_cookies(&headers);
+    let flash_token = cookies
+        .get("MANTIS_FLASH_TOKEN")
+        .filter(|t| !t.is_empty())
+        .cloned();
+
+    let mut res = views::api::render_api_tokens_page(
         &ctx,
         &tokens,
-        q.token.as_deref(),
+        &all_tokens,
+        flash_token.as_deref(),
         q.msg.as_deref(),
         q.err.as_deref(),
     )
-    .into_response()
+    .into_response();
+
+    res.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, private"),
+    );
+
+    if flash_token.is_some() {
+        let clear_flash = make_cookie_header_with_path(
+            "MANTIS_FLASH_TOKEN",
+            "",
+            "/api_tokens_page",
+            true,
+            Some(0),
+        );
+        if let Ok(hv) = HeaderValue::from_str(&clear_flash) {
+            res.headers_mut().append(SET_COOKIE, hv);
+        }
+    }
+
+    res
 }
 
 #[derive(Deserialize)]
@@ -62,12 +103,28 @@ pub async fn api_token_create(
     ctx: AuthContext,
     axum::Form(form): axum::Form<ApiTokenCreateForm>,
 ) -> Response {
+    if ctx.user.access_level < 25 {
+        return forbidden_html(
+            &ctx,
+            "Reporter (25) or higher access level required to create API tokens",
+        );
+    }
+
     match db.create_api_token(ctx.user.id, &form.name) {
-        Ok((_id, raw_token)) => Redirect::to(&format!(
-            "/api_tokens_page?msg=Token+created&token={}",
-            raw_token
-        ))
-        .into_response(),
+        Ok((_id, raw_token)) => {
+            let mut res = Redirect::to("/api_tokens_page?msg=Token+created").into_response();
+            let flash_cookie = make_cookie_header_with_path(
+                "MANTIS_FLASH_TOKEN",
+                &raw_token,
+                "/api_tokens_page",
+                true,
+                Some(60),
+            );
+            if let Ok(hv) = HeaderValue::from_str(&flash_cookie) {
+                res.headers_mut().append(SET_COOKIE, hv);
+            }
+            res
+        }
         Err(_) => {
             Redirect::to("/api_tokens_page?err=Invalid+or+duplicate+token+name").into_response()
         }
@@ -79,7 +136,11 @@ pub async fn api_token_revoke(
     ctx: AuthContext,
     Path(id): Path<i64>,
 ) -> Response {
-    let _ = db.revoke_api_token(id, ctx.user.id);
+    if ctx.user.access_level >= 90 {
+        let _ = db.revoke_api_token_by_id(id);
+    } else {
+        let _ = db.revoke_api_token(id, ctx.user.id);
+    }
     Redirect::to("/api_tokens_page?msg=Token+revoked").into_response()
 }
 
@@ -444,7 +505,7 @@ pub async fn rest_get_issue(State(db): State<Db>, auth: ApiAuth, Path(id): Path<
     let eff = db
         .effective_access_level(&auth.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 10 || (bug.view_state == 50 && eff < 55) {
+    if !Db::can_view_bug(auth.user.id, eff, &bug) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "message": "Access denied to this issue" })),
@@ -590,6 +651,13 @@ pub async fn rest_update_issue(
     let eff = db
         .effective_access_level(&auth.user, bug.project_id)
         .unwrap_or(0);
+    if bug.view_state == 50 && eff < 55 && bug.reporter_id != auth.user.id {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "message": "Access denied to private issue" })),
+        )
+            .into_response();
+    }
     let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == auth.user.id);
     if !can_edit {
         return (
@@ -599,6 +667,47 @@ pub async fn rest_update_issue(
             .into_response();
     }
 
+    let handler_id = payload.handler.and_then(|h| h.id);
+    if let Some(hid) = handler_id {
+        if hid != bug.handler_id && eff < 55 {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "message": "Developer access required to assign issues" })),
+            )
+                .into_response();
+        }
+    }
+
+    let requested_status_change = payload
+        .status
+        .as_ref()
+        .and_then(|s| s.id)
+        .map(|v| v as i32)
+        .filter(|&new_st| new_st != bug.status);
+
+    if let Some(new_st) = requested_status_change {
+        let is_reporter_reopen =
+            bug.status == 80 && new_st == 20 && eff >= 25 && bug.reporter_id == auth.user.id;
+        if !is_reporter_reopen {
+            let required_level = if new_st == 90 {
+                70
+            } else if new_st == 80 || bug.status >= 80 {
+                55
+            } else {
+                40
+            };
+            if eff < required_level {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(
+                        json!({ "message": "Insufficient access level for this status transition" }),
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let update = BugUpdate {
         summary: payload.summary,
         description: payload.description,
@@ -606,7 +715,7 @@ pub async fn rest_update_issue(
         additional_information: payload.additional_information,
         priority: payload.priority.and_then(|p| p.id).map(|v| v as i32),
         severity: payload.severity.and_then(|s| s.id).map(|v| v as i32),
-        handler_id: payload.handler.and_then(|h| h.id),
+        handler_id,
         target_version: payload.target_version,
         fixed_in_version: payload.fixed_in_version,
         ..Default::default()
@@ -616,16 +725,14 @@ pub async fn rest_update_issue(
         return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
     }
 
-    if let Some(st_ref) = payload.status {
-        if let Some(new_st) = st_ref.id {
-            let res_code = payload
-                .resolution
-                .and_then(|r| r.id)
-                .map(|v| v as i32)
-                .unwrap_or(bug.resolution);
-            if let Err(e) = db.change_bug_status(id, auth.user.id, new_st as i32, res_code, None) {
-                return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
-            }
+    if let Some(new_st) = requested_status_change {
+        let res_code = payload
+            .resolution
+            .and_then(|r| r.id)
+            .map(|v| v as i32)
+            .unwrap_or(bug.resolution);
+        if let Err(e) = db.change_bug_status(id, auth.user.id, new_st, res_code, None) {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
         }
     }
 
@@ -691,7 +798,7 @@ pub async fn rest_add_issue_note(
     let eff = db
         .effective_access_level(&auth.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || (bug.view_state == 50 && eff < 55) {
+    if eff < 25 || !Db::can_view_bug(auth.user.id, eff, &bug) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "message": "Reporter access required to add bugnotes" })),
@@ -700,6 +807,13 @@ pub async fn rest_add_issue_note(
     }
 
     let vs = payload.view_state.and_then(|v| v.id).unwrap_or(10) as i32;
+    if vs == 50 && eff < 55 {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "message": "Developer access required to add private bugnotes" })),
+        )
+            .into_response();
+    }
     let mins = if eff >= 55 {
         payload.time_tracking.unwrap_or(0).max(0)
     } else {

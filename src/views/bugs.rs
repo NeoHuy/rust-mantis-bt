@@ -745,6 +745,7 @@ pub fn render_view_bug_page(
     note_form_html: &str,
     history_html: &str,
     jira_link: Option<&JiraLink>,
+    jira_section_html: &str,
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
 ) -> Html<String> {
@@ -907,7 +908,9 @@ pub fn render_view_bug_page(
             <div class="panel-body">
                 {}
             </div>
-        </div>"#,
+        </div>
+
+        {}"#,
         banner,
         bug.id,
         bug.id,
@@ -944,7 +947,8 @@ pub fn render_view_bug_page(
         upload_form_html,
         notes_html,
         note_form_html,
-        history_html
+        history_html,
+        jira_section_html
     );
 
     render_layout(&format!("Issue #{:07}", bug.id), ctx, flash_msg, &content)

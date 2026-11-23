@@ -3,10 +3,14 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
     let db_path = std::env::var("MANTIS_DB_PATH").unwrap_or_else(|_| "mantis.db".to_string());
-    let addr_str = std::env::var("MANTIS_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-
     let db = rust_mantis_bt::db::Db::open(&db_path)?;
+
+    if let Some(msg) = rust_mantis_bt::handle_cli_command(&db, &args)? {
+        println!("{}", msg);
+        return Ok(());
+    }
 
     // Start background email dispatcher worker if SendGrid is configured
     if let Some(mailer) = rust_mantis_bt::mailer::SendGridMailer::from_env() {
@@ -27,6 +31,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("No SENDGRID_API_KEY provided; email background worker will not start.");
     }
+
+    let addr_str = std::env::var("MANTIS_ADDR")
+        .unwrap_or_else(|_| rust_mantis_bt::DEFAULT_MANTIS_ADDR.to_string());
+    println!("Base URL for issue notifications: {}", db.base_url());
 
     let app = rust_mantis_bt::build_router(db);
 

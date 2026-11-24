@@ -270,6 +270,25 @@ async fn test_clone_issue_http_flow_and_separate_files() {
     assert!(body.contains(&format!(r#"href="/bug_clone_page/{}">Clone</a>"#, bug_src)));
     assert!(body.contains(&format!(r#"href="/bug_move_page/{}">Move</a>"#, bug_src)));
 
+    // Target project permission guard: Developer tries to clone into a private project where they have no membership (< 25)
+    let p_priv = db
+        .create_project("Private Target Proj", 10, 50, "", false)
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_clone/{}", bug_src))
+                .header("cookie", &dev_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("target_project_id={}", p_priv)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
     std::env::remove_var("MANTIS_UPLOAD_DIR");
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -421,6 +440,25 @@ async fn test_move_issue_http_flow_and_permission_guards() {
     assert!(history
         .iter()
         .any(|h| h.field_name == "category_id" && h.new_value == cat_b.to_string()));
+
+    // Target project permission guard: Developer tries to move into a private project where they have no membership (< 25)
+    let p_priv_move = db
+        .create_project("Private Target Move", 10, 50, "", false)
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_move/{}", bug_id))
+                .header("cookie", &dev_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("target_project_id={}", p_priv_move)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -672,6 +710,173 @@ async fn test_bulk_actiongroup_mixed_permissions_and_execution() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     let location = res.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.contains("q=login+error&ver=1.0.0~beta"));
+
+    // 9. Bulk DELETE:
+    // Developer (u_mixed is Developer 55 on Proj Alpha) attempts DELETE -> skipped (requires Manager >= 70)
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("bug_arr={}&action=DELETE", b2)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("0+issue%28s%29+updated%2C+1+skipped"));
+    assert!(db.get_bug(b2).unwrap().is_some());
+
+    // Manager (70) attempts DELETE -> deleted
+    let _u_mgr = db
+        .create_user("mgr_user", "Manager", "mgr@test.com", "pw", 70, true, false)
+        .unwrap();
+    let mgr_cookie = login_user(&app, "mgr_user", "pw").await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &mgr_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("bug_arr={}&action=DELETE", b2)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("succeeded+on+1+issue"));
+    assert!(db.get_bug(b2).unwrap().is_none());
+
+    // 10. Bulk MOVE to private target project where user has eff < 25 -> skipped
+    let p_priv_bulk = db
+        .create_project("Private Bulk Proj", 10, 50, "", false)
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "bug_arr={}&action=MOVE&target_project_id={}",
+                    b1, p_priv_bulk
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("0+issue%28s%29+updated%2C+1+skipped"));
+
+    // 11. Bulk UP_STATUS:
+    // Updater (40) trying to set status to 80 (Resolved) -> requires Developer (55) -> skipped
+    let _u_updater = db
+        .create_user(
+            "updater_user",
+            "Updater",
+            "up@test.com",
+            "pw",
+            40,
+            true,
+            false,
+        )
+        .unwrap();
+    let up_cookie = login_user(&app, "updater_user", "pw").await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &up_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "bug_arr={}&action=UP_STATUS&status=80",
+                    b1
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("0+issue%28s%29+updated%2C+1+skipped"));
+
+    // Developer (55) setting status to 80 -> succeeds
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "bug_arr={}&action=UP_STATUS&status=80",
+                    b1
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("succeeded+on+1+issue"));
+    assert_eq!(db.get_bug(b1).unwrap().unwrap().status, 80);
+
+    // 12. Bulk SET_STICKY:
+    // Developer (55) attempting SET_STICKY -> skipped (requires Manager >= 70)
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "bug_arr={}&action=SET_STICKY&sticky=1",
+                    b1
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("0+issue%28s%29+updated%2C+1+skipped"));
+
+    // Manager (70) attempting SET_STICKY -> succeeds
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &mgr_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "bug_arr={}&action=SET_STICKY&sticky=1",
+                    b1
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("succeeded+on+1+issue"));
+    assert_eq!(db.get_bug(b1).unwrap().unwrap().sticky, 1);
 }
 
 #[tokio::test]

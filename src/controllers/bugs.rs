@@ -884,7 +884,13 @@ pub async fn view_bug_page(
         ));
     }
 
-    if eff >= 55 {
+    let can_move = eff >= 55
+        && ctx.visible_projects.iter().any(|(p, _)| {
+            p.id != bug.project_id
+                && p.enabled == 1
+                && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
+        });
+    if can_move {
         actions_html.push_str(&format!(
             r#"<a class="btn btn-secondary btn-sm" href="/bug_move_page/{}">Move</a>"#,
             bug.id
@@ -1682,6 +1688,9 @@ pub async fn bug_actiongroup(
 
     if bug_ids.is_empty() {
         return Redirect::to("/view_all_bug_page?err=No+issues+selected").into_response();
+    }
+    if bug_ids.len() > 500 {
+        bug_ids.truncate(500);
     }
 
     let action = form_map.get("action").map(|s| s.trim()).unwrap_or("");

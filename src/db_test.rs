@@ -3380,3 +3380,76 @@ fn test_move_bug_success_and_category_fallback() {
     // Move when already in target project is a no-op Ok(())
     assert!(db.move_bug(bug_id, u, p2).is_ok());
 }
+
+#[test]
+fn test_clone_bug_outgoing_duplicate_relationship() {
+    let db = Db::open_in_memory().unwrap();
+    let p = db.create_project("Test Proj", 10, 10, "", true).unwrap();
+    let u = db
+        .create_user("dev", "Dev", "d@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let parent_bug = db
+        .create_bug(
+            p,
+            u,
+            1,
+            "Parent Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let dup_source = db
+        .create_bug(
+            p,
+            u,
+            1,
+            "Dup Source",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // dup_source is duplicate_of parent_bug
+    db.add_bug_relationship(dup_source, parent_bug, 1).unwrap();
+    assert_eq!(
+        db.get_bug(dup_source).unwrap().unwrap().duplicate_id,
+        parent_bug
+    );
+
+    // Clone dup_source
+    let cloned = db.clone_bug(dup_source, u, p, true, false, "").unwrap();
+
+    // Verify cloned issue inherits duplicate_of relationship to parent_bug (matching MantisBT relationship_copy_all)
+    let cloned_bug = db.get_bug(cloned).unwrap().unwrap();
+    assert_eq!(cloned_bug.duplicate_id, parent_bug);
+
+    let cloned_rels = db.list_bug_relationships(cloned).unwrap();
+    assert!(cloned_rels
+        .iter()
+        .any(|r| r.destination_bug_id == parent_bug && r.relationship_type == 1));
+
+    // Verify parent_bug has reciprocal has_duplicate relationship pointing to cloned
+    let parent_rels = db.list_bug_relationships(parent_bug).unwrap();
+    assert!(parent_rels
+        .iter()
+        .any(|r| r.destination_bug_id == cloned && r.relationship_type == 2));
+}

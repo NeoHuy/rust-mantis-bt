@@ -3376,8 +3376,8 @@ impl Db {
                             rand::random::<u64>()
                         );
                         let dst_path = std::path::Path::new(target_dir).join(&fresh_name);
+                        cleanup_guard.0.push(dst_path.clone());
                         std::fs::write(&dst_path, &bytes).map_err(|e| e.to_string())?;
-                        cleanup_guard.0.push(dst_path);
                         (fresh_name, target_dir.to_string(), None)
                     } else {
                         (String::new(), String::new(), None)

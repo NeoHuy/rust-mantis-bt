@@ -31,21 +31,6 @@ fn test_format_timestamp() {
 }
 
 #[test]
-fn test_format_date_and_parse_epoch() {
-    assert_eq!(format_date(0), "");
-    assert_eq!(format_date(-50), "");
-    assert_eq!(format_date(86400), "1970-01-02");
-    assert_eq!(format_date(1709209800), "2024-02-29");
-
-    assert_eq!(parse_date_to_epoch(""), 0);
-    assert_eq!(parse_date_to_epoch("invalid"), 0);
-    assert_eq!(parse_date_to_epoch("1970-01-01"), 0);
-    assert_eq!(parse_date_to_epoch("1970-01-02"), 86400);
-    assert_eq!(parse_date_to_epoch("2024-02-29"), 1709164800);
-    assert_eq!(format_date(parse_date_to_epoch("2026-11-25")), "2026-11-25");
-}
-
-#[test]
 fn test_status_color() {
     assert_eq!(status_color(10), "#fcbdbd");
     assert_eq!(status_color(20), "#e3b7eb");

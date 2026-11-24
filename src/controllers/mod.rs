@@ -25,18 +25,6 @@ pub fn parse_bool(opt: Option<&str>) -> bool {
     }
 }
 
-pub fn sanitize_error_message(s: &str) -> String {
-    let single_line = s.replace(['\r', '\n', '\t'], " ");
-    let trimmed = single_line.trim();
-    if trimmed.chars().count() > 120 {
-        format!("{}...", trimmed.chars().take(117).collect::<String>())
-    } else {
-        trimmed.to_string()
-    }
-}
-
-pub use crate::models::url_encode;
-
 pub async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
     if ctx.user.access_level >= 70 {
         Redirect::to("/manage_proj_page")

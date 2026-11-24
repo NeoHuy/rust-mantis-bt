@@ -88,3 +88,48 @@ fn test_require_manager_guard() {
     };
     assert!(require_manager(&mgr_ctx).is_none());
 }
+
+#[test]
+fn test_parse_date_order() {
+    assert_eq!(parse_date_order(None), None);
+    assert_eq!(parse_date_order(Some("")), None);
+    assert_eq!(parse_date_order(Some("   ")), None);
+    assert_eq!(parse_date_order(Some("invalid")), None);
+    // Integer unix timestamp string
+    assert_eq!(parse_date_order(Some("1700000000")), Some(1700000000));
+    // YYYY-MM-DD format
+    let epoch_2026_11_24 = views::parse_date_to_epoch("2026-11-24");
+    assert!(epoch_2026_11_24 > 0);
+    assert_eq!(parse_date_order(Some("2026-11-24")), Some(epoch_2026_11_24));
+}
+
+#[test]
+fn test_ver_forms_deserialize() {
+    let form: AddVerForm = serde_json::from_str(
+        r#"{"version":"1.0.0","description":"Desc","released":"1","date_order":"2026-11-24"}"#,
+    )
+    .unwrap();
+    assert_eq!(form.version, "1.0.0");
+    assert_eq!(form.date_order.as_deref(), Some("2026-11-24"));
+
+    let form_empty_date: AddVerForm =
+        serde_json::from_str(r#"{"version":"1.0.0","date_order":""}"#).unwrap();
+    assert_eq!(form_empty_date.date_order.as_deref(), Some(""));
+    assert_eq!(
+        parse_date_order(form_empty_date.date_order.as_deref()),
+        None
+    );
+
+    let form_no_date: AddVerForm = serde_json::from_str(r#"{"version":"1.0.0"}"#).unwrap();
+    assert_eq!(form_no_date.date_order, None);
+
+    let uform: UpdateVerForm =
+        serde_json::from_str(r#"{"project_id":1,"version":"2.0.0","date_order":"1750000000"}"#)
+            .unwrap();
+    assert_eq!(uform.project_id, 1);
+    assert_eq!(uform.version, "2.0.0");
+    assert_eq!(
+        parse_date_order(uform.date_order.as_deref()),
+        Some(1750000000)
+    );
+}

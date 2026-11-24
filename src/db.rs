@@ -1997,6 +1997,18 @@ impl Db {
         released: bool,
         obsolete: bool,
     ) -> Result<i64, String> {
+        self.add_version_with_order(project_id, version, description, released, obsolete, None)
+    }
+
+    pub fn add_version_with_order(
+        &self,
+        project_id: i64,
+        version: &str,
+        description: &str,
+        released: bool,
+        obsolete: bool,
+        date_order: Option<i64>,
+    ) -> Result<i64, String> {
         let trimmed_version = version.trim();
         if trimmed_version.is_empty() {
             return Err("Version cannot be empty".to_string());
@@ -2012,10 +2024,12 @@ impl Db {
 
         let released_val = if released { 1 } else { 0 };
         let obsolete_val = if obsolete { 1 } else { 0 };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let order_val = date_order.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        });
 
         conn.execute(
             "INSERT INTO mantis_project_version_table (
@@ -2027,7 +2041,7 @@ impl Db {
                 description,
                 released_val,
                 obsolete_val,
-                now,
+                order_val,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -2042,6 +2056,18 @@ impl Db {
         description: &str,
         released: bool,
         obsolete: bool,
+    ) -> Result<(), String> {
+        self.update_version_with_order(id, version, description, released, obsolete, None)
+    }
+
+    pub fn update_version_with_order(
+        &self,
+        id: i64,
+        version: &str,
+        description: &str,
+        released: bool,
+        obsolete: bool,
+        date_order: Option<i64>,
     ) -> Result<(), String> {
         let trimmed_version = version.trim();
         if trimmed_version.is_empty() {
@@ -2067,9 +2093,17 @@ impl Db {
 
         conn.execute(
             "UPDATE mantis_project_version_table
-             SET version = ?1, description = ?2, released = ?3, obsolete = ?4
-             WHERE id = ?5",
-            params![trimmed_version, description, released_val, obsolete_val, id],
+             SET version = ?1, description = ?2, released = ?3, obsolete = ?4,
+                 date_order = COALESCE(?5, date_order)
+             WHERE id = ?6",
+            params![
+                trimmed_version,
+                description,
+                released_val,
+                obsolete_val,
+                date_order,
+                id
+            ],
         )
         .map_err(|e| e.to_string())?;
 
@@ -3690,6 +3724,60 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_tags_with_counts(&self) -> rusqlite::Result<Vec<(Tag, i64)>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, t.user_id, t.name, t.description, t.date_created, t.date_updated, COUNT(bt.bug_id)
+             FROM mantis_tag_table t
+             LEFT JOIN mantis_bug_tag_table bt ON t.id = bt.tag_id
+             GROUP BY t.id, t.user_id, t.name, t.description, t.date_created, t.date_updated
+             ORDER BY t.name ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                Tag {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    date_created: row.get(4)?,
+                    date_updated: row.get(5)?,
+                },
+                row.get(6)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    pub fn get_tag_with_count_by_id(&self, id: i64) -> rusqlite::Result<Option<(Tag, i64)>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT t.id, t.user_id, t.name, t.description, t.date_created, t.date_updated, COUNT(bt.bug_id)
+             FROM mantis_tag_table t
+             LEFT JOIN mantis_bug_tag_table bt ON t.id = bt.tag_id
+             WHERE t.id = ?1
+             GROUP BY t.id, t.user_id, t.name, t.description, t.date_created, t.date_updated",
+            params![id],
+            |row| {
+                Ok((
+                    Tag {
+                        id: row.get(0)?,
+                        user_id: row.get(1)?,
+                        name: row.get(2)?,
+                        description: row.get(3)?,
+                        date_created: row.get(4)?,
+                        date_updated: row.get(5)?,
+                    },
+                    row.get(6)?,
+                ))
+            },
+        ) {
+            Ok(res) => Ok(Some(res)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn attach_tag_to_bug(&self, bug_id: i64, tag_id: i64, user_id: i64) -> Result<(), String> {
         let conn = self.conn();
         if Self::query_bug_by_id(&conn, bug_id)
@@ -5182,6 +5270,69 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_news(&self, id: i64) -> rusqlite::Result<Option<NewsItem>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, project_id, poster_id, date_posted, last_modified,
+                    view_state, announcement, headline, body
+             FROM mantis_news_table
+             WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(NewsItem {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    poster_id: row.get(2)?,
+                    date_posted: row.get(3)?,
+                    last_modified: row.get(4)?,
+                    view_state: row.get(5)?,
+                    announcement: row.get(6)?,
+                    headline: row.get(7)?,
+                    body: row.get(8)?,
+                })
+            },
+        ) {
+            Ok(item) => Ok(Some(item)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn update_news(
+        &self,
+        id: i64,
+        headline: &str,
+        body: &str,
+        view_state: i32,
+        announcement: i32,
+    ) -> Result<(), String> {
+        let trimmed_headline = headline.trim();
+        if trimmed_headline.is_empty() {
+            return Err("News headline cannot be empty".to_string());
+        }
+        let trimmed_body = body.trim();
+        if trimmed_body.is_empty() {
+            return Err("News body cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let updated = conn
+            .execute(
+                "UPDATE mantis_news_table
+                 SET headline = ?1, body = ?2, view_state = ?3, announcement = ?4, last_modified = ?5
+                 WHERE id = ?6",
+                params![trimmed_headline, trimmed_body, view_state, announcement, now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err(format!("News item {} not found", id));
+        }
+        Ok(())
     }
 
     pub fn delete_news(&self, id: i64) -> rusqlite::Result<()> {

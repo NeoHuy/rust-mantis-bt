@@ -1,7 +1,7 @@
 use crate::auth::AuthContext;
 use crate::controllers::parse_bool;
 use crate::db::Db;
-use crate::models::{Bug, BugFilter};
+use crate::models::{Bug, BugFilter, RoadmapVersionGroup};
 use crate::views;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
@@ -46,17 +46,78 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .map(|u| (u.id, u.username))
         .collect();
 
-    let mut by_target: BTreeMap<String, Vec<Bug>> = BTreeMap::new();
+    let mut bugs_by_target: HashMap<String, Vec<Bug>> = HashMap::new();
     for b in bugs {
-        if !b.target_version.trim().is_empty() {
-            by_target
-                .entry(b.target_version.trim().to_string())
-                .or_default()
-                .push(b);
+        let tv = b.target_version.trim().to_string();
+        if !tv.is_empty() {
+            bugs_by_target.entry(tv).or_default().push(b);
         }
     }
 
-    views::planning::render_roadmap_page(&ctx, &by_target, &users_map).into_response()
+    // Load project versions from DB (active project or visible projects)
+    let all_project_versions = if ctx.active_project_id > 0 {
+        db.list_versions(ctx.active_project_id).unwrap_or_default()
+    } else {
+        let visible = db.list_visible_projects(&ctx.user).unwrap_or_default();
+        let mut vers = Vec::new();
+        for (p, _) in visible {
+            if let Ok(mut v_list) = db.list_versions(p.id) {
+                vers.append(&mut v_list);
+            }
+        }
+        vers
+    };
+
+    // Exclude versions with obsolete == 1 from the Roadmap
+    let mut obsolete_version_names: HashSet<String> = HashSet::new();
+    let mut active_versions = Vec::new();
+    for v in all_project_versions {
+        if v.obsolete == 1 {
+            obsolete_version_names.insert(v.version);
+        } else {
+            active_versions.push(v);
+        }
+    }
+
+    for obs in &obsolete_version_names {
+        bugs_by_target.remove(obs);
+    }
+
+    // Sort active versions by date_order DESC, then version ASC
+    active_versions.sort_by(|a, b| {
+        b.date_order
+            .cmp(&a.date_order)
+            .then_with(|| a.version.cmp(&b.version))
+    });
+
+    let mut seen_version_names = HashSet::new();
+    let mut version_groups = Vec::new();
+
+    for v in active_versions {
+        if seen_version_names.insert(v.version.clone()) {
+            let v_bugs = bugs_by_target.remove(&v.version).unwrap_or_default();
+            version_groups.push(RoadmapVersionGroup {
+                version: v.version,
+                released: v.released == 1,
+                bugs: v_bugs,
+            });
+        }
+    }
+
+    // Append any issue target_version values not found in mantis_project_version_table alphabetically
+    let mut remaining_targets: Vec<String> = bugs_by_target.keys().cloned().collect();
+    remaining_targets.sort();
+
+    for tv in remaining_targets {
+        let v_bugs = bugs_by_target.remove(&tv).unwrap_or_default();
+        version_groups.push(RoadmapVersionGroup {
+            version: tv,
+            released: false,
+            bugs: v_bugs,
+        });
+    }
+
+    views::planning::render_roadmap_page(&ctx, &version_groups, &users_map).into_response()
 }
 
 pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response {
@@ -298,6 +359,60 @@ pub async fn news_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<
     Redirect::to("/news_page?msg=News+deleted").into_response()
 }
 
+#[derive(Deserialize)]
+pub struct NewsUpdateForm {
+    pub headline: String,
+    pub body: String,
+    pub announcement: Option<String>,
+    pub view_state: Option<i32>,
+}
+
+pub async fn news_edit_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(q): Query<FlashQuery>,
+) -> Response {
+    if ctx.user.access_level < 70 {
+        return forbidden(&ctx, "Manager access required to edit news.");
+    }
+    let item = match db.get_news(id) {
+        Ok(Some(item)) => item,
+        Ok(None) => return views::render_not_found_page(&ctx, "News item not found"),
+        Err(_) => return views::render_not_found_page(&ctx, "News item not found"),
+    };
+    views::planning::render_news_edit_page(&ctx, &item, q.msg.as_deref(), q.err.as_deref())
+        .into_response()
+}
+
+pub async fn news_update(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<NewsUpdateForm>,
+) -> Response {
+    if ctx.user.access_level < 70 {
+        return forbidden(&ctx, "Manager access required to update news.");
+    }
+    match db.get_news(id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return views::render_not_found_page(&ctx, "News item not found"),
+        Err(_) => return views::render_not_found_page(&ctx, "News item not found"),
+    }
+    let ann = if parse_bool(form.announcement.as_deref()) {
+        1
+    } else {
+        0
+    };
+    let vs = form.view_state.unwrap_or(10);
+    match db.update_news(id, &form.headline, &form.body, vs, ann) {
+        Ok(_) => Redirect::to("/news_page?msg=News+updated").into_response(),
+        Err(_) => {
+            Redirect::to(&format!("/news_edit_page/{}?err=Invalid+news+fields", id)).into_response()
+        }
+    }
+}
+
 pub async fn manage_email_queue_page(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -352,6 +467,8 @@ pub fn router() -> Router<Db> {
         .route("/billing_page", get(billing_page))
         .route("/news_page", get(news_page))
         .route("/news_add", post(news_add))
+        .route("/news_edit_page/:id", get(news_edit_page))
+        .route("/news_update/:id", post(news_update))
         .route("/news_delete/:id", post(news_delete))
         .route("/manage_email_queue_page", get(manage_email_queue_page))
         .route("/manage_email_queue_flush", post(manage_email_queue_flush))

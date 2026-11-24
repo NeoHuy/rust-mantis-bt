@@ -1,4 +1,12 @@
+use super::bug::Bug;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoadmapVersionGroup {
+    pub version: String,
+    pub released: bool,
+    pub bugs: Vec<Bug>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmailMessage {

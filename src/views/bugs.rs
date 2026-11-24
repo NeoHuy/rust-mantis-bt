@@ -1,9 +1,9 @@
 use crate::auth::AuthContext;
 use crate::models::{
     build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
-    BugHistory, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus, Category,
-    CustomField, CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType,
-    SavedFilter, Tag, User, ViewState,
+    BugHistory, BugPriority, BugReproducibility, BugResolution, BugRevision, BugSeverity,
+    BugStatus, Bugnote, Category, CustomField, CustomFieldValue, JiraLink, ListBugsQuery,
+    ProjectVersion, RelationshipType, SavedFilter, Tag, User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
@@ -116,6 +116,21 @@ pub fn format_history_value(
                     return cname.clone();
                 }
                 return format!("category#{}", cid);
+            }
+            trimmed.to_string()
+        }
+        "bugnote_view_state" => {
+            if trimmed == "50" {
+                "private".to_string()
+            } else if trimmed == "10" {
+                "public".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        "bugnote_updated" => {
+            if let Ok(nid) = trimmed.parse::<i64>() {
+                return format!("bugnote #{:07}", nid);
             }
             trimmed.to_string()
         }
@@ -1421,6 +1436,7 @@ pub fn render_update_bug_page(
             <div class="panel-header">Update Issue #{:07}</div>
             <div class="panel-body">
                 <form method="POST" action="/update_bug/{}">
+                    <input type="hidden" name="last_updated" value="{}">
                     <table class="form-table">
                         <tr>
                             <td class="label-col">Category</td>
@@ -1532,6 +1548,7 @@ pub fn render_update_bug_page(
         </div>"#,
         bug.id,
         bug.id,
+        bug.last_updated,
         cat_opts,
         if bug.priority == 10 { "selected" } else { "" },
         if bug.priority == 20 { "selected" } else { "" },
@@ -1595,6 +1612,249 @@ pub fn render_update_bug_page(
     );
 
     render_layout(&format!("Update Issue #{:07}", bug.id), ctx, None, &content)
+}
+
+pub fn render_bugnotes_table(
+    notes: &[Bugnote],
+    users_map: &HashMap<i64, String>,
+    eff: i32,
+    current_user_id: i64,
+) -> String {
+    if notes.is_empty() {
+        return "<p>No notes attached to this issue.</p>".to_string();
+    }
+    let mut html = String::from(
+        r#"<table class="data-table"><thead><tr><th>Author</th><th>Note</th><th>Time Spent</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>"#,
+    );
+    for n in notes {
+        let author = users_map
+            .get(&n.reporter_id)
+            .cloned()
+            .unwrap_or_else(|| format!("user#{}", n.reporter_id));
+        let vis = if n.view_state == 50 {
+            "private"
+        } else {
+            "public"
+        };
+        let time_str = if n.time_tracking > 0 {
+            format!("{:02}:{:02}", n.time_tracking / 60, n.time_tracking % 60)
+        } else {
+            "-".to_string()
+        };
+        let can_edit_note = eff >= 70 || (eff >= 25 && n.reporter_id == current_user_id);
+        let can_del_note = can_edit_note;
+        let can_toggle_vs = eff >= 55;
+
+        let mut actions = Vec::new();
+
+        if can_edit_note {
+            actions.push(format!(
+                r#"<a href="/bugnote_edit_page/{}" class="btn btn-sm">Edit</a>"#,
+                n.id
+            ));
+        }
+
+        if can_toggle_vs {
+            let (btn_label, next_vs) = if n.view_state == 50 {
+                ("Make Public", 10)
+            } else {
+                ("Make Private", 50)
+            };
+            actions.push(format!(
+                r#"<form method="POST" action="/bugnote_set_view_state/{}" style="display:inline;"><input type="hidden" name="view_state" value="{}"><button type="submit" class="btn btn-sm">{}</button></form>"#,
+                n.id, next_vs, btn_label
+            ));
+        }
+
+        actions.push(format!(
+            r#"<a href="/bug_revision_view_page/{}?bugnote_id={}" class="btn btn-sm">Revisions</a>"#,
+            n.bug_id, n.id
+        ));
+
+        if can_del_note {
+            actions.push(format!(
+                r#"<form method="POST" action="/bugnote_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
+                n.id
+            ));
+        }
+
+        let actions_html = actions.join(" ");
+
+        html.push_str(&format!(
+            r#"<tr>
+                <td style="width:180px; background:#f2f5f8;">
+                    <strong>{}</strong><br>
+                    <span style="font-size:11px; color:#666;">{}</span>
+                </td>
+                <td style="white-space:pre-wrap;">{}</td>
+                <td style="width:90px;">{}</td>
+                <td style="width:90px;">{}</td>
+                <td style="width:260px;">{}</td>
+            </tr>"#,
+            html_escape(&author),
+            format_timestamp(n.date_submitted),
+            html_escape(&n.note),
+            time_str,
+            vis,
+            actions_html
+        ));
+    }
+    html.push_str("</tbody></table>");
+    html
+}
+
+pub fn render_bugnote_edit_page(
+    ctx: &AuthContext,
+    bug: &Bug,
+    note: &Bugnote,
+    flash_err: Option<&str>,
+) -> Html<String> {
+    let banner = if let Some(e) = flash_err {
+        format!(r#"<div class="flash-error">{}</div>"#, html_escape(e))
+    } else {
+        String::new()
+    };
+
+    let content = format!(
+        r#"{}<div class="panel">
+            <div class="panel-header">Edit Bugnote #{:07} (Issue #{:07})</div>
+            <div class="panel-body">
+                <form method="POST" action="/bugnote_update/{}">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Bugnote *</td>
+                            <td class="input-col"><textarea name="note" rows="8" style="width:100%;" required>{}</textarea></td>
+                        </tr>
+                    </table>
+                    <div style="margin-top:12px; display:flex; gap:8px;">
+                        <button type="submit" class="btn">Update Information</button>
+                        <a href="/view_bug_page/{}" class="btn btn-secondary" style="text-decoration:none;">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>"#,
+        banner,
+        note.id,
+        bug.id,
+        note.id,
+        html_escape(&note.note),
+        bug.id
+    );
+
+    render_layout(
+        &format!("Edit Bugnote #{:07}", note.id),
+        ctx,
+        None,
+        &content,
+    )
+}
+
+pub fn render_bug_revision_view_page(
+    ctx: &AuthContext,
+    bug: &Bug,
+    revisions: &[BugRevision],
+    users_map: &HashMap<i64, String>,
+    can_drop: bool,
+    bugnote_id: Option<i64>,
+    flash_err: Option<&str>,
+) -> Html<String> {
+    let banner = if let Some(e) = flash_err {
+        format!(r#"<div class="flash-error">{}</div>"#, html_escape(e))
+    } else {
+        String::new()
+    };
+
+    let title_suffix = if let Some(nid) = bugnote_id {
+        format!("for Bugnote #{:07} (Issue #{:07})", nid, bug.id)
+    } else {
+        format!("for Issue #{:07}", bug.id)
+    };
+
+    let revs_html = if revisions.is_empty() {
+        "<p>No revisions found.</p>".to_string()
+    } else {
+        let mut table = String::from(
+            r#"<table class="data-table"><thead><tr><th>Timestamp</th><th>Username</th><th>Revision Type</th><th>Previous Content</th>"#,
+        );
+        if can_drop {
+            table.push_str("<th>Actions</th>");
+        }
+        table.push_str("</tr></thead><tbody>");
+
+        for r in revisions {
+            let author = users_map
+                .get(&r.user_id)
+                .cloned()
+                .unwrap_or_else(|| format!("user#{}", r.user_id));
+
+            let type_label = r.type_label();
+
+            let drop_btn = if can_drop {
+                format!(
+                    r#"<td style="width:120px;"><form method="POST" action="/bug_revision_drop/{}" style="display:inline;" onsubmit="return confirm('Are you sure you want to drop this revision?');"><button type="submit" class="btn btn-danger btn-sm">Drop Revision</button></form></td>"#,
+                    r.id
+                )
+            } else {
+                String::new()
+            };
+
+            table.push_str(&format!(
+                r#"<tr>
+                    <td style="width:160px; white-space:nowrap;">{}</td>
+                    <td style="width:140px;">{}</td>
+                    <td style="width:160px;"><span class="badge">{}</span></td>
+                    <td style="white-space:pre-wrap; word-break:break-word;">{}</td>
+                    {}
+                </tr>"#,
+                format_timestamp(r.timestamp),
+                html_escape(&author),
+                html_escape(type_label),
+                html_escape(&r.value),
+                drop_btn
+            ));
+        }
+
+        table.push_str("</tbody></table>");
+        table
+    };
+
+    let content = format!(
+        r#"{}<div class="panel">
+            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Revisions {}</span>
+                <a href="/view_bug_page/{}" class="btn btn-secondary btn-sm" style="text-decoration:none;">Back to Issue</a>
+            </div>
+            <div class="panel-body">
+                {}
+            </div>
+        </div>"#,
+        banner, title_suffix, bug.id, revs_html
+    );
+
+    render_layout(&format!("Revisions {}", title_suffix), ctx, None, &content)
+}
+
+pub fn render_conflict_page(ctx: &AuthContext, bug_id: i64, message: &str) -> Html<String> {
+    let content = format!(
+        r#"<div class="flash-error" style="margin-bottom:16px;"><strong>Conflict:</strong> {}</div>
+<div class="well">
+    <p>This issue has been modified by another user or session since you loaded the update page. Please reload the issue to review the latest changes and re-apply your updates.</p>
+    <div style="margin-top:16px;">
+        <a href="/view_bug_page/{}" class="btn btn-primary btn-sm"><i class="fa fa-refresh"></i> Reload Issue Details</a>
+        <a href="/update_bug_page/{}" class="btn btn-secondary btn-sm" style="margin-left:8px;"><i class="fa fa-pencil"></i> Return to Edit Page</a>
+    </div>
+</div>"#,
+        html_escape(message),
+        bug_id,
+        bug_id,
+    );
+
+    render_layout(
+        &format!("Conflict - Issue {:07}", bug_id),
+        ctx,
+        None,
+        &content,
+    )
 }
 
 #[cfg(test)]

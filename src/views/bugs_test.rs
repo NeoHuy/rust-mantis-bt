@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::Bug;
+use crate::models::{Bug, RevisionType};
 
 #[test]
 fn test_labels() {
@@ -709,4 +709,292 @@ fn test_render_status_change_form_with_resolve_close_custom_fields() {
     assert!(form_mgr.contains("Close Signoff *"));
     assert!(form_mgr.contains(r#"name="custom_field_102""#));
     assert!(!form_mgr.contains(" required"));
+}
+
+fn assert_no_nested_forms(html: &str) {
+    let mut depth = 0;
+    let mut rest = html;
+    while !rest.is_empty() {
+        let open_pos = rest.find("<form");
+        let close_pos = rest.find("</form");
+        match (open_pos, close_pos) {
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                assert!(depth <= 1, "Detected nested <form> tag in HTML");
+                rest = &rest[o + 5..];
+            }
+            (Some(_), Some(c)) => {
+                depth -= 1;
+                assert!(depth >= 0, "Mismatched </form> tag in HTML");
+                rest = &rest[c + 6..];
+            }
+            (Some(o), None) => {
+                depth += 1;
+                assert!(depth <= 1, "Detected nested <form> tag in HTML");
+                rest = &rest[o + 5..];
+            }
+            (None, Some(c)) => {
+                depth -= 1;
+                assert!(depth >= 0, "Mismatched </form> tag in HTML");
+                rest = &rest[c + 6..];
+            }
+            (None, None) => break,
+        }
+    }
+}
+
+#[test]
+fn test_render_bugnotes_table_and_actions() {
+    let mut users_map = HashMap::new();
+    users_map.insert(1, "alice".to_string());
+    users_map.insert(2, "bob".to_string());
+
+    let note_pub = Bugnote {
+        id: 101,
+        bug_id: 10,
+        reporter_id: 1,
+        bugnote_text_id: 1,
+        view_state: 10,
+        date_submitted: 1600000000,
+        last_modified: 1600000000,
+        note_type: 0,
+        note_attr: String::new(),
+        time_tracking: 90,
+        note: "Hello public note".to_string(),
+    };
+
+    let note_priv = Bugnote {
+        id: 102,
+        bug_id: 10,
+        reporter_id: 2,
+        bugnote_text_id: 2,
+        view_state: 50,
+        date_submitted: 1600001000,
+        last_modified: 1600001000,
+        note_type: 0,
+        note_attr: String::new(),
+        time_tracking: 0,
+        note: "Secret dev note".to_string(),
+    };
+
+    let notes = vec![note_pub, note_priv];
+
+    // Reporter (eff 25, user 1):
+    // Can edit note 101 (own note), cannot edit note 102
+    // Cannot toggle visibility (requires eff >= 55)
+    // Can see revisions link for both
+    let table_rep = render_bugnotes_table(&notes, &users_map, 25, 1);
+    assert!(table_rep.contains("alice"));
+    assert!(table_rep.contains("Hello public note"));
+    assert!(table_rep.contains(r#"href="/bugnote_edit_page/101""#));
+    assert!(!table_rep.contains(r#"href="/bugnote_edit_page/102""#));
+    assert!(!table_rep.contains(r#"action="/bugnote_set_view_state/101""#));
+    assert!(table_rep.contains(r#"href="/bug_revision_view_page/10?bugnote_id=101""#));
+    assert!(table_rep.contains(r#"href="/bug_revision_view_page/10?bugnote_id=102""#));
+
+    // Developer (eff 55, user 3):
+    // Can toggle visibility for note 101 (Make Private) and note 102 (Make Public)
+    let table_dev = render_bugnotes_table(&notes, &users_map, 55, 3);
+    assert!(table_dev.contains(r#"action="/bugnote_set_view_state/101""#));
+    assert!(table_dev.contains("Make Private"));
+    assert!(table_dev.contains(r#"action="/bugnote_set_view_state/102""#));
+    assert!(table_dev.contains("Make Public"));
+
+    // Manager (eff 70, user 3):
+    // Can edit and delete any note
+    let table_mgr = render_bugnotes_table(&notes, &users_map, 70, 3);
+    assert!(table_mgr.contains(r#"href="/bugnote_edit_page/101""#));
+    assert!(table_mgr.contains(r#"href="/bugnote_edit_page/102""#));
+    assert!(table_mgr.contains(r#"action="/bugnote_delete/101""#));
+    assert!(table_mgr.contains(r#"action="/bugnote_delete/102""#));
+}
+
+#[test]
+fn test_render_bugnote_edit_page_layout() {
+    let ctx = dummy_ctx(1, 25);
+
+    let bug = Bug {
+        id: 42,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 10,
+        resolution: 10,
+        category_id: 1,
+        date_submitted: 1600000000,
+        last_updated: 1600000000,
+        os: "".to_string(),
+        os_build: "".to_string(),
+        platform: "".to_string(),
+        version: "".to_string(),
+        fixed_in_version: "".to_string(),
+        target_version: "".to_string(),
+        build: "".to_string(),
+        summary: "Bug summary".to_string(),
+        view_state: 10,
+        sticky: 0,
+        due_date: 0,
+    };
+
+    let note = Bugnote {
+        id: 88,
+        bug_id: 42,
+        reporter_id: 1,
+        bugnote_text_id: 88,
+        view_state: 10,
+        date_submitted: 1600000000,
+        last_modified: 1600000000,
+        note_type: 0,
+        note_attr: String::new(),
+        time_tracking: 0,
+        note: "Original Note <content>".to_string(),
+    };
+
+    let page = render_bugnote_edit_page(&ctx, &bug, &note, Some("Sample error"));
+    let html = page.0;
+    assert!(html.contains("Sample error"));
+    assert!(html.contains(r#"action="/bugnote_update/88""#));
+    assert!(html.contains("Original Note &lt;content&gt;"));
+    assert!(html.contains(r#"href="/view_bug_page/42""#));
+    assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_bug_revision_view_page_layout() {
+    let ctx = dummy_ctx(1, 70);
+
+    let bug = Bug {
+        id: 42,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 10,
+        resolution: 10,
+        category_id: 1,
+        date_submitted: 1600000000,
+        last_updated: 1600000000,
+        os: "".to_string(),
+        os_build: "".to_string(),
+        platform: "".to_string(),
+        version: "".to_string(),
+        fixed_in_version: "".to_string(),
+        target_version: "".to_string(),
+        build: "".to_string(),
+        summary: "Bug summary".to_string(),
+        view_state: 10,
+        sticky: 0,
+        due_date: 0,
+    };
+
+    let rev1 = BugRevision {
+        id: 1,
+        bug_id: 42,
+        bugnote_id: 0,
+        user_id: 1,
+        timestamp: 1600000050,
+        rev_type: RevisionType::Description as i32,
+        value: "Old <description>".to_string(),
+    };
+
+    let rev2 = BugRevision {
+        id: 2,
+        bug_id: 42,
+        bugnote_id: 88,
+        user_id: 1,
+        timestamp: 1600000060,
+        rev_type: RevisionType::Bugnote as i32,
+        value: "Old <note> text".to_string(),
+    };
+
+    let mut users_map = HashMap::new();
+    users_map.insert(1, "tester".to_string());
+
+    // Manager can_drop = true:
+    let page_mgr = render_bug_revision_view_page(
+        &ctx,
+        &bug,
+        &[rev1, rev2.clone()],
+        &users_map,
+        true,
+        None,
+        None,
+    );
+    let html_mgr = page_mgr.0;
+    assert!(html_mgr.contains("Description"));
+    assert!(html_mgr.contains("Old &lt;description&gt;"));
+    assert!(html_mgr.contains("Bugnote"));
+    assert!(html_mgr.contains("Old &lt;note&gt; text"));
+    assert!(html_mgr.contains(r#"action="/bug_revision_drop/1""#));
+    assert!(html_mgr.contains(r#"action="/bug_revision_drop/2""#));
+    assert_no_nested_forms(&html_mgr);
+
+    // Non-manager can_drop = false:
+    let page_non_mgr =
+        render_bug_revision_view_page(&ctx, &bug, &[rev2], &users_map, false, Some(88), None);
+    let html_non_mgr = page_non_mgr.0;
+    assert!(!html_non_mgr.contains("Drop Revision"));
+    assert_no_nested_forms(&html_non_mgr);
+}
+
+#[test]
+fn test_render_update_bug_page_optimistic_locking() {
+    let ctx = dummy_ctx(1, 70);
+
+    let bug = Bug {
+        id: 42,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 10,
+        resolution: 10,
+        category_id: 1,
+        date_submitted: 1600000000,
+        last_updated: 1623715200,
+        os: "".to_string(),
+        os_build: "".to_string(),
+        platform: "".to_string(),
+        version: "".to_string(),
+        fixed_in_version: "".to_string(),
+        target_version: "".to_string(),
+        build: "".to_string(),
+        summary: "Bug summary".to_string(),
+        view_state: 10,
+        sticky: 0,
+        due_date: 0,
+    };
+
+    let full = BugFull {
+        bug,
+        description: "Desc".to_string(),
+        steps_to_reproduce: "Steps".to_string(),
+        additional_information: "AddInfo".to_string(),
+    };
+
+    let page = render_update_bug_page(&ctx, &full, "", &[], &[], 70, &[], &[]);
+    let html = page.0;
+    assert!(html.contains(r#"<input type="hidden" name="last_updated" value="1623715200">"#));
+    assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_conflict_page() {
+    let ctx = dummy_ctx(1, 70);
+    let html = render_conflict_page(&ctx, 42, "Modified by another user").0;
+    assert!(html.contains("Conflict"));
+    assert!(html.contains("Modified by another user"));
+    assert!(html.contains(r#"href="/view_bug_page/42""#));
+    assert!(html.contains(r#"href="/update_bug_page/42""#));
+    assert!(!html.contains("javascript:"));
 }

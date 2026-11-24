@@ -2893,3 +2893,145 @@ fn test_custom_field_regex_validation_in_db() {
     assert_eq!(cf_vals_cleared.len(), 1);
     assert_eq!(cf_vals_cleared[0].value, "");
 }
+
+#[test]
+fn test_revisions_and_bugnote_edits_db() {
+    let db = Db::open_in_memory().unwrap();
+    // Test idempotent migration
+    assert!(db.migrate().is_ok());
+
+    let uid = db
+        .create_user("revuser", "Rev User", "r@u.com", "pass", 90, true, false)
+        .unwrap();
+    let pid = db.create_project("RevProj", 10, 10, "", true).unwrap();
+    let bug_id = db
+        .create_bug(
+            pid,
+            uid,
+            1,
+            "Rev Bug",
+            "Initial Desc",
+            "Initial Steps",
+            "Initial AddInfo",
+            10,
+            10,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // 1. Verify no revisions initially
+    let revs0 = db.list_bug_revisions(bug_id, None).unwrap();
+    assert!(revs0.is_empty());
+
+    // 2. Update description, steps, and additional_info
+    let update_fields = BugUpdate {
+        description: Some("Updated Desc".to_string()),
+        steps_to_reproduce: Some("Updated Steps".to_string()),
+        additional_information: Some("Updated AddInfo".to_string()),
+        ..Default::default()
+    };
+    let hist = db.update_bug_fields(bug_id, uid, update_fields).unwrap();
+    assert_eq!(hist.len(), 3);
+
+    // Verify 3 revisions created with previous values
+    let revs = db.list_bug_revisions(bug_id, None).unwrap();
+    assert_eq!(revs.len(), 3);
+
+    let desc_rev = revs
+        .iter()
+        .find(|r| r.rev_type == RevisionType::Description as i32)
+        .unwrap();
+    assert_eq!(desc_rev.value, "Initial Desc");
+    assert_eq!(desc_rev.bugnote_id, 0);
+    assert_eq!(desc_rev.bug_id, bug_id);
+
+    let steps_rev = revs
+        .iter()
+        .find(|r| r.rev_type == RevisionType::StepsToReproduce as i32)
+        .unwrap();
+    assert_eq!(steps_rev.value, "Initial Steps");
+    assert_eq!(steps_rev.bugnote_id, 0);
+
+    let info_rev = revs
+        .iter()
+        .find(|r| r.rev_type == RevisionType::AdditionalInfo as i32)
+        .unwrap();
+    assert_eq!(info_rev.value, "Initial AddInfo");
+    assert_eq!(info_rev.bugnote_id, 0);
+
+    // 3. Test get_bug_revision_by_id
+    let fetched = db.get_bug_revision_by_id(desc_rev.id).unwrap().unwrap();
+    assert_eq!(fetched.id, desc_rev.id);
+    assert_eq!(fetched.value, "Initial Desc");
+
+    // 4. Test bugnote edits and revision
+    let note_id = db.add_bugnote(bug_id, uid, "Initial Note", 10).unwrap();
+
+    // Reject empty note edit
+    assert!(db.update_bugnote(note_id, uid, "   ").is_err());
+
+    // Valid note edit
+    assert!(db.update_bugnote(note_id, uid, "Updated Note").is_ok());
+
+    let updated_note = db.get_bugnote_by_id(note_id).unwrap().unwrap();
+    assert_eq!(updated_note.note, "Updated Note");
+
+    // Check bugnote revisions via list_bug_revisions with bugnote_id filter
+    let note_revs = db.list_bug_revisions(bug_id, Some(note_id)).unwrap();
+    assert_eq!(note_revs.len(), 1);
+    assert_eq!(note_revs[0].bugnote_id, note_id);
+    assert_eq!(note_revs[0].rev_type, RevisionType::Bugnote as i32);
+    assert_eq!(note_revs[0].value, "Initial Note");
+
+    // Total revisions for bug is now 4
+    let all_revs = db.list_bug_revisions(bug_id, None).unwrap();
+    assert_eq!(all_revs.len(), 4);
+
+    // 5. Test set_bugnote_view_state
+    assert!(db.set_bugnote_view_state(note_id, uid, 99).is_err()); // invalid
+    assert!(db.set_bugnote_view_state(note_id, uid, 50).is_ok()); // private
+    let note_priv = db.get_bugnote_by_id(note_id).unwrap().unwrap();
+    assert_eq!(note_priv.view_state, 50);
+
+    assert!(db.set_bugnote_view_state(note_id, uid, 10).is_ok()); // public
+    let note_pub = db.get_bugnote_by_id(note_id).unwrap().unwrap();
+    assert_eq!(note_pub.view_state, 10);
+
+    // 6. Test drop_bug_revision
+    assert!(db.drop_bug_revision(desc_rev.id).is_ok());
+    assert!(db.get_bug_revision_by_id(desc_rev.id).unwrap().is_none());
+    let revs_after_drop = db.list_bug_revisions(bug_id, None).unwrap();
+    assert_eq!(revs_after_drop.len(), 3);
+
+    // 7. Test delete_bugnote cleans up revisions for that note
+    assert!(db.delete_bugnote(note_id).is_ok());
+    let note_revs_after_delete = db.list_bug_revisions(bug_id, Some(note_id)).unwrap();
+    assert!(note_revs_after_delete.is_empty());
+
+    // 8. Test optimistic locking via expected_last_updated in update_bug_fields
+    let cur_bug = db.get_bug(bug_id).unwrap().unwrap();
+    let stale_update = BugUpdate {
+        summary: Some("Stale update".to_string()),
+        expected_last_updated: Some(cur_bug.last_updated - 100),
+        ..Default::default()
+    };
+    let err = db.update_bug_fields(bug_id, uid, stale_update).unwrap_err();
+    assert!(err.starts_with("CONFLICT:"));
+
+    let valid_update = BugUpdate {
+        summary: Some("Valid update".to_string()),
+        expected_last_updated: Some(cur_bug.last_updated),
+        ..Default::default()
+    };
+    assert!(db.update_bug_fields(bug_id, uid, valid_update).is_ok());
+
+    // 9. Test delete_bug cleans up all remaining revisions
+    assert!(db.delete_bug(bug_id).is_ok());
+    let revs_after_del = db.list_bug_revisions(bug_id, None).unwrap();
+    assert!(revs_after_del.is_empty());
+}

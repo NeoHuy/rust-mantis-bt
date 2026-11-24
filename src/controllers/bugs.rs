@@ -12,7 +12,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
@@ -73,6 +73,14 @@ fn not_found(ctx: &AuthContext, msg: &str) -> Response {
     (
         StatusCode::NOT_FOUND,
         views::layout::render_layout("Not Found", ctx, None, &body),
+    )
+        .into_response()
+}
+
+fn conflict(ctx: &AuthContext, bug_id: i64, msg: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        views::bugs::render_conflict_page(ctx, bug_id, msg),
     )
         .into_response()
 }
@@ -174,6 +182,14 @@ pub fn router() -> Router<Db> {
         .route("/bug_assign/:id", post(bug_assign))
         .route("/bugnote_add/:bug_id", post(bugnote_add))
         .route("/bugnote_delete/:id", post(bugnote_delete))
+        .route("/bugnote_edit_page/:id", get(bugnote_edit_page))
+        .route("/bugnote_update/:id", post(bugnote_update))
+        .route("/bugnote_set_view_state/:id", post(bugnote_set_view_state))
+        .route(
+            "/bug_revision_view_page/:bug_id",
+            get(bug_revision_view_page),
+        )
+        .route("/bug_revision_drop/:id", post(bug_revision_drop))
         .route("/bug_relationship_add/:bug_id", post(bug_relationship_add))
         .route(
             "/bug_relationship_delete/:id",
@@ -848,6 +864,10 @@ pub async fn view_bug_page(
             bug.id
         ));
     }
+    actions_html.push_str(&format!(
+        r#"<a class="btn btn-secondary btn-sm" href="/bug_revision_view_page/{}">Revisions</a>"#,
+        bug.id
+    ));
 
     if is_monitoring {
         actions_html.push_str(&format!(
@@ -1116,55 +1136,12 @@ pub async fn view_bug_page(
     };
 
     let mut notes_html = total_time_html;
-    if notes.is_empty() {
-        notes_html.push_str("<p>No notes attached to this issue.</p>");
-    } else {
-        notes_html.push_str(r#"<table class="data-table"><thead><tr><th>Author</th><th>Note</th><th>Time Spent</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>"#);
-        for n in &notes {
-            let author = users_map
-                .get(&n.reporter_id)
-                .cloned()
-                .unwrap_or_else(|| format!("user#{}", n.reporter_id));
-            let vis = if n.view_state == 50 {
-                "private"
-            } else {
-                "public"
-            };
-            let time_str = if n.time_tracking > 0 {
-                format!("{:02}:{:02}", n.time_tracking / 60, n.time_tracking % 60)
-            } else {
-                "-".to_string()
-            };
-            let can_del_note = eff >= 70 || (eff >= 25 && n.reporter_id == ctx.user.id);
-            let del_btn = if can_del_note {
-                format!(
-                    r#"<form method="POST" action="/bugnote_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
-                    n.id
-                )
-            } else {
-                String::new()
-            };
-            notes_html.push_str(&format!(
-                r#"<tr>
-                    <td style="width:180px; background:#f2f5f8;">
-                        <strong>{}</strong><br>
-                        <span style="font-size:11px; color:#666;">{}</span>
-                    </td>
-                    <td style="white-space:pre-wrap;">{}</td>
-                    <td style="width:90px;">{}</td>
-                    <td style="width:90px;">{}</td>
-                    <td style="width:90px;">{}</td>
-                </tr>"#,
-                views::html_escape(&author),
-                views::format_timestamp(n.date_submitted),
-                views::html_escape(&n.note),
-                time_str,
-                vis,
-                del_btn
-            ));
-        }
-        notes_html.push_str("</tbody></table>");
-    }
+    notes_html.push_str(&views::bugs::render_bugnotes_table(
+        &notes,
+        &users_map,
+        eff,
+        ctx.user.id,
+    ));
 
     let note_form_html = if eff >= 25 {
         let priv_opt = if eff >= 55 {
@@ -1325,6 +1302,25 @@ pub async fn update_bug(
         return forbidden(&ctx, "Insufficient access to update this issue.");
     }
 
+    let expected_last_updated = match get_single_val(&form_map, "last_updated") {
+        Some(raw) if !raw.trim().is_empty() => match raw.trim().parse::<i64>() {
+            Ok(ts) => Some(ts),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    views::layout::render_layout(
+                        "Bad Request",
+                        &ctx,
+                        Some("Invalid last_updated timestamp format for optimistic locking."),
+                        "<p>Invalid last_updated timestamp format for optimistic locking.</p>",
+                    ),
+                )
+                    .into_response();
+            }
+        },
+        _ => None,
+    };
+
     let handler_id = get_single_val(&form_map, "handler_id").and_then(|v| v.parse::<i64>().ok());
     if let Some(hid) = handler_id {
         if hid != bug.handler_id && eff < 55 {
@@ -1356,6 +1352,7 @@ pub async fn update_bug(
         build: get_single_val(&form_map, "build").map(|s| s.to_string()),
         due_date,
         sticky: None,
+        expected_last_updated,
     };
 
     let custom_fields = db
@@ -1411,6 +1408,11 @@ pub async fn update_bug(
             }
             Redirect::to(&format!("/view_bug_page/{}?msg=Issue+updated", id)).into_response()
         }
+        Err(e) if e.starts_with("CONFLICT:") => conflict(
+            &ctx,
+            id,
+            "Issue has been modified by another user or session.",
+        ),
         Err(_) => Redirect::to(&format!("/view_bug_page/{}?err=Failed+to+update+issue", id))
             .into_response(),
     }
@@ -1764,6 +1766,273 @@ pub async fn bugnote_delete(
 
     let _ = db.delete_bugnote(id);
     Redirect::to(&format!("/view_bug_page/{}?msg=Note+deleted", note.bug_id)).into_response()
+}
+
+#[derive(Deserialize, Default)]
+pub struct BugnoteUpdateForm {
+    pub note: Option<String>,
+}
+
+pub async fn bugnote_edit_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let note = match db.get_bugnote_by_id(id) {
+        Ok(Some(n)) => n,
+        _ => return not_found(&ctx, "Bugnote not found."),
+    };
+
+    let bug = match db.get_bug(note.bug_id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view issue.");
+    }
+
+    if note.view_state == 50 && eff < 55 {
+        return forbidden(&ctx, "Insufficient access to view private bugnote.");
+    }
+
+    let can_edit = eff >= 70 || (eff >= 25 && note.reporter_id == ctx.user.id);
+    if !can_edit {
+        return forbidden(&ctx, "Insufficient access to edit this bugnote.");
+    }
+
+    let flash_err = params.get("err").map(|s| s.as_str());
+    views::bugs::render_bugnote_edit_page(&ctx, &bug, &note, flash_err).into_response()
+}
+
+pub async fn bugnote_update(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<BugnoteUpdateForm>,
+) -> Response {
+    let note = match db.get_bugnote_by_id(id) {
+        Ok(Some(n)) => n,
+        _ => return not_found(&ctx, "Bugnote not found."),
+    };
+
+    let bug = match db.get_bug(note.bug_id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view issue.");
+    }
+
+    if note.view_state == 50 && eff < 55 {
+        return forbidden(&ctx, "Insufficient access to view private bugnote.");
+    }
+
+    let can_edit = eff >= 70 || (eff >= 25 && note.reporter_id == ctx.user.id);
+    if !can_edit {
+        return forbidden(&ctx, "Insufficient access to edit this bugnote.");
+    }
+
+    let note_text = form.note.unwrap_or_default();
+    if let Err(e) = db.update_bugnote(id, ctx.user.id, &note_text) {
+        return Redirect::to(&format!(
+            "/bugnote_edit_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response();
+    }
+
+    Redirect::to(&format!("/view_bug_page/{}", bug.id)).into_response()
+}
+
+#[derive(Deserialize, Default)]
+pub struct BugnoteViewStateForm {
+    pub view_state: Option<i32>,
+}
+
+pub async fn bugnote_set_view_state(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    form_res: Result<axum::Form<BugnoteViewStateForm>, axum::extract::rejection::FormRejection>,
+) -> Response {
+    let note = match db.get_bugnote_by_id(id) {
+        Ok(Some(n)) => n,
+        _ => return not_found(&ctx, "Bugnote not found."),
+    };
+
+    let bug = match db.get_bug(note.bug_id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view issue.");
+    }
+
+    if eff < 55 {
+        return forbidden(
+            &ctx,
+            "Developer access required to change bugnote visibility.",
+        );
+    }
+
+    let target_vs = match form_res.ok().and_then(|f| f.0.view_state) {
+        Some(vs) if vs == 10 || vs == 50 => vs,
+        _ => {
+            if note.view_state == 50 {
+                10
+            } else {
+                50
+            }
+        }
+    };
+
+    if let Err(e) = db.set_bugnote_view_state(id, ctx.user.id, target_vs) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            bug.id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response();
+    }
+
+    Redirect::to(&format!("/view_bug_page/{}", bug.id)).into_response()
+}
+
+#[derive(Deserialize, Default)]
+pub struct BugRevisionQuery {
+    pub bugnote_id: Option<i64>,
+    pub err: Option<String>,
+}
+
+pub async fn bug_revision_view_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(bug_id): Path<i64>,
+    Query(query): Query<BugRevisionQuery>,
+) -> Response {
+    let bug = match db.get_bug(bug_id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view issue.");
+    }
+
+    let filter_note_id = query.bugnote_id.filter(|&n| n > 0);
+
+    // If specific bugnote_id requested, check its visibility
+    if let Some(nid) = filter_note_id {
+        let note = match db.get_bugnote_by_id(nid) {
+            Ok(Some(n)) => n,
+            _ => return not_found(&ctx, "Bugnote not found."),
+        };
+        if note.bug_id != bug_id {
+            return not_found(&ctx, "Bugnote does not belong to this issue.");
+        }
+        if note.view_state == 50 && eff < 55 {
+            return forbidden(
+                &ctx,
+                "Insufficient access to view private bugnote revisions.",
+            );
+        }
+    }
+
+    let mut revisions = match db.list_bug_revisions(bug_id, filter_note_id) {
+        Ok(r) => r,
+        Err(_) => return forbidden(&ctx, "Unable to load revisions."),
+    };
+
+    // Never expose revisions belonging to private bugnotes (view_state == 50) to users with eff < 55
+    // Use allow-list: only keep bug revisions (bugnote_id == 0) or revisions of notes visible to this user
+    if eff < 55 {
+        let visible_notes = match db.list_bugnotes(bug_id, eff) {
+            Ok(notes) => notes,
+            Err(_) => return forbidden(&ctx, "Unable to verify bugnote permissions."),
+        };
+        let allowed_note_ids: HashSet<i64> = visible_notes.iter().map(|n| n.id).collect();
+        revisions.retain(|r| r.bugnote_id == 0 || allowed_note_ids.contains(&r.bugnote_id));
+    }
+
+    let users = db.list_users(None, false).unwrap_or_default();
+    let mut users_map = HashMap::new();
+    for u in users {
+        users_map.insert(u.id, u.username);
+    }
+
+    let can_drop = eff >= 70;
+    views::bugs::render_bug_revision_view_page(
+        &ctx,
+        &bug,
+        &revisions,
+        &users_map,
+        can_drop,
+        filter_note_id,
+        query.err.as_deref(),
+    )
+    .into_response()
+}
+
+pub async fn bug_revision_drop(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(revision_id): Path<i64>,
+) -> Response {
+    let rev = match db.get_bug_revision_by_id(revision_id) {
+        Ok(Some(r)) => r,
+        _ => return not_found(&ctx, "Revision not found."),
+    };
+
+    let bug = match db.get_bug(rev.bug_id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view issue.");
+    }
+    if eff < 70 {
+        return forbidden(&ctx, "Manager access required to drop revisions.");
+    }
+
+    if let Err(e) = db.drop_bug_revision(revision_id) {
+        return Redirect::to(&format!(
+            "/bug_revision_view_page/{}?err={}",
+            bug.id,
+            url_encode(&sanitize_error_message(&e.to_string()))
+        ))
+        .into_response();
+    }
+
+    if rev.bugnote_id > 0 {
+        Redirect::to(&format!(
+            "/bug_revision_view_page/{}?bugnote_id={}",
+            bug.id, rev.bugnote_id
+        ))
+        .into_response()
+    } else {
+        Redirect::to(&format!("/bug_revision_view_page/{}", bug.id)).into_response()
+    }
 }
 
 #[derive(Deserialize)]

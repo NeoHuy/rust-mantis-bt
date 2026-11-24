@@ -1,8 +1,9 @@
 use crate::models::{
     ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugPriority, BugRelationship,
-    BugReproducibility, BugResolution, BugSeverity, BugStatus, BugTag, BugUpdate, Bugnote,
-    Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig, NewsItem,
-    PluginItem, Project, ProjectVersion, SavedFilter, Tag, TimeTrackingEntry, User,
+    BugReproducibility, BugResolution, BugRevision, BugSeverity, BugStatus, BugTag, BugUpdate,
+    Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig,
+    NewsItem, PluginItem, Project, ProjectVersion, RevisionType, SavedFilter, Tag,
+    TimeTrackingEntry, User,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -382,7 +383,21 @@ impl Db {
             CREATE TABLE IF NOT EXISTS mantis_jira_status_mapping_table (
                 jira_status TEXT PRIMARY KEY COLLATE NOCASE,
                 mantis_status INTEGER NOT NULL
-            );",
+            );
+
+            CREATE TABLE IF NOT EXISTS mantis_bug_revision_table (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bug_id INTEGER NOT NULL,
+                bugnote_id INTEGER NOT NULL DEFAULT 0,
+                user_id INTEGER NOT NULL,
+                timestamp INTEGER NOT NULL,
+                type INTEGER NOT NULL,
+                value TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_bug_revision_bug_id ON mantis_bug_revision_table (bug_id);
+            CREATE INDEX IF NOT EXISTS idx_bug_revision_bugnote_id ON mantis_bug_revision_table (bugnote_id);
+            CREATE INDEX IF NOT EXISTS idx_bug_revision_bug_note ON mantis_bug_revision_table (bug_id, bugnote_id);",
         )?;
 
         // Idempotent migration for mantis_jira_epics_cache_table: ensure expires_at column exists
@@ -2459,10 +2474,16 @@ impl Db {
         updater_id: i64,
         fields: BugUpdate,
     ) -> Result<Vec<BugHistory>, String> {
-        let conn = self.conn();
+        let mut conn = self.conn();
         let bug = Self::query_bug_by_id(&conn, id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Bug {} not found", id))?;
+
+        if let Some(expected) = fields.expected_last_updated {
+            if expected != bug.last_updated {
+                return Err("CONFLICT: Issue has been modified by another user".to_string());
+            }
+        }
 
         let (cur_desc, cur_steps, cur_add_info) = conn
             .query_row(
@@ -2684,8 +2705,35 @@ impl Db {
             None => bug.sticky,
         };
 
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
         if !changes.is_empty() {
-            conn.execute(
+            if new_desc != cur_desc {
+                tx.execute(
+                    "INSERT INTO mantis_bug_revision_table (bug_id, bugnote_id, user_id, timestamp, type, value)
+                     VALUES (?1, 0, ?2, ?3, ?4, ?5)",
+                    params![id, updater_id, now, RevisionType::Description as i32, cur_desc],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if new_steps != cur_steps {
+                tx.execute(
+                    "INSERT INTO mantis_bug_revision_table (bug_id, bugnote_id, user_id, timestamp, type, value)
+                     VALUES (?1, 0, ?2, ?3, ?4, ?5)",
+                    params![id, updater_id, now, RevisionType::StepsToReproduce as i32, cur_steps],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            if new_add_info != cur_add_info {
+                tx.execute(
+                    "INSERT INTO mantis_bug_revision_table (bug_id, bugnote_id, user_id, timestamp, type, value)
+                     VALUES (?1, 0, ?2, ?3, ?4, ?5)",
+                    params![id, updater_id, now, RevisionType::AdditionalInfo as i32, cur_add_info],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            tx.execute(
                 "UPDATE mantis_bug_table
                  SET summary = ?1, category_id = ?2, priority = ?3, severity = ?4,
                      reproducibility = ?5, version = ?6, target_version = ?7,
@@ -2716,7 +2764,7 @@ impl Db {
             )
             .map_err(|e| e.to_string())?;
 
-            conn.execute(
+            tx.execute(
                 "UPDATE mantis_bug_text_table
                  SET description = ?1, steps_to_reproduce = ?2, additional_information = ?3
                  WHERE id = ?4",
@@ -2727,9 +2775,9 @@ impl Db {
 
         let mut recorded = Vec::new();
         for (field_name, old_val, new_val) in changes {
-            self.record_history(&conn, id, updater_id, field_name, &old_val, &new_val, 0)
+            self.record_history(&tx, id, updater_id, field_name, &old_val, &new_val, 0)
                 .map_err(|e| e.to_string())?;
-            let hid = conn.last_insert_rowid();
+            let hid = tx.last_insert_rowid();
             recorded.push(BugHistory {
                 id: hid,
                 user_id: updater_id,
@@ -2742,12 +2790,18 @@ impl Db {
             });
         }
 
+        tx.commit().map_err(|e| e.to_string())?;
+
         Ok(recorded)
     }
 
     pub fn delete_bug(&self, id: i64) -> rusqlite::Result<()> {
         let conn = self.conn();
         conn.execute("DELETE FROM mantis_bug_table WHERE id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM mantis_bug_revision_table WHERE bug_id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 
@@ -3161,6 +3215,11 @@ impl Db {
             params![note_id],
         )?;
 
+        conn.execute(
+            "DELETE FROM mantis_bug_revision_table WHERE bugnote_id = ?1",
+            params![note_id],
+        )?;
+
         if let Some(tid) = text_id {
             let _ = conn.execute(
                 "DELETE FROM mantis_bugnote_text_table WHERE id = ?1",
@@ -3197,6 +3256,257 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn update_bugnote(
+        &self,
+        note_id: i64,
+        editor_id: i64,
+        new_note: &str,
+    ) -> Result<(), String> {
+        let trimmed = new_note.trim();
+        if trimmed.is_empty() {
+            return Err("Bugnote cannot be empty".to_string());
+        }
+
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let note = match tx.query_row(
+            "SELECT n.id, n.bug_id, n.reporter_id, n.bugnote_text_id, n.view_state,
+                    n.date_submitted, n.last_modified, n.note_type, n.note_attr,
+                    n.time_tracking, COALESCE(t.note, '')
+             FROM mantis_bugnote_table n
+             LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+             WHERE n.id = ?1",
+            params![note_id],
+            |row| {
+                Ok(Bugnote {
+                    id: row.get(0)?,
+                    bug_id: row.get(1)?,
+                    reporter_id: row.get(2)?,
+                    bugnote_text_id: row.get(3)?,
+                    view_state: row.get(4)?,
+                    date_submitted: row.get(5)?,
+                    last_modified: row.get(6)?,
+                    note_type: row.get(7)?,
+                    note_attr: row.get(8)?,
+                    time_tracking: row.get(9)?,
+                    note: row.get(10)?,
+                })
+            },
+        ) {
+            Ok(n) => n,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(format!("Bugnote {} not found", note_id));
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+
+        if new_note == note.note {
+            return Ok(());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // 1. Save previous note text to mantis_bug_revision_table
+        tx.execute(
+            "INSERT INTO mantis_bug_revision_table (bug_id, bugnote_id, user_id, timestamp, type, value)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                note.bug_id,
+                note_id,
+                editor_id,
+                now,
+                RevisionType::Bugnote as i32,
+                note.note,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 2. Update note text in mantis_bugnote_text_table (preserve new_note unmodified)
+        tx.execute(
+            "UPDATE mantis_bugnote_text_table SET note = ?1 WHERE id = ?2",
+            params![new_note, note.bugnote_text_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 3. Update bugnote last_modified
+        tx.execute(
+            "UPDATE mantis_bugnote_table SET last_modified = ?1 WHERE id = ?2",
+            params![now, note_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 4. Update bug last_updated
+        tx.execute(
+            "UPDATE mantis_bug_table SET last_updated = ?1 WHERE id = ?2",
+            params![now, note.bug_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // 5. Record history
+        self.record_history(
+            &tx,
+            note.bug_id,
+            editor_id,
+            "bugnote_updated",
+            &note_id.to_string(),
+            &note_id.to_string(),
+            0,
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    pub fn set_bugnote_view_state(
+        &self,
+        note_id: i64,
+        editor_id: i64,
+        view_state: i32,
+    ) -> Result<(), String> {
+        if view_state != 10 && view_state != 50 {
+            return Err("Invalid view_state: must be 10 (public) or 50 (private)".to_string());
+        }
+
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let note = match tx.query_row(
+            "SELECT n.id, n.bug_id, n.reporter_id, n.bugnote_text_id, n.view_state,
+                    n.date_submitted, n.last_modified, n.note_type, n.note_attr,
+                    n.time_tracking, COALESCE(t.note, '')
+             FROM mantis_bugnote_table n
+             LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+             WHERE n.id = ?1",
+            params![note_id],
+            |row| {
+                Ok(Bugnote {
+                    id: row.get(0)?,
+                    bug_id: row.get(1)?,
+                    reporter_id: row.get(2)?,
+                    bugnote_text_id: row.get(3)?,
+                    view_state: row.get(4)?,
+                    date_submitted: row.get(5)?,
+                    last_modified: row.get(6)?,
+                    note_type: row.get(7)?,
+                    note_attr: row.get(8)?,
+                    time_tracking: row.get(9)?,
+                    note: row.get(10)?,
+                })
+            },
+        ) {
+            Ok(n) => n,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return Err(format!("Bugnote {} not found", note_id));
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+
+        if note.view_state == view_state {
+            return Ok(());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        tx.execute(
+            "UPDATE mantis_bugnote_table SET view_state = ?1, last_modified = ?2 WHERE id = ?3",
+            params![view_state, now, note_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        self.record_history(
+            &tx,
+            note.bug_id,
+            editor_id,
+            "bugnote_view_state",
+            &note.view_state.to_string(),
+            &view_state.to_string(),
+            0,
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    pub fn list_bug_revisions(
+        &self,
+        bug_id: i64,
+        bugnote_id: Option<i64>,
+    ) -> rusqlite::Result<Vec<BugRevision>> {
+        let conn = self.conn();
+        match bugnote_id {
+            Some(nid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, bug_id, bugnote_id, user_id, timestamp, type, value
+                     FROM mantis_bug_revision_table
+                     WHERE bug_id = ?1 AND bugnote_id = ?2
+                     ORDER BY timestamp DESC, id DESC",
+                )?;
+                let rows = stmt.query_map(params![bug_id, nid], Self::map_bug_revision_row)?;
+                rows.collect()
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT id, bug_id, bugnote_id, user_id, timestamp, type, value
+                     FROM mantis_bug_revision_table
+                     WHERE bug_id = ?1
+                     ORDER BY timestamp DESC, id DESC",
+                )?;
+                let rows = stmt.query_map(params![bug_id], Self::map_bug_revision_row)?;
+                rows.collect()
+            }
+        }
+    }
+
+    pub fn get_bug_revision_by_id(
+        &self,
+        revision_id: i64,
+    ) -> rusqlite::Result<Option<BugRevision>> {
+        let conn = self.conn();
+        match conn.query_row(
+            "SELECT id, bug_id, bugnote_id, user_id, timestamp, type, value
+             FROM mantis_bug_revision_table
+             WHERE id = ?1",
+            params![revision_id],
+            Self::map_bug_revision_row,
+        ) {
+            Ok(rev) => Ok(Some(rev)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn drop_bug_revision(&self, revision_id: i64) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_bug_revision_table WHERE id = ?1",
+            params![revision_id],
+        )?;
+        Ok(())
+    }
+
+    fn map_bug_revision_row(row: &rusqlite::Row) -> rusqlite::Result<BugRevision> {
+        Ok(BugRevision {
+            id: row.get(0)?,
+            bug_id: row.get(1)?,
+            bugnote_id: row.get(2)?,
+            user_id: row.get(3)?,
+            timestamp: row.get(4)?,
+            rev_type: row.get(5)?,
+            value: row.get(6)?,
+        })
     }
 
     pub fn query_bug_history(conn: &Connection, bug_id: i64) -> rusqlite::Result<Vec<BugHistory>> {
@@ -4724,6 +5034,26 @@ impl Db {
             "bugnote_added" => {
                 let note_id = h.new_value.parse::<i64>().unwrap_or(0);
                 (format!("Note Added: {:07}", note_id), String::new())
+            }
+            "bugnote_updated" => {
+                let note_id = h.new_value.parse::<i64>().unwrap_or(0);
+                (format!("Note Edited: {:07}", note_id), String::new())
+            }
+            "bugnote_view_state" => {
+                let old_str = if h.old_value == "50" {
+                    "private"
+                } else {
+                    "public"
+                };
+                let new_str = if h.new_value == "50" {
+                    "private"
+                } else {
+                    "public"
+                };
+                (
+                    "Note Visibility".to_string(),
+                    format!("{} => {}", old_str, new_str),
+                )
             }
             "category_id" => {
                 let old_id = h.old_value.parse::<i64>().unwrap_or(0);

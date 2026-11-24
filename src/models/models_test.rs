@@ -853,3 +853,72 @@ fn test_build_roadmap_groups_pure_domain_logic() {
     assert_eq!(groups[2].bugs.len(), 1);
     assert_eq!(groups[2].bugs[0].id, 104);
 }
+
+#[test]
+fn test_revision_type_conversion_and_strings() {
+    assert_eq!(RevisionType::from_i32(1), Some(RevisionType::Description));
+    assert_eq!(
+        RevisionType::from_i32(2),
+        Some(RevisionType::StepsToReproduce)
+    );
+    assert_eq!(
+        RevisionType::from_i32(3),
+        Some(RevisionType::AdditionalInfo)
+    );
+    assert_eq!(RevisionType::from_i32(4), Some(RevisionType::Bugnote));
+    assert_eq!(RevisionType::from_i32(0), None);
+    assert_eq!(RevisionType::from_i32(5), None);
+
+    assert_eq!(RevisionType::Description.as_str(), "description");
+    assert_eq!(
+        RevisionType::StepsToReproduce.as_str(),
+        "steps to reproduce"
+    );
+    assert_eq!(
+        RevisionType::AdditionalInfo.as_str(),
+        "additional information"
+    );
+    assert_eq!(RevisionType::Bugnote.as_str(), "bugnote");
+
+    assert_eq!(RevisionType::Description.label(), "Description");
+    assert_eq!(RevisionType::StepsToReproduce.label(), "Steps To Reproduce");
+    assert_eq!(
+        RevisionType::AdditionalInfo.label(),
+        "Additional Information"
+    );
+    assert_eq!(RevisionType::Bugnote.label(), "Bugnote");
+}
+
+#[test]
+fn test_bug_revision_model() {
+    let rev = BugRevision {
+        id: 42,
+        bug_id: 10,
+        bugnote_id: 5,
+        user_id: 1,
+        timestamp: 1620000000,
+        rev_type: RevisionType::Bugnote as i32,
+        value: "Old note content".to_string(),
+    };
+    assert_eq!(rev.id, 42);
+    assert_eq!(rev.bug_id, 10);
+    assert_eq!(rev.bugnote_id, 5);
+    assert_eq!(rev.user_id, 1);
+    assert_eq!(rev.timestamp, 1620000000);
+    assert_eq!(rev.rev_type, 4);
+    assert_eq!(rev.value, "Old note content");
+    assert_eq!(rev.revision_type(), Some(RevisionType::Bugnote));
+    assert_eq!(rev.type_label(), "Bugnote");
+
+    let unknown_rev = BugRevision {
+        id: 43,
+        bug_id: 10,
+        bugnote_id: 0,
+        user_id: 1,
+        timestamp: 1620000000,
+        rev_type: 99,
+        value: "Custom".to_string(),
+    };
+    assert_eq!(unknown_rev.revision_type(), None);
+    assert_eq!(unknown_rev.type_label(), "Unknown");
+}

@@ -459,6 +459,7 @@ async fn test_move_issue_http_flow_and_permission_guards() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(db.get_bug(bug_id).unwrap().unwrap().project_id, p_b);
 }
 
 #[tokio::test]
@@ -777,6 +778,7 @@ async fn test_bulk_actiongroup_mixed_permissions_and_execution() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     let location = res.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.contains("0+issue%28s%29+updated%2C+1+skipped"));
+    assert_eq!(db.get_bug(b1).unwrap().unwrap().project_id, p_a);
 
     // 11. Bulk UP_STATUS:
     // Updater (40) trying to set status to 80 (Resolved) -> requires Developer (55) -> skipped
@@ -877,6 +879,30 @@ async fn test_bulk_actiongroup_mixed_permissions_and_execution() {
     let location = res.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.contains("succeeded+on+1+issue"));
     assert_eq!(db.get_bug(b1).unwrap().unwrap().sticky, 1);
+
+    // 13. Bulk action with more than 500 bug_arr items -> caps at 500, reports excess ignored
+    let mut payload = String::new();
+    for i in 1..=505 {
+        payload.push_str(&format!("bug_arr={}&", i));
+    }
+    payload.push_str("action=VIEW_STATUS&view_state=10");
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &mgr_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(payload))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("5+ignored%2C+limit+500"));
 }
 
 #[tokio::test]

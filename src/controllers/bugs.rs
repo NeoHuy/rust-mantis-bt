@@ -1672,10 +1672,16 @@ pub async fn bug_actiongroup(
     ctx: AuthContext,
     axum::Form(form_data): axum::Form<Vec<(String, String)>>,
 ) -> Response {
+    const MAX_BULK: usize = 500;
     let mut bug_ids = Vec::new();
+    let mut ignored_excess = 0;
     let mut form_map: HashMap<String, String> = HashMap::new();
     for (k, v) in form_data {
         if k == "bug_arr" {
+            if bug_ids.len() >= MAX_BULK {
+                ignored_excess += 1;
+                continue;
+            }
             if let Ok(id) = v.trim().parse::<i64>() {
                 if !bug_ids.contains(&id) {
                     bug_ids.push(id);
@@ -1688,9 +1694,6 @@ pub async fn bug_actiongroup(
 
     if bug_ids.is_empty() {
         return Redirect::to("/view_all_bug_page?err=No+issues+selected").into_response();
-    }
-    if bug_ids.len() > 500 {
-        bug_ids.truncate(500);
     }
 
     let action = form_map.get("action").map(|s| s.trim()).unwrap_or("");
@@ -2106,10 +2109,15 @@ pub async fn bug_actiongroup(
         }
     }
 
-    let msg = if skipped == 0 {
+    let msg = if skipped == 0 && ignored_excess == 0 {
         format!(
             "Operation '{}' succeeded on {} issue(s).",
             action, succeeded
+        )
+    } else if ignored_excess > 0 {
+        format!(
+            "Operation '{}': {} issue(s) updated, {} skipped due to permissions or errors ({} ignored, limit {}).",
+            action, succeeded, skipped, ignored_excess, MAX_BULK
         )
     } else {
         format!(

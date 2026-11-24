@@ -3453,3 +3453,101 @@ fn test_clone_bug_outgoing_duplicate_relationship() {
         .iter()
         .any(|r| r.destination_bug_id == cloned && r.relationship_type == 2));
 }
+
+#[test]
+fn test_clone_bug_cleanup_guard_removes_partial_writes_on_failure() {
+    let db = Db::open_in_memory().unwrap();
+    let p = db
+        .create_project("Disk Cleanup Proj", 10, 10, "", true)
+        .unwrap();
+    let u = db
+        .create_user("dev_disk", "Dev Disk", "dd@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mantis_test_cleanup_guard_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let temp_dir_str = temp_dir.to_str().unwrap();
+
+    let bug_id = db
+        .create_bug(
+            p,
+            u,
+            0,
+            "Bug with disk attachments",
+            "desc",
+            "",
+            "",
+            50,
+            10,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Add first attachment with file on disk
+    let file1_bytes = b"First attachment content";
+    let _f1_id = db
+        .add_bug_file(
+            bug_id,
+            u,
+            "file1.txt",
+            "text/plain",
+            file1_bytes.to_vec(),
+            temp_dir_str,
+        )
+        .unwrap();
+
+    // Add second attachment with file on disk
+    let file2_bytes = b"Second attachment content";
+    let _f2_id = db
+        .add_bug_file(
+            bug_id,
+            u,
+            "file2.txt",
+            "text/plain",
+            file2_bytes.to_vec(),
+            temp_dir_str,
+        )
+        .unwrap();
+
+    // Now find the disk path of attachment 2 and delete it from disk to trigger read failure during clone
+    let files = db.list_bug_files(bug_id).unwrap();
+    assert_eq!(files.len(), 2);
+    let disk_file1 = temp_dir.join(&files[0].diskfile);
+    let disk_file2 = temp_dir.join(&files[1].diskfile);
+    assert!(disk_file2.exists());
+    std::fs::remove_file(&disk_file2).unwrap();
+    assert!(!disk_file2.exists());
+
+    // Call clone_bug with copy_files = true
+    let clone_res = db.clone_bug(bug_id, u, p, false, true, temp_dir_str);
+    assert!(
+        clone_res.is_err(),
+        "Clone should fail due to missing attachment file on disk"
+    );
+
+    // Verify cleanup guard removed the copied file for attachment 1
+    // The only remaining file in temp_dir should be the original file1.txt
+    let remaining_files: Vec<_> = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(
+        remaining_files.len(),
+        1,
+        "Only original file1 should remain; cloned partial files must be cleaned up"
+    );
+    assert_eq!(remaining_files[0].path(), disk_file1);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

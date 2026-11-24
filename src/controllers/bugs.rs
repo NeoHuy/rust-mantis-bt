@@ -1681,10 +1681,32 @@ pub async fn bug_actiongroup(
     }
 
     if bug_ids.is_empty() {
-        return Redirect::to("/view_all_bug_page?msg=No+issues+selected").into_response();
+        return Redirect::to("/view_all_bug_page?err=No+issues+selected").into_response();
     }
 
     let action = form_map.get("action").map(|s| s.trim()).unwrap_or("");
+    const KNOWN_ACTIONS: &[&str] = &[
+        "MOVE",
+        "COPY",
+        "ASSIGN",
+        "CLOSE",
+        "DELETE",
+        "RESOLVE",
+        "UP_STATUS",
+        "UP_PRIOR",
+        "UP_SEV",
+        "UP_CATEGORY",
+        "UP_TARGET_VERSION",
+        "UP_DUE_DATE",
+        "VIEW_STATUS",
+        "SET_STICKY",
+        "ADD_NOTE",
+        "ATTACH_TAGS",
+    ];
+    if !KNOWN_ACTIONS.contains(&action) {
+        return Redirect::to("/view_all_bug_page?err=Please+select+a+valid+action").into_response();
+    }
+
     let mut succeeded = 0usize;
     let mut skipped = 0usize;
 
@@ -1708,7 +1730,12 @@ pub async fn bug_actiongroup(
         let res = match action {
             "CLOSE" => {
                 if eff >= 70 {
-                    db.change_bug_status(bug.id, ctx.user.id, 90, 20, None)
+                    let resolution = if bug.resolution > 10 {
+                        bug.resolution
+                    } else {
+                        20
+                    };
+                    db.change_bug_status(bug.id, ctx.user.id, 90, resolution, None)
                 } else {
                     Err("Permission denied".to_string())
                 }
@@ -1718,6 +1745,7 @@ pub async fn bug_actiongroup(
                     let resolution = form_map
                         .get("resolution")
                         .and_then(|s| s.parse::<i32>().ok())
+                        .filter(|r| [10, 20, 30, 40, 50, 60, 70, 80, 90].contains(r))
                         .unwrap_or(20);
                     db.change_bug_status(bug.id, ctx.user.id, 80, resolution, None)
                 } else {
@@ -1788,7 +1816,7 @@ pub async fn bug_actiongroup(
                         .get("priority")
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(0);
-                    if new_priority > 0 {
+                    if [10, 20, 30, 40, 50, 60].contains(&new_priority) {
                         db.update_bug_fields(
                             bug.id,
                             ctx.user.id,
@@ -1811,7 +1839,7 @@ pub async fn bug_actiongroup(
                         .get("severity")
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(0);
-                    if new_severity > 0 {
+                    if [10, 20, 30, 40, 50, 60, 70, 80].contains(&new_severity) {
                         db.update_bug_fields(
                             bug.id,
                             ctx.user.id,
@@ -1833,25 +1861,41 @@ pub async fn bug_actiongroup(
                     .get("status")
                     .and_then(|s| s.parse::<i32>().ok())
                     .unwrap_or(0);
-                let allowed = if target_status == 90 {
-                    eff >= 70
-                } else if target_status == 80 || (bug.status == 90 && target_status != 90) {
-                    eff >= 55
+                if ![10, 20, 30, 40, 50, 80, 90].contains(&target_status) {
+                    Err("Invalid status".to_string())
                 } else {
-                    eff >= 40
-                };
-                if allowed && target_status > 0 {
-                    let resolution = if target_status == 80 {
-                        form_map
-                            .get("resolution")
-                            .and_then(|s| s.parse::<i32>().ok())
-                            .unwrap_or(20)
+                    // Moving to Closed (90) requires eff >= 70
+                    // Moving to Resolved (80) requires eff >= 55
+                    // Reopening a bug that is currently resolved or closed (status >= 80) to < 80 requires eff >= 55
+                    let allowed = if target_status == 90 {
+                        eff >= 70
+                    } else if target_status == 80 || (bug.status >= 80 && target_status < 80) {
+                        eff >= 55
                     } else {
-                        bug.resolution
+                        eff >= 40
                     };
-                    db.change_bug_status(bug.id, ctx.user.id, target_status, resolution, None)
-                } else {
-                    Err("Permission denied or invalid status".to_string())
+                    if allowed {
+                        let resolution = if target_status == 80 {
+                            form_map
+                                .get("resolution")
+                                .and_then(|s| s.parse::<i32>().ok())
+                                .filter(|r| [10, 20, 30, 40, 50, 60, 70, 80, 90].contains(r))
+                                .unwrap_or(20)
+                        } else if target_status == 90 {
+                            if bug.resolution > 10 {
+                                bug.resolution
+                            } else {
+                                20
+                            }
+                        } else if target_status < 80 && bug.status >= 80 {
+                            10
+                        } else {
+                            bug.resolution
+                        };
+                        db.change_bug_status(bug.id, ctx.user.id, target_status, resolution, None)
+                    } else {
+                        Err("Permission denied".to_string())
+                    }
                 }
             }
             "UP_CATEGORY" => {
@@ -1926,15 +1970,19 @@ pub async fn bug_actiongroup(
                         .get("view_state")
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(10);
-                    db.update_bug_fields(
-                        bug.id,
-                        ctx.user.id,
-                        BugUpdate {
-                            view_state: Some(view_state),
-                            ..Default::default()
-                        },
-                    )
-                    .map(|_| ())
+                    if view_state == 10 || view_state == 50 {
+                        db.update_bug_fields(
+                            bug.id,
+                            ctx.user.id,
+                            BugUpdate {
+                                view_state: Some(view_state),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|_| ())
+                    } else {
+                        Err("Invalid view state".to_string())
+                    }
                 } else {
                     Err("Permission denied".to_string())
                 }
@@ -1945,15 +1993,19 @@ pub async fn bug_actiongroup(
                         .get("sticky")
                         .and_then(|s| s.parse::<i32>().ok())
                         .unwrap_or(0);
-                    db.update_bug_fields(
-                        bug.id,
-                        ctx.user.id,
-                        BugUpdate {
-                            sticky: Some(sticky),
-                            ..Default::default()
-                        },
-                    )
-                    .map(|_| ())
+                    if sticky == 0 || sticky == 1 {
+                        db.update_bug_fields(
+                            bug.id,
+                            ctx.user.id,
+                            BugUpdate {
+                                sticky: Some(sticky),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|_| ())
+                    } else {
+                        Err("Invalid sticky value".to_string())
+                    }
                 } else {
                     Err("Permission denied".to_string())
                 }
@@ -1966,8 +2018,14 @@ pub async fn bug_actiongroup(
                             .get("note_view_state")
                             .and_then(|s| s.parse::<i32>().ok())
                             .unwrap_or(10);
-                        db.add_bugnote(bug.id, ctx.user.id, note_text, view_state)
-                            .map(|_| ())
+                        if view_state == 50 && eff < 55 {
+                            Err("Permission denied: private notes require developer access"
+                                .to_string())
+                        } else {
+                            let valid_vs = if view_state == 50 { 50 } else { 10 };
+                            db.add_bugnote(bug.id, ctx.user.id, note_text, valid_vs)
+                                .map(|_| ())
+                        }
                     } else {
                         Err("Empty note text".to_string())
                     }
@@ -2030,7 +2088,32 @@ pub async fn bug_actiongroup(
         )
     };
 
-    Redirect::to(&format!("/view_all_bug_page?msg={}", url_encode(&msg))).into_response()
+    let flash_key = if succeeded == 0 { "err" } else { "msg" };
+    let return_query = form_map.get("return_query").map(|s| s.trim()).unwrap_or("");
+    let safe_return_query: String = return_query
+        .chars()
+        .filter(|c| {
+            c.is_ascii_alphanumeric()
+                || *c == '&'
+                || *c == '='
+                || *c == '_'
+                || *c == '-'
+                || *c == '%'
+        })
+        .collect();
+
+    let redirect_url = if safe_return_query.is_empty() {
+        format!("/view_all_bug_page?{}={}", flash_key, url_encode(&msg))
+    } else {
+        format!(
+            "/view_all_bug_page?{}&{}={}",
+            safe_return_query,
+            flash_key,
+            url_encode(&msg)
+        )
+    };
+
+    Redirect::to(&redirect_url).into_response()
 }
 
 pub async fn bug_stick(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {

@@ -3038,13 +3038,14 @@ impl Db {
         copy_files: bool,
         upload_dir: &str,
     ) -> Result<i64, String> {
-        let conn = self.conn();
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-        let source_bug = Self::query_bug_by_id(&conn, source_bug_id)
+        let source_bug = Self::query_bug_by_id(&tx, source_bug_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Source issue {} not found", source_bug_id))?;
 
-        let (description, steps_to_reproduce, additional_information) = match conn.query_row(
+        let (description, steps_to_reproduce, additional_information) = match tx.query_row(
             "SELECT description, steps_to_reproduce, additional_information
              FROM mantis_bug_text_table
              WHERE id = ?1",
@@ -3064,7 +3065,7 @@ impl Db {
             Err(e) => return Err(e.to_string()),
         };
 
-        let target_enabled: Option<i32> = conn
+        let target_enabled: Option<i32> = tx
             .query_row(
                 "SELECT enabled FROM mantis_project_table WHERE id = ?1",
                 params![target_project_id],
@@ -3075,8 +3076,8 @@ impl Db {
             return Err("Target project not found or disabled".to_string());
         }
 
-        let effective_cats = Self::query_effective_categories(&conn, target_project_id)
-            .map_err(|e| e.to_string())?;
+        let effective_cats =
+            Self::query_effective_categories(&tx, target_project_id).map_err(|e| e.to_string())?;
         let target_category_id = if effective_cats
             .iter()
             .any(|c| c.id == source_bug.category_id)
@@ -3091,7 +3092,7 @@ impl Db {
         let mut initial_handler_id = 0i64;
         let mut initial_status = 10i32;
         if target_category_id > 0 {
-            let cat_user_id: Option<i64> = conn
+            let cat_user_id: Option<i64> = tx
                 .query_row(
                     "SELECT user_id FROM mantis_category_table WHERE id = ?1",
                     params![target_category_id],
@@ -3101,10 +3102,10 @@ impl Db {
 
             if let Some(uid) = cat_user_id {
                 if uid > 0 {
-                    if let Ok(Some(u)) = Self::query_user_by_id(&conn, uid) {
+                    if let Ok(Some(u)) = Self::query_user_by_id(&tx, uid) {
                         if u.enabled == 1 {
                             let eff =
-                                Self::query_effective_access_level(&conn, &u, target_project_id)
+                                Self::query_effective_access_level(&tx, &u, target_project_id)
                                     .unwrap_or(0);
                             if eff >= 55 {
                                 initial_handler_id = uid;
@@ -3121,7 +3122,7 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO mantis_bug_table (
                 project_id, reporter_id, handler_id, duplicate_id,
                 priority, severity, reproducibility, status, resolution,
@@ -3153,9 +3154,9 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
 
-        let new_bug_id = conn.last_insert_rowid();
+        let new_bug_id = tx.last_insert_rowid();
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO mantis_bug_text_table (
                 id, description, steps_to_reproduce, additional_information
             ) VALUES (?1, ?2, ?3, ?4)",
@@ -3170,7 +3171,7 @@ impl Db {
 
         // Copy custom field values (for fields linked to target_project_id)
         {
-            let mut stmt = conn
+            let mut stmt = tx
                 .prepare(
                     "SELECT cfs.field_id, cfs.value, cfs.text
                      FROM mantis_custom_field_string_table cfs
@@ -3192,7 +3193,7 @@ impl Db {
                 field_values.push(val);
             }
             for (fid, val, txt) in field_values {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO mantis_custom_field_string_table (field_id, bug_id, value, text)
                      VALUES (?1, ?2, ?3, ?4)
                      ON CONFLICT (field_id, bug_id) DO UPDATE SET value = excluded.value, text = excluded.text",
@@ -3204,7 +3205,7 @@ impl Db {
 
         // Copy tags (mantis_bug_tag_table)
         {
-            let mut stmt = conn
+            let mut stmt = tx
                 .prepare("SELECT tag_id, user_id FROM mantis_bug_tag_table WHERE bug_id = ?1")
                 .map_err(|e| e.to_string())?;
             let tag_rows = stmt
@@ -3217,7 +3218,7 @@ impl Db {
                 tags.push(t);
             }
             for (tid, uid) in tags {
-                conn.execute(
+                tx.execute(
                     "INSERT OR IGNORE INTO mantis_bug_tag_table (bug_id, tag_id, user_id, date_attached)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![new_bug_id, tid, uid, now],
@@ -3227,7 +3228,7 @@ impl Db {
         }
 
         // Always create RelatedTo relationship between cloned issue and source issue
-        conn.execute(
+        tx.execute(
             "INSERT INTO mantis_bug_relationship_table (
                 source_bug_id, destination_bug_id, relationship_type
             ) VALUES (?1, ?2, 0)",
@@ -3237,7 +3238,7 @@ impl Db {
 
         // If copy_relationships is true, copy existing source relationships cleanly
         if copy_relationships {
-            let mut stmt = conn
+            let mut stmt = tx
                 .prepare(
                     "SELECT destination_bug_id, relationship_type
                      FROM mantis_bug_relationship_table
@@ -3257,7 +3258,7 @@ impl Db {
                 if dest_id == new_bug_id || dest_id == source_bug_id {
                     continue;
                 }
-                conn.execute(
+                tx.execute(
                     "INSERT INTO mantis_bug_relationship_table (
                         source_bug_id, destination_bug_id, relationship_type
                     ) VALUES (?1, ?2, ?3)",
@@ -3266,12 +3267,13 @@ impl Db {
                 .map_err(|e| e.to_string())?;
 
                 if rel_type == 1 {
-                    conn.execute(
+                    // Cloned issue is duplicate of dest_id
+                    tx.execute(
                         "UPDATE mantis_bug_table SET duplicate_id = ?1 WHERE id = ?2",
                         params![dest_id, new_bug_id],
                     )
                     .map_err(|e| e.to_string())?;
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO mantis_bug_relationship_table (
                             source_bug_id, destination_bug_id, relationship_type
                         ) VALUES (?1, ?2, 2)",
@@ -3279,15 +3281,19 @@ impl Db {
                     )
                     .map_err(|e| e.to_string())?;
                 } else if rel_type == 2 {
-                    conn.execute(
-                        "UPDATE mantis_bug_table SET duplicate_id = ?1 WHERE id = ?2",
-                        params![new_bug_id, dest_id],
-                    )
-                    .map_err(|e| e.to_string())?;
-                    conn.execute(
+                    // Cloned issue has reciprocal duplicate relationship
+                    tx.execute(
                         "INSERT INTO mantis_bug_relationship_table (
                             source_bug_id, destination_bug_id, relationship_type
                         ) VALUES (?1, ?2, 1)",
+                        params![dest_id, new_bug_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                } else if rel_type == 0 {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO mantis_bug_relationship_table (
+                            source_bug_id, destination_bug_id, relationship_type
+                        ) VALUES (?1, ?2, 0)",
                         params![dest_id, new_bug_id],
                     )
                     .map_err(|e| e.to_string())?;
@@ -3297,7 +3303,7 @@ impl Db {
 
         // If copy_files is true, duplicate attachments (separate copies)
         if copy_files {
-            let mut stmt = conn
+            let mut stmt = tx
                 .prepare(
                     "SELECT title, description, diskfile, filename, folder,
                             filesize, file_type, content
@@ -3332,15 +3338,27 @@ impl Db {
                     } else if !diskfile.is_empty() {
                         let source_dir = if !upload_dir.trim().is_empty() {
                             upload_dir
-                        } else {
+                        } else if !folder.trim().is_empty() {
                             &folder
+                        } else {
+                            "."
                         };
                         let src_path = std::path::Path::new(source_dir).join(&diskfile);
-                        let bytes = std::fs::read(&src_path).unwrap_or_default();
+                        if !src_path.exists() {
+                            return Err(format!(
+                                "Source attachment file not found on disk: {}",
+                                diskfile
+                            ));
+                        }
+                        let bytes = std::fs::read(&src_path).map_err(|e| {
+                            format!("Failed to read attachment file {}: {}", diskfile, e)
+                        })?;
                         let target_dir = if !upload_dir.trim().is_empty() {
                             upload_dir
-                        } else {
+                        } else if !folder.trim().is_empty() {
                             &folder
+                        } else {
+                            "."
                         };
                         std::fs::create_dir_all(target_dir).map_err(|e| e.to_string())?;
                         let fresh_name = format!(
@@ -3355,7 +3373,7 @@ impl Db {
                         (String::new(), String::new(), None)
                     };
 
-                conn.execute(
+                tx.execute(
                     "INSERT INTO mantis_bug_file_table (
                         bug_id, title, description, diskfile, filename, folder,
                         filesize, file_type, content, date_added, user_id
@@ -3379,25 +3397,31 @@ impl Db {
         }
 
         // Record creation + clone history entry
-        let _ = self.record_history(&conn, new_bug_id, reporter_id, "", "", "", 1);
-        let _ = self.record_history(
-            &conn,
+        self.record_history(&tx, new_bug_id, reporter_id, "", "", "", 1)
+            .map_err(|e| e.to_string())?;
+        self.record_history(
+            &tx,
             new_bug_id,
             reporter_id,
             "created_from",
             "",
             &source_bug_id.to_string(),
             21,
-        );
-        let _ = self.record_history(
-            &conn,
+        )
+        .map_err(|e| e.to_string())?;
+        self.record_history(
+            &tx,
             source_bug_id,
             reporter_id,
             "cloned_to",
             "",
             &new_bug_id.to_string(),
             20,
-        );
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Commit transaction before sending notification
+        tx.commit().map_err(|e| e.to_string())?;
 
         // Queue notification email
         let project_name = Self::helper_project_name(&conn, target_project_id);

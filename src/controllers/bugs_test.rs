@@ -294,3 +294,25 @@ fn test_bugs_router_assembly() {
     let r = router();
     let _app: axum::Router = r.with_state(db);
 }
+
+#[test]
+fn test_bug_clone_form_deserialize() {
+    let form: BugCloneForm = serde_json::from_str(
+        r#"{"target_project_id": 42, "copy_relationships": "1", "copy_files": "on"}"#,
+    )
+    .unwrap();
+    assert_eq!(form.target_project_id, 42);
+    assert_eq!(form.copy_relationships.as_deref(), Some("1"));
+    assert_eq!(form.copy_files.as_deref(), Some("on"));
+
+    let form_minimal: BugCloneForm = serde_json::from_str(r#"{"target_project_id": 10}"#).unwrap();
+    assert_eq!(form_minimal.target_project_id, 10);
+    assert!(form_minimal.copy_relationships.is_none());
+    assert!(form_minimal.copy_files.is_none());
+}
+
+#[test]
+fn test_bug_move_form_deserialize() {
+    let form: BugMoveForm = serde_json::from_str(r#"{"target_project_id": 99}"#).unwrap();
+    assert_eq!(form.target_project_id, 99);
+}

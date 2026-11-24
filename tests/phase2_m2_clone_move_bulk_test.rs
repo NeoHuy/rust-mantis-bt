@@ -604,6 +604,53 @@ async fn test_bulk_actiongroup_mixed_permissions_and_execution() {
     let t1_tags = db.list_bug_tags(b1).unwrap();
     assert!(t1_tags.iter().any(|t| t.tag_name == "bulk-tag-1"));
     assert!(t1_tags.iter().any(|t| t.tag_name == "bulk-tag-2"));
+
+    // 6. Bulk ADD_NOTE with note_view_state=50 (Private note requires Developer eff >= 55):
+    // b1 (Proj A, eff=55) -> private note succeeds!
+    // b3 (Proj B, eff=25) -> private note skipped!
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "bug_arr={}&bug_arr={}&action=ADD_NOTE&bugnote_text=Secret+Note&note_view_state=50",
+                    b1, b3
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("1+issue%28s%29+updated%2C+1+skipped"));
+    let b1_notes = db.list_bugnotes(b1, 90).unwrap();
+    assert!(b1_notes
+        .iter()
+        .any(|n| n.note == "Secret Note" && n.view_state == 50));
+    let b3_notes = db.list_bugnotes(b3, 90).unwrap();
+    assert!(!b3_notes.iter().any(|n| n.note == "Secret Note"));
+
+    // 7. Unknown action fails validation and redirects with err:
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("bug_arr={}&action=UNKNOWN_ACTION", b1)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("err=Please+select+a+valid+action"));
 }
 
 #[tokio::test]

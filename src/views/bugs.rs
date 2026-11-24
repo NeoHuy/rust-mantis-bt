@@ -695,6 +695,12 @@ pub fn render_view_all_bug_page(
         ));
     }
 
+    let current_page_url = build_view_all_bug_page_url(query, page);
+    let return_query = current_page_url
+        .split_once('?')
+        .map(|(_, qs)| qs)
+        .unwrap_or("");
+
     let th_id = render_sortable_th(query, "id", "ID");
     let th_project = "<th>Project</th>";
     let th_category = "<th>Category</th>";
@@ -806,7 +812,8 @@ pub fn render_view_all_bug_page(
                 </div>
             </div>
             <div class="panel-body">
-                <form method="POST" action="/bug_actiongroup">
+                <form method="POST" action="/bug_actiongroup" onsubmit="return handleBulkSubmit();">
+                    <input type="hidden" name="return_query" value="{}">
                     <table class="data-table">
                         <thead>
                             <tr>
@@ -836,6 +843,7 @@ pub fn render_view_all_bug_page(
                     <div class="bulk-action-bar" style="margin-top:12px; padding:10px 12px; background:#f5f5f5; border:1px solid #ddd; border-radius:3px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
                         <span style="font-weight:bold; font-size:12px;">Action:</span>
                         <select name="action" id="bulk_action_select" onchange="updateBulkActionInputs(this.value)" style="width:auto; font-weight:600;">
+                            <option value="" selected disabled>-- Select Action --</option>
                             <option value="MOVE">Move</option>
                             <option value="COPY">Copy</option>
                             <option value="ASSIGN">Assign</option>
@@ -965,6 +973,22 @@ pub fn render_view_all_bug_page(
                         }}
                     }}
                 }}
+                function handleBulkSubmit() {{
+                    var sel = document.getElementById('bulk_action_select');
+                    if (!sel || !sel.value) {{
+                        alert('Please select an action.');
+                        return false;
+                    }}
+                    var checked = document.querySelectorAll('input[name=\'bug_arr\']:checked');
+                    if (checked.length === 0) {{
+                        alert('Please select at least one issue.');
+                        return false;
+                    }}
+                    if (sel.value === 'DELETE') {{
+                        return confirm('Are you sure you want to permanently delete ' + checked.length + ' selected issue(s)?');
+                    }}
+                    return true;
+                }}
                 if (document.getElementById('bulk_action_select')) {{
                     updateBulkActionInputs(document.getElementById('bulk_action_select').value);
                 }}
@@ -990,6 +1014,7 @@ pub fn render_view_all_bug_page(
         save_filter_form,
         total,
         build_csv_export_url(query),
+        html_escape(return_query),
         th_id,
         th_project,
         th_category,

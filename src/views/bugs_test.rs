@@ -1180,7 +1180,10 @@ fn test_render_view_all_bug_page_bulk_action_bar_and_no_nested_forms() {
 
     // Verify bulk action bar
     assert!(html.contains(r#"action="/bug_actiongroup""#));
+    assert!(html.contains(r#"name="return_query""#));
     assert!(html.contains(r#"name="action" id="bulk_action_select""#));
+    assert!(html.contains(r#">-- Select Action --</option>"#));
+    assert!(html.contains("handleBulkSubmit"));
     assert!(html.contains(r#"value="MOVE">Move</option>"#));
     assert!(html.contains(r#"value="COPY">Copy</option>"#));
     assert!(html.contains(r#"value="ASSIGN">Assign</option>"#));

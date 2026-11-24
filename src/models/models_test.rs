@@ -437,3 +437,221 @@ fn test_bug_update_defaults_and_fields() {
     assert_eq!(deserialized.due_date, Some(1700000000));
     assert_eq!(deserialized.sticky, Some(1));
 }
+
+#[test]
+fn test_resolve_possible_values_tokens_and_static() {
+    let versions = vec![
+        ProjectVersion {
+            id: 1,
+            project_id: 1,
+            version: "1.0".to_string(),
+            description: "".to_string(),
+            released: 1,
+            obsolete: 0,
+            date_order: 1,
+        },
+        ProjectVersion {
+            id: 2,
+            project_id: 1,
+            version: "2.0".to_string(),
+            description: "".to_string(),
+            released: 0,
+            obsolete: 0,
+            date_order: 2,
+        },
+        ProjectVersion {
+            id: 3,
+            project_id: 1,
+            version: "0.9".to_string(),
+            description: "".to_string(),
+            released: 1,
+            obsolete: 1,
+            date_order: 0,
+        },
+    ];
+
+    let categories = vec![
+        Category {
+            id: 10,
+            project_id: 1,
+            user_id: 0,
+            name: "Backend".to_string(),
+            status: 0,
+        },
+        Category {
+            id: 11,
+            project_id: 1,
+            user_id: 0,
+            name: "Frontend".to_string(),
+            status: 0,
+        },
+    ];
+
+    // =versions: non-obsolete versions (1.0, 2.0)
+    let res = resolve_possible_values("=versions", &versions, &categories);
+    assert_eq!(res, vec!["1.0", "2.0"]);
+
+    // =released_versions: released & non-obsolete (1.0)
+    let res = resolve_possible_values("=released_versions", &versions, &categories);
+    assert_eq!(res, vec!["1.0"]);
+
+    // =future_versions: unreleased & non-obsolete (2.0)
+    let res = resolve_possible_values("=future_versions", &versions, &categories);
+    assert_eq!(res, vec!["2.0"]);
+
+    // =categories: project categories (Backend, Frontend)
+    let res = resolve_possible_values("=categories", &versions, &categories);
+    assert_eq!(res, vec!["Backend", "Frontend"]);
+
+    // Static pipe-delimited values
+    let res = resolve_possible_values("Red|Green|Blue", &versions, &categories);
+    assert_eq!(res, vec!["Red", "Green", "Blue"]);
+
+    // Static with whitespace
+    let res = resolve_possible_values("  High | Medium | Low  ", &versions, &categories);
+    assert_eq!(res, vec!["High", "Medium", "Low"]);
+
+    // Empty
+    let res = resolve_possible_values("", &versions, &categories);
+    assert!(res.is_empty());
+}
+
+#[test]
+fn test_ymd_validation_and_timestamp_conversion() {
+    // Valid YMD
+    assert!(is_valid_ymd("2024-02-29")); // leap year
+    assert!(is_valid_ymd("2020-02-29")); // leap year
+    assert!(is_valid_ymd("2000-02-29")); // 400 year leap
+    assert!(is_valid_ymd("2023-12-31"));
+    assert!(is_valid_ymd("1970-01-01"));
+
+    // Invalid YMD
+    assert!(!is_valid_ymd("2023-02-29")); // not a leap year
+    assert!(!is_valid_ymd("1900-02-29")); // 100 year non-leap
+    assert!(!is_valid_ymd("2023-04-31")); // April has 30 days
+    assert!(!is_valid_ymd("2023-13-01")); // invalid month
+    assert!(!is_valid_ymd("2023-00-10")); // invalid month
+    assert!(!is_valid_ymd("2023-05-00")); // invalid day
+    assert!(!is_valid_ymd("2023-05-32")); // invalid day
+    assert!(!is_valid_ymd("abcd-ef-gh")); // non-numeric
+    assert!(!is_valid_ymd("2023/05/15")); // wrong separator
+    assert!(!is_valid_ymd("2023-5-15")); // non 2-digit month
+    assert!(!is_valid_ymd(""));
+
+    // Unix timestamp conversion
+    assert_eq!(timestamp_to_ymd(0), Some("1970-01-01".to_string()));
+    assert_eq!(timestamp_to_ymd(1709251200), Some("2024-03-01".to_string()));
+}
+
+#[test]
+fn test_validate_custom_field_value_all_types() {
+    fn make_cf(
+        field_type: i32,
+        possible_values: &str,
+        length_min: i32,
+        length_max: i32,
+    ) -> CustomField {
+        CustomField {
+            id: 1,
+            name: "Test Field".to_string(),
+            field_type,
+            possible_values: possible_values.to_string(),
+            default_value: "".to_string(),
+            valid_regexp: "".to_string(),
+            access_level_r: 10,
+            access_level_rw: 25,
+            length_min,
+            length_max,
+            require_report: 0,
+            require_update: 0,
+            display_report: 1,
+            display_update: 1,
+            require_resolved: 0,
+            display_resolved: 0,
+            display_closed: 0,
+            require_closed: 0,
+            filter_by: 1,
+        }
+    }
+
+    // Empty value when not required is valid and clears field
+    let cf_str = make_cf(0, "", 3, 10);
+    assert!(validate_custom_field_value(&cf_str, "", &[], false).is_ok());
+    // Empty value when required must fail
+    assert!(validate_custom_field_value(&cf_str, "", &[], true).is_err());
+
+    // 0: String length check
+    assert!(validate_custom_field_value(&cf_str, "ab", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_str, "abc", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_str, "abcdefghij", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_str, "abcdefghijk", &[], false).is_err());
+
+    // 1: Numeric (i64)
+    let cf_num = make_cf(1, "", 0, 0);
+    assert!(validate_custom_field_value(&cf_num, "12345", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_num, "-99", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_num, "12.34", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_num, "abc", &[], false).is_err());
+
+    // 2: Float (f64)
+    let cf_flt = make_cf(2, "", 0, 0);
+    assert!(validate_custom_field_value(&cf_flt, "12.34", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_flt, "-0.5", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_flt, "100", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_flt, "NaN", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_flt, "inf", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_flt, "abc", &[], false).is_err());
+
+    // 3: Enum & 6: List
+    let opts: Vec<String> = vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()];
+    let cf_enum = make_cf(3, "Alpha|Beta|Gamma", 0, 0);
+    assert!(validate_custom_field_value(&cf_enum, "Alpha", &opts, false).is_ok());
+    assert!(validate_custom_field_value(&cf_enum, "Delta", &opts, false).is_err());
+
+    let cf_list = make_cf(6, "Alpha|Beta|Gamma", 0, 0);
+    assert!(validate_custom_field_value(&cf_list, "Beta", &opts, false).is_ok());
+    assert!(validate_custom_field_value(&cf_list, "Delta", &opts, false).is_err());
+
+    // 4: Email
+    let cf_email = make_cf(4, "", 0, 0);
+    assert!(validate_custom_field_value(&cf_email, "user@example.com", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_email, "name+tag@sub.domain.co", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_email, "plainaddress", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_email, "@missingusername.com", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_email, "user@domain", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_email, "user@ domain.com", &[], false).is_err());
+
+    // 5: Checkbox & 7: Multilist
+    let cf_check = make_cf(5, "Alpha|Beta|Gamma", 0, 0);
+    assert!(validate_custom_field_value(&cf_check, "Alpha", &opts, false).is_ok());
+    assert!(validate_custom_field_value(&cf_check, "Alpha|Beta", &opts, false).is_ok());
+    assert!(validate_custom_field_value(&cf_check, "Alpha|Delta", &opts, false).is_err());
+
+    let cf_multi = make_cf(7, "Alpha|Beta|Gamma", 0, 0);
+    assert!(validate_custom_field_value(&cf_multi, "Beta|Gamma", &opts, false).is_ok());
+    assert!(validate_custom_field_value(&cf_multi, "Unknown", &opts, false).is_err());
+
+    // 8: Date
+    let cf_date = make_cf(8, "", 0, 0);
+    assert!(validate_custom_field_value(&cf_date, "2024-02-29", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_date, "1709251200", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_date, "2023-02-29", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_date, "invalid-date", &[], false).is_err());
+
+    // 9: Radio
+    let cf_radio = make_cf(9, "Alpha|Beta|Gamma", 0, 0);
+    assert!(validate_custom_field_value(&cf_radio, "Gamma", &opts, false).is_ok());
+    assert!(validate_custom_field_value(&cf_radio, "Zeta", &opts, false).is_err());
+
+    // 10: Textarea
+    let cf_txt = make_cf(10, "", 5, 20);
+    assert!(validate_custom_field_value(&cf_txt, "Hello world", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_txt, "Hi", &[], false).is_err());
+    assert!(validate_custom_field_value(
+        &cf_txt,
+        "This is way too long for a textarea with max 20",
+        &[],
+        false
+    )
+    .is_err());
+}

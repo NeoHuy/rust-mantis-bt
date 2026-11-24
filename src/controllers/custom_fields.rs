@@ -64,12 +64,18 @@ pub struct CustomFieldForm {
     pub possible_values: Option<String>,
     pub default_value: Option<String>,
     pub valid_regexp: Option<String>,
+    pub access_level_r: Option<i32>,
+    pub access_level_rw: Option<i32>,
     pub length_min: Option<i32>,
     pub length_max: Option<i32>,
     pub require_report: Option<String>,
     pub require_update: Option<String>,
     pub display_report: Option<String>,
     pub display_update: Option<String>,
+    pub require_resolved: Option<String>,
+    pub display_resolved: Option<String>,
+    pub require_closed: Option<String>,
+    pub display_closed: Option<String>,
 }
 
 pub async fn manage_custom_field_create(
@@ -81,18 +87,24 @@ pub async fn manage_custom_field_create(
         return forbidden(&ctx, "Administrator access required.");
     }
 
-    match db.create_custom_field(
+    match db.create_custom_field_full(
         &form.name,
         form.field_type.unwrap_or(0),
         form.possible_values.as_deref().unwrap_or(""),
         form.default_value.as_deref().unwrap_or(""),
         form.valid_regexp.as_deref().unwrap_or(""),
+        form.access_level_r.unwrap_or(10),
+        form.access_level_rw.unwrap_or(10),
         form.length_min.unwrap_or(0),
         form.length_max.unwrap_or(0),
         parse_bool(form.require_report.as_deref()),
         parse_bool(form.require_update.as_deref()),
         parse_bool(form.display_report.as_deref()),
         parse_bool(form.display_update.as_deref()),
+        parse_bool(form.require_resolved.as_deref()),
+        parse_bool(form.display_resolved.as_deref()),
+        parse_bool(form.display_closed.as_deref()),
+        parse_bool(form.require_closed.as_deref()),
     ) {
         Ok(id) => Redirect::to(&format!(
             "/manage_custom_field_edit_page/{}?msg=Custom+field+created",
@@ -139,19 +151,25 @@ pub async fn manage_custom_field_update(
     if ctx.user.access_level < 90 {
         return forbidden(&ctx, "Administrator access required.");
     }
-    let _ = db.update_custom_field(
+    let _ = db.update_custom_field_full(
         id,
         &form.name,
         form.field_type.unwrap_or(0),
         form.possible_values.as_deref().unwrap_or(""),
         form.default_value.as_deref().unwrap_or(""),
         form.valid_regexp.as_deref().unwrap_or(""),
+        form.access_level_r.unwrap_or(10),
+        form.access_level_rw.unwrap_or(10),
         form.length_min.unwrap_or(0),
         form.length_max.unwrap_or(0),
         parse_bool(form.require_report.as_deref()),
         parse_bool(form.require_update.as_deref()),
         parse_bool(form.display_report.as_deref()),
         parse_bool(form.display_update.as_deref()),
+        parse_bool(form.require_resolved.as_deref()),
+        parse_bool(form.display_resolved.as_deref()),
+        parse_bool(form.display_closed.as_deref()),
+        parse_bool(form.require_closed.as_deref()),
     );
     Redirect::to(&format!(
         "/manage_custom_field_edit_page/{}?msg=Updated",

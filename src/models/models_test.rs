@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[test]
 fn test_access_level_conversion_and_strings() {
@@ -663,4 +664,192 @@ fn test_validate_custom_field_value_all_types() {
         false
     )
     .is_err());
+}
+
+#[test]
+fn test_custom_field_valid_regexp_enforcement() {
+    let mut cf = CustomField {
+        id: 1,
+        name: "IssueCode".to_string(),
+        field_type: 0, // String
+        possible_values: "".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: r"^[A-Z]{3}-\d{4}$".to_string(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 0,
+        require_report: 0,
+        require_update: 0,
+        display_report: 1,
+        display_update: 1,
+        require_resolved: 0,
+        display_resolved: 0,
+        display_closed: 0,
+        require_closed: 0,
+        filter_by: 1,
+    };
+
+    // 1. Matching value passes
+    assert!(validate_custom_field_value(&cf, "ABC-1234", &[], false).is_ok());
+
+    // 2. Non-matching value fails with clear message
+    let err = validate_custom_field_value(&cf, "abc-1234", &[], false).unwrap_err();
+    assert_eq!(
+        err,
+        "Custom field 'IssueCode' does not match required pattern"
+    );
+
+    let err2 = validate_custom_field_value(&cf, "ABC-12", &[], false).unwrap_err();
+    assert_eq!(
+        err2,
+        "Custom field 'IssueCode' does not match required pattern"
+    );
+
+    // 3. Empty value on non-required field succeeds without regex evaluation
+    assert!(validate_custom_field_value(&cf, "", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf, "   ", &[], false).is_ok());
+
+    // 4. Empty value on required field fails with required error
+    cf.require_report = 1;
+    let req_err = validate_custom_field_value(&cf, "", &[], true).unwrap_err();
+    assert_eq!(req_err, "Custom field 'IssueCode' is required");
+
+    // 5. Invalid pattern in legacy row produces informative error without crashing
+    cf.valid_regexp = "[unclosed".to_string();
+    let pat_err = validate_custom_field_value(&cf, "ABC-1234", &[], false).unwrap_err();
+    assert!(pat_err.contains("has invalid pattern"));
+}
+
+#[test]
+fn test_compile_custom_field_regex_safety_and_errors() {
+    // Valid patterns
+    assert!(compile_custom_field_regex(r"^\d+$").is_ok());
+    assert!(
+        compile_custom_field_regex(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$").is_ok()
+    );
+
+    // Invalid syntax
+    let syn_err = compile_custom_field_regex(r"(?P<invalid").unwrap_err();
+    assert!(!syn_err.is_empty());
+
+    // Pathological / oversized pattern exceeding 1 MiB size limit
+    let huge_pattern = "(?:[a-zA-Z0-9]{500}){1000}";
+    let size_err = compile_custom_field_regex(huge_pattern).unwrap_err();
+    assert!(
+        size_err.to_lowercase().contains("limit") || size_err.to_lowercase().contains("size"),
+        "Expected size limit error, got: {}",
+        size_err
+    );
+}
+
+#[test]
+fn test_validate_regex_pattern_helper() {
+    // Empty or whitespace-only returns Ok(())
+    assert!(validate_regex_pattern("").is_ok());
+    assert!(validate_regex_pattern("   \t\n  ").is_ok());
+
+    // Valid pattern returns Ok(())
+    assert!(validate_regex_pattern(r"^[0-9]{3}-[A-Z]+$").is_ok());
+
+    // Invalid pattern returns Err
+    let err = validate_regex_pattern(r"[unclosed").unwrap_err();
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn test_build_roadmap_groups_pure_domain_logic() {
+    let mut project_names = HashMap::new();
+    project_names.insert(1, "Project Alpha".to_string());
+    project_names.insert(2, "Project Beta".to_string());
+
+    let versions = vec![
+        ProjectVersion {
+            id: 1,
+            project_id: 1,
+            version: "v1.0".to_string(),
+            description: "".to_string(),
+            released: 1,
+            obsolete: 0,
+            date_order: 100,
+        },
+        ProjectVersion {
+            id: 2,
+            project_id: 1,
+            version: "v2.0".to_string(),
+            description: "".to_string(),
+            released: 0,
+            obsolete: 1, // Obsolete for Project 1
+            date_order: 200,
+        },
+        ProjectVersion {
+            id: 3,
+            project_id: 2,
+            version: "v2.0".to_string(),
+            description: "".to_string(),
+            released: 0,
+            obsolete: 0, // Active for Project 2
+            date_order: 150,
+        },
+    ];
+
+    let make_bug = |id: i64, project_id: i64, target_version: &str| Bug {
+        id,
+        project_id,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 50,
+        resolution: 10,
+        os: "".to_string(),
+        os_build: "".to_string(),
+        platform: "".to_string(),
+        version: "".to_string(),
+        fixed_in_version: "".to_string(),
+        build: "".to_string(),
+        view_state: 10,
+        summary: format!("Bug {}", id),
+        sticky: 0,
+        target_version: target_version.to_string(),
+        category_id: 1,
+        date_submitted: 1000,
+        due_date: 0,
+        last_updated: 1000,
+    };
+
+    let bugs = vec![
+        make_bug(101, 1, "v1.0"),
+        make_bug(102, 1, "v2.0"), // Excluded: v2.0 is obsolete in project 1
+        make_bug(103, 2, "v2.0"), // Included: v2.0 is active in project 2
+        make_bug(104, 2, "v9.9"), // Unknown version for project 2: appended
+        make_bug(105, 999, "v1.0"), // Inaccessible project 999: excluded
+    ];
+
+    let groups = build_roadmap_groups(&[1, 2], versions, bugs, &project_names);
+
+    assert_eq!(groups.len(), 3);
+
+    // Group 1: Project 2 v2.0 (date_order 150)
+    assert_eq!(groups[0].version, "v2.0");
+    assert_eq!(groups[0].project_id, Some(2));
+    assert_eq!(groups[0].project_name, Some("Project Beta".to_string()));
+    assert_eq!(groups[0].bugs.len(), 1);
+    assert_eq!(groups[0].bugs[0].id, 103);
+
+    // Group 2: Project 1 v1.0 (date_order 100)
+    assert_eq!(groups[1].version, "v1.0");
+    assert_eq!(groups[1].project_id, Some(1));
+    assert_eq!(groups[1].project_name, Some("Project Alpha".to_string()));
+    assert!(groups[1].released);
+    assert_eq!(groups[1].bugs.len(), 1);
+    assert_eq!(groups[1].bugs[0].id, 101);
+
+    // Group 3: Project 2 v9.9 (unknown appended)
+    assert_eq!(groups[2].version, "v9.9");
+    assert_eq!(groups[2].project_id, Some(2));
+    assert_eq!(groups[2].bugs.len(), 1);
+    assert_eq!(groups[2].bugs[0].id, 104);
 }

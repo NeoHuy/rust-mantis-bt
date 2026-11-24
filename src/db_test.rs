@@ -2751,3 +2751,145 @@ fn test_tag_usage_counts_and_helpers() {
 
     assert!(db.get_tag_with_count_by_id(9999).unwrap().is_none());
 }
+
+#[test]
+fn test_custom_field_regex_validation_in_db() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db.create_project("RegexpProj", 10, 10, "", true).unwrap();
+    let uid = db
+        .create_user(
+            "admin_reg",
+            "Admin Reg",
+            "ar@example.com",
+            "pass",
+            90,
+            true,
+            false,
+        )
+        .unwrap();
+
+    // 1. Invalid regex rejected on create_custom_field_full
+    let create_err = db
+        .create_custom_field_full(
+            "InvalidCF",
+            0,
+            "",
+            "",
+            "[unclosed-regex",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap_err();
+    assert!(
+        create_err.contains("Invalid regular expression"),
+        "Expected invalid regex error on create, got: {}",
+        create_err
+    );
+
+    // 2. Valid regex succeeds on create
+    let cf_id = db
+        .create_custom_field_full(
+            "ProductSKU",
+            0,
+            "",
+            "",
+            r"^[0-9]{4}-[A-Z]{2}$",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_id, pid, 1).unwrap();
+
+    // 3. Invalid regex rejected on update_custom_field_full
+    let update_err = db
+        .update_custom_field_full(
+            cf_id,
+            "ProductSKU",
+            0,
+            "",
+            "",
+            "(?P<broken",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap_err();
+    assert!(
+        update_err.contains("Invalid regular expression"),
+        "Expected invalid regex error on update, got: {}",
+        update_err
+    );
+
+    // 4. Create bug and verify set_custom_field_value regex enforcement
+    let bid = db
+        .create_bug(
+            pid,
+            uid,
+            1,
+            "SKU Bug",
+            "Testing SKU regex",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Non-matching value fails
+    let val_err = db
+        .set_custom_field_value(cf_id, bid, uid, "123-abc")
+        .unwrap_err();
+    assert!(
+        val_err.contains("does not match required pattern"),
+        "Expected pattern mismatch, got: {}",
+        val_err
+    );
+
+    // Matching value succeeds
+    db.set_custom_field_value(cf_id, bid, uid, "2024-XY")
+        .unwrap();
+    let cf_vals = db.get_custom_field_values_for_bug(bid).unwrap();
+    assert_eq!(cf_vals.len(), 1);
+    assert_eq!(cf_vals[0].value, "2024-XY");
+
+    // Empty value clears field without regex error
+    db.set_custom_field_value(cf_id, bid, uid, "").unwrap();
+    let cf_vals_cleared = db.get_custom_field_values_for_bug(bid).unwrap();
+    assert_eq!(cf_vals_cleared.len(), 1);
+    assert_eq!(cf_vals_cleared[0].value, "");
+}

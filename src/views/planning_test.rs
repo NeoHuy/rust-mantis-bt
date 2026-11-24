@@ -87,11 +87,15 @@ fn test_render_roadmap_page_with_items() {
             version: "1.0.0".to_string(),
             released: true,
             bugs: vec![bug],
+            project_name: None,
+            project_id: None,
         },
         RoadmapVersionGroup {
             version: "2.0.0".to_string(),
             released: false,
             bugs: vec![],
+            project_name: None,
+            project_id: None,
         },
     ];
     let mut users_map = HashMap::new();
@@ -105,6 +109,35 @@ fn test_render_roadmap_page_with_items() {
     assert!(html.contains("(alice)"));
     assert!(html.contains("Released"));
     assert!(html.contains("Planned"));
+    assert!(!html.contains("badge-info"));
+}
+
+#[test]
+fn test_render_roadmap_page_with_multiple_projects_shows_badge() {
+    let ctx = dummy_ctx();
+    let groups = vec![
+        RoadmapVersionGroup {
+            version: "1.0.0".to_string(),
+            released: true,
+            bugs: vec![],
+            project_name: Some("Project Alpha".to_string()),
+            project_id: Some(1),
+        },
+        RoadmapVersionGroup {
+            version: "1.0.0".to_string(),
+            released: false,
+            bugs: vec![],
+            project_name: Some("Project Beta".to_string()),
+            project_id: Some(2),
+        },
+    ];
+    let users_map = HashMap::new();
+
+    let out = render_roadmap_page(&ctx, &groups, &users_map);
+    let html = out.0;
+    assert!(html.contains("Project Alpha"));
+    assert!(html.contains("Project Beta"));
+    assert!(html.contains("badge-info"));
 }
 
 #[test]

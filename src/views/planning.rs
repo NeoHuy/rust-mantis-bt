@@ -36,6 +36,16 @@ pub fn render_roadmap_page(
     users_map: &HashMap<i64, String>,
 ) -> Html<String> {
     let mut sections_html = String::new();
+    let distinct_projects_count = version_groups
+        .iter()
+        .filter_map(|g| {
+            g.project_id
+                .map(|id| id.to_string())
+                .or_else(|| g.project_name.clone())
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
     if version_groups.is_empty() {
         sections_html.push_str("<p>No roadmap items with a Target Version found.</p>");
     } else {
@@ -47,6 +57,18 @@ pub fn render_roadmap_page(
                 r#" <span class="badge badge-success" style="margin-left:8px;">Released</span>"#
             } else {
                 r#" <span class="badge badge-warning" style="margin-left:8px;">Planned</span>"#
+            };
+            let proj_badge = if distinct_projects_count > 1 {
+                if let Some(ref pname) = group.project_name {
+                    format!(
+                        r#" <span class="badge badge-info" style="margin-left:8px;">{}</span>"#,
+                        html_escape(pname)
+                    )
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
             };
 
             let mut list_html = String::new();
@@ -85,7 +107,7 @@ pub fn render_roadmap_page(
 
             sections_html.push_str(&format!(
                 r#"<div class="panel">
-                    <div class="panel-header">Target Version: {} — {} / {} resolved ({}%){}</div>
+                    <div class="panel-header">Target Version: {} — {} / {} resolved ({}%){}{}</div>
                     <div class="panel-body">
                         <div style="background:#e0e6ed; height:12px; border-radius:6px; overflow:hidden; margin-bottom:12px; max-width:400px;">
                             <div style="background:#5cb85c; width:{}%; height:100%;"></div>
@@ -100,6 +122,7 @@ pub fn render_roadmap_page(
                 total,
                 pct,
                 badge,
+                proj_badge,
                 pct,
                 list_html
             ));

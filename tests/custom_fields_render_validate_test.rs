@@ -1059,3 +1059,247 @@ async fn test_manage_custom_field_admin_crud_saves_new_access_and_display_flags(
     assert_eq!(cf_updated.display_closed, 1);
     assert_eq!(cf_updated.require_closed, 1);
 }
+
+#[tokio::test]
+async fn test_custom_field_valid_regexp_http_lifecycle_and_backward_compat() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("RegexpHttpProj", 10, 10, "", true)
+        .unwrap();
+    let app = build_router(db.clone());
+
+    let admin_cookie = login_user(&app, "administrator", "root").await;
+    let cookie = set_project_cookie(&app, &admin_cookie, proj_id).await;
+
+    // 1. POST /manage_custom_field_create with invalid regex fails and redirects with err
+    let bad_form = "name=BadRegexField&field_type=0&valid_regexp=%5Bopen-bracket";
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/manage_custom_field_create")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(bad_form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.contains("err="));
+    assert!(db.list_custom_fields().unwrap().is_empty());
+
+    // 2. POST /manage_custom_field_create with valid regex succeeds
+    let good_form = "name=TrackingCode&field_type=0&display_report=1&display_update=1&valid_regexp=%5E%5BA-Z%5D%7B3%7D-%5B0-9%5D%7B3%7D%24";
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/manage_custom_field_create")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(good_form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let cf = db
+        .list_custom_fields()
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "TrackingCode")
+        .expect("TrackingCode custom field created");
+    assert_eq!(cf.valid_regexp, "^[A-Z]{3}-[0-9]{3}$");
+    db.link_custom_field_to_project(cf.id, proj_id, 1).unwrap();
+
+    // 3. POST /manage_custom_field_update/{id} with invalid regex is rejected
+    let bad_update = "name=TrackingCode&field_type=0&valid_regexp=(%3FP%3Cbroken";
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/manage_custom_field_update/{}", cf.id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(bad_update))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.contains("err="));
+    // Verify valid_regexp in DB wasn't corrupted
+    let cf_current = db.get_custom_field_by_id(cf.id).unwrap().unwrap();
+    assert_eq!(cf_current.valid_regexp, "^[A-Z]{3}-[0-9]{3}$");
+
+    // 4. Bug report with non-matching regex fails
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&category_id=1&summary=Bad+Regex+Value&description=Desc&custom_field_{}=abc-123",
+                    proj_id, cf.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.contains("err="));
+
+    // 5. Bug report with matching regex succeeds
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&category_id=1&summary=Good+Regex+Value&description=Desc&custom_field_{}=ABC-123",
+                    proj_id, cf.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let bugs = db.list_bugs(proj_id, 0, 10).unwrap();
+    assert_eq!(bugs.len(), 1);
+    let bug_id = bugs[0].id;
+
+    // 6. Bug update with non-matching regex fails
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/update_bug/{}", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "summary=Updated+Bug&description=Desc&custom_field_{}=bad-value",
+                    cf.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.contains("err="));
+
+    // 7. Bug update with matching regex succeeds
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/update_bug/{}", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "summary=Updated+Bug&description=Desc&custom_field_{}=XYZ-789",
+                    cf.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // 8. Backward compatibility: legacy DB rows with invalid regex or non-matching data
+    // Directly mutate DB to simulate legacy row with broken regex
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_custom_field_table SET valid_regexp = '[unclosed-bracket' WHERE id = ?1",
+            rusqlite::params![cf.id],
+        )
+        .unwrap();
+    }
+
+    // GET /view_bug_page/:id must render 200 OK without panic/crash
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(html.contains("TrackingCode"));
+    assert!(html.contains("XYZ-789"));
+
+    // GET /update_bug_page/:id must render 200 OK without panic/crash
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/update_bug_page/{}", bug_id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // GET /manage_custom_field_edit_page/:id must render 200 OK without panic/crash
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/manage_custom_field_edit_page/{}", cf.id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // POST /update_bug/:id with non-empty value on field with broken regex fails gracefully with sanitized error redirect
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/update_bug/{}", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "summary=Updated+Title&description=Updated+Desc&custom_field_{}=XYZ-123",
+                    cf.id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.contains("err="));
+    assert!(loc.contains("has+invalid+pattern") || loc.contains("invalid"));
+}

@@ -668,8 +668,11 @@ pub async fn bug_report(
             let is_req = cf.require_report != 0;
             if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
             {
-                return Redirect::to(&format!("/bug_report_page?err={}", url_encode(&e)))
-                    .into_response();
+                return Redirect::to(&format!(
+                    "/bug_report_page?err={}",
+                    url_encode(&sanitize_error_message(&e))
+                ))
+                .into_response();
             }
             custom_field_values_to_set.push((cf.id, val));
         }
@@ -1383,8 +1386,12 @@ pub async fn update_bug(
             let is_req = cf.require_update != 0;
             if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
             {
-                return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
-                    .into_response();
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err={}",
+                    id,
+                    url_encode(&sanitize_error_message(&e))
+                ))
+                .into_response();
             }
             custom_field_values_to_set.push((cf.id, val));
         }
@@ -1394,8 +1401,12 @@ pub async fn update_bug(
         Ok(_) => {
             for (cf_id, val) in custom_field_values_to_set {
                 if let Err(e) = db.set_custom_field_value(cf_id, id, ctx.user.id, &val) {
-                    return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
-                        .into_response();
+                    return Redirect::to(&format!(
+                        "/view_bug_page/{}?err={}",
+                        id,
+                        url_encode(&sanitize_error_message(&e))
+                    ))
+                    .into_response();
                 }
             }
             Redirect::to(&format!("/view_bug_page/{}?msg=Issue+updated", id)).into_response()
@@ -1594,8 +1605,12 @@ pub async fn bug_change_status(
                 crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
             if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
             {
-                return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
-                    .into_response();
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err={}",
+                    id,
+                    url_encode(&sanitize_error_message(&e))
+                ))
+                .into_response();
             }
             custom_field_values_to_set.push((cf.id, val));
         } else if is_req && current_val.trim().is_empty() {

@@ -631,6 +631,15 @@ fn test_validate_custom_field_value_all_types() {
     assert!(validate_custom_field_value(&cf_multi, "Beta|Gamma", &opts, false).is_ok());
     assert!(validate_custom_field_value(&cf_multi, "Unknown", &opts, false).is_err());
 
+    // Choice fields with empty options list reject non-empty values
+    assert!(validate_custom_field_value(&cf_enum, "Alpha", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_list, "Beta", &[], false).is_err());
+    assert!(validate_custom_field_value(&cf_multi, "Beta", &[], false).is_err());
+    // Checkbox with empty options accepts "1" (boolean toggle) but rejects other values
+    let cf_bool_check = make_cf(5, "", 0, 0);
+    assert!(validate_custom_field_value(&cf_bool_check, "1", &[], false).is_ok());
+    assert!(validate_custom_field_value(&cf_bool_check, "invalid", &[], false).is_err());
+
     // 8: Date
     let cf_date = make_cf(8, "", 0, 0);
     assert!(validate_custom_field_value(&cf_date, "2024-02-29", &[], false).is_ok());

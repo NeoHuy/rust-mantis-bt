@@ -1045,7 +1045,12 @@ pub fn render_view_bug_page(
 
     let mut cf_rows_html = String::new();
     for cfv in cf_values {
-        let display_value = if cfv.value.contains('|') {
+        let is_multi = matches!(
+            crate::models::CustomFieldType::from_i32(cfv.field_type),
+            Some(crate::models::CustomFieldType::Checkbox)
+                | Some(crate::models::CustomFieldType::Multilist)
+        );
+        let display_value = if is_multi && cfv.value.contains('|') {
             cfv.value.replace('|', ", ")
         } else {
             cfv.value.clone()

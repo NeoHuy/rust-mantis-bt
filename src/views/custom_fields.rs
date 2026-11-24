@@ -190,7 +190,10 @@ pub fn render_custom_field_input(
         Some(CustomFieldType::Radio) => {
             let opts =
                 crate::models::resolve_possible_values(&cf.possible_values, versions, categories);
-            let mut radios_html = String::new();
+            let mut radios_html = format!(
+                r#"<input type="hidden" name="custom_field_{}_present" value="1">"#,
+                cf.id
+            );
             for (idx, opt) in opts.iter().enumerate() {
                 let checked = if current_value == opt { " checked" } else { "" };
                 let opt_req = if required && idx == 0 {

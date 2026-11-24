@@ -2,7 +2,7 @@ use super::{sanitize_error_message, url_encode};
 use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::models::{
-    clamp_per_page, sort_bugs, url_encode, BugFilter, BugUpdate, CustomFieldType, ListBugsQuery,
+    clamp_per_page, sort_bugs, BugFilter, BugUpdate, CustomFieldType, ListBugsQuery,
 };
 use crate::views;
 use axum::body::Bytes;
@@ -679,6 +679,8 @@ pub async fn bug_report(
                     .into_response();
             }
             custom_field_values_to_set.push((cf.id, val));
+        } else if !cf.default_value.is_empty() {
+            custom_field_values_to_set.push((cf.id, cf.default_value.clone()));
         }
     }
 
@@ -722,7 +724,10 @@ pub async fn bug_report(
     }
 
     for (cf_id, val) in custom_field_values_to_set {
-        let _ = db.set_custom_field_value(cf_id, bug_id, ctx.user.id, &val);
+        if let Err(e) = db.set_custom_field_value(cf_id, bug_id, ctx.user.id, &val) {
+            return Redirect::to(&format!("/view_bug_page/{}?err={}", bug_id, url_encode(&e)))
+                .into_response();
+        }
     }
 
     Redirect::to(&format!("/view_bug_page/{}", bug_id)).into_response()
@@ -1556,10 +1561,11 @@ pub async fn bug_change_status(
     for cf in &custom_fields {
         let is_resolving = new_status == 80;
         let is_closing = new_status == 90;
+        let can_write = eff >= cf.access_level_rw;
         let require_check = if is_closing {
-            cf.require_closed != 0
+            can_write && cf.display_closed != 0 && cf.require_closed != 0
         } else if is_resolving {
-            cf.require_resolved != 0
+            can_write && cf.display_resolved != 0 && cf.require_resolved != 0
         } else {
             false
         };
@@ -1611,7 +1617,10 @@ pub async fn bug_change_status(
     match db.change_bug_status(id, ctx.user.id, new_status, resolution, note.as_deref()) {
         Ok(()) => {
             for (cf_id, val) in custom_field_values_to_set {
-                let _ = db.set_custom_field_value(cf_id, id, ctx.user.id, &val);
+                if let Err(e) = db.set_custom_field_value(cf_id, id, ctx.user.id, &val) {
+                    return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
+                        .into_response();
+                }
             }
             Redirect::to(&format!("/view_bug_page/{}?msg=Status+updated", id)).into_response()
         }

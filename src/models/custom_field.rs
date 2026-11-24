@@ -268,9 +268,13 @@ pub fn validate_custom_field_value(
         Some(CustomFieldType::Enum)
         | Some(CustomFieldType::List)
         | Some(CustomFieldType::Radio) => {
-            if !resolved_possible_values.is_empty()
-                && !resolved_possible_values.iter().any(|opt| opt == trimmed)
-            {
+            if resolved_possible_values.is_empty() {
+                return Err(format!(
+                    "No options available for custom field '{}'",
+                    cf.name
+                ));
+            }
+            if !resolved_possible_values.iter().any(|opt| opt == trimmed) {
                 return Err(format!(
                     "Invalid value '{}' for custom field '{}'",
                     trimmed, cf.name
@@ -278,8 +282,15 @@ pub fn validate_custom_field_value(
             }
             Ok(())
         }
-        Some(CustomFieldType::Checkbox) | Some(CustomFieldType::Multilist) => {
-            if !resolved_possible_values.is_empty() {
+        Some(CustomFieldType::Checkbox) => {
+            if resolved_possible_values.is_empty() {
+                if trimmed != "1" && !trimmed.eq_ignore_ascii_case("true") {
+                    return Err(format!(
+                        "Invalid value '{}' for custom field '{}'",
+                        trimmed, cf.name
+                    ));
+                }
+            } else {
                 let items: Vec<&str> = trimmed
                     .split('|')
                     .map(|s| s.trim())
@@ -292,6 +303,28 @@ pub fn validate_custom_field_value(
                             item, cf.name
                         ));
                     }
+                }
+            }
+            Ok(())
+        }
+        Some(CustomFieldType::Multilist) => {
+            if resolved_possible_values.is_empty() {
+                return Err(format!(
+                    "No options available for custom field '{}'",
+                    cf.name
+                ));
+            }
+            let items: Vec<&str> = trimmed
+                .split('|')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            for item in items {
+                if !resolved_possible_values.iter().any(|opt| opt == item) {
+                    return Err(format!(
+                        "Invalid value '{}' for custom field '{}'",
+                        item, cf.name
+                    ));
                 }
             }
             Ok(())

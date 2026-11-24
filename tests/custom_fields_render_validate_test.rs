@@ -451,3 +451,281 @@ async fn test_require_resolved_and_closed_status_transitions() {
     let cf_values = db.get_custom_field_values_for_bug(bug_id).unwrap();
     assert_eq!(cf_values[0].value, "Fixed in build 42");
 }
+
+#[tokio::test]
+async fn test_resolve_status_transition_skips_when_user_cannot_write() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("DevResolveProj", 10, 10, "", true)
+        .unwrap();
+
+    // Create Developer user (access 55)
+    let dev_id = db
+        .create_user(
+            "dev_user",
+            "Developer",
+            "dev@test.com",
+            "password",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let app = build_router(db.clone());
+
+    // Create custom field required on resolve, but only writable by Manager (70)
+    db.create_custom_field_full(
+        "ManagerSignoff",
+        0, // String
+        "",
+        "",
+        "",
+        10,
+        70, // RW requires Manager (70)
+        0,
+        0,
+        false,
+        false,
+        false,
+        false,
+        true, // require_resolved
+        true, // display_resolved
+        false,
+        false,
+    )
+    .unwrap();
+    let cf_id = db.list_custom_fields().unwrap()[0].id;
+    db.link_custom_field_to_project(cf_id, proj_id, 1).unwrap();
+
+    // Create a bug
+    let bug_id = db
+        .create_bug(
+            proj_id, dev_id, 1, "Dev Bug", "Desc", "", "", 50, 10, 30, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    // Developer logs in
+    let dev_cookie = login_user(&app, "dev_user", "password").await;
+    let cookie = set_project_cookie(&app, &dev_cookie, proj_id).await;
+
+    // Developer changes status to 80 (Resolved).
+    // Because Developer cannot write ManagerSignoff (55 < 70), the required check is skipped,
+    // and Developer is not blocked from resolving issues!
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_change_status/{}", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("new_status=80"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.contains("msg=Status+updated"));
+
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.status, 80);
+}
+
+#[tokio::test]
+async fn test_required_radio_unselected_on_update_fails() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("RadioProj", 10, 10, "", true).unwrap();
+    let app = build_router(db.clone());
+
+    let admin_cookie = login_user(&app, "administrator", "root").await;
+    let cookie = set_project_cookie(&app, &admin_cookie, proj_id).await;
+
+    // Create Radio field (Type 9) required on update
+    db.create_custom_field_full(
+        "PriorityLevel",
+        9, // Radio
+        "Low|Medium|High",
+        "Medium",
+        "",
+        10,
+        25,
+        0,
+        0,
+        false,
+        true, // require_update
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+    let cf_id = db.list_custom_fields().unwrap()[0].id;
+    db.link_custom_field_to_project(cf_id, proj_id, 1).unwrap();
+
+    // Create a bug with initial value "Medium"
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            1,
+            1,
+            "Radio Bug",
+            "Desc",
+            "",
+            "",
+            50,
+            10,
+            30,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_id, bug_id, 1, "Medium")
+        .unwrap();
+
+    // Submit update with radio present marker but no selection
+    let update_form = format!(
+        "summary=Radio+Bug&description=Desc&custom_field_{}_present=1",
+        cf_id
+    );
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/update_bug/{}", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(update_form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.contains("err="));
+    assert!(loc.contains("PriorityLevel"));
+
+    // DB value should remain "Medium"
+    let cf_values = db.get_custom_field_values_for_bug(bug_id).unwrap();
+    assert_eq!(cf_values[0].value, "Medium");
+}
+
+#[tokio::test]
+async fn test_rest_api_filters_custom_fields_by_access_level_r() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("ApiFilterProj", 10, 10, "", true)
+        .unwrap();
+
+    // Create Viewer user (access 10)
+    let viewer_id = db
+        .create_user(
+            "view_user",
+            "Viewer",
+            "view@test.com",
+            "password",
+            10,
+            true,
+            false,
+        )
+        .unwrap();
+    let (_token_id, raw_token) = db.create_api_token(viewer_id, "Viewer API Token").unwrap();
+    let app = build_router(db.clone());
+
+    // 1. Public custom field (readable by Viewer: r=10)
+    db.create_custom_field_full(
+        "PublicField",
+        0,
+        "",
+        "",
+        "",
+        10,
+        25,
+        0,
+        0,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    // 2. Secret custom field (readable by Developer only: r=55)
+    db.create_custom_field_full(
+        "DevSecretField",
+        0,
+        "",
+        "",
+        "",
+        55, // access_level_r = 55
+        55,
+        0,
+        0,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+
+    let all_cfs = db.list_custom_fields().unwrap();
+    let cf_public_id = all_cfs.iter().find(|c| c.name == "PublicField").unwrap().id;
+    let cf_secret_id = all_cfs
+        .iter()
+        .find(|c| c.name == "DevSecretField")
+        .unwrap()
+        .id;
+
+    db.link_custom_field_to_project(cf_public_id, proj_id, 1)
+        .unwrap();
+    db.link_custom_field_to_project(cf_secret_id, proj_id, 2)
+        .unwrap();
+
+    // Create a bug
+    let bug_id = db
+        .create_bug(
+            proj_id, 1, 1, "API Bug", "Desc", "", "", 50, 10, 30, "", "", "", "", 10,
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_public_id, bug_id, 1, "VisibleData")
+        .unwrap();
+    db.set_custom_field_value(cf_secret_id, bug_id, 1, "SecretData")
+        .unwrap();
+
+    // Viewer calls REST API GET /api/rest/issues/:id
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/rest/issues/{}", bug_id))
+                .header("authorization", format!("Bearer {}", raw_token))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let json_val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let cfs = json_val["issues"][0]["custom_fields"].as_array().unwrap();
+    // Only PublicField should be returned, DevSecretField MUST be filtered out!
+    assert_eq!(cfs.len(), 1);
+    assert_eq!(cfs[0]["field"]["name"], "PublicField");
+    assert_eq!(cfs[0]["value"], "VisibleData");
+}

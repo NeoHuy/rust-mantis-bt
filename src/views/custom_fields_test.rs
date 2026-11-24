@@ -325,3 +325,108 @@ fn test_render_custom_fields_form_rows_access_and_required() {
     assert!(html_upd.contains("readonly-custom-field"));
     assert!(html_upd.contains("Public Field *"));
 }
+
+#[test]
+fn test_render_custom_fields_form_rows_resolve_and_close() {
+    let cf_res = CustomField {
+        id: 10,
+        name: "Resolution Reason".to_string(),
+        field_type: 0, // String
+        possible_values: "".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: "".to_string(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 255,
+        display_report: 0,
+        display_update: 0,
+        display_resolved: 1,
+        display_closed: 0,
+        require_report: 0,
+        require_update: 0,
+        require_resolved: 1,
+        require_closed: 0,
+        filter_by: 0,
+    };
+
+    let cf_close = CustomField {
+        id: 11,
+        name: "Closing Verification".to_string(),
+        field_type: 0,
+        possible_values: "".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: "".to_string(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 255,
+        display_report: 0,
+        display_update: 0,
+        display_resolved: 0,
+        display_closed: 1,
+        require_report: 0,
+        require_update: 0,
+        require_resolved: 0,
+        require_closed: 1,
+        filter_by: 0,
+    };
+
+    let fields = vec![cf_res, cf_close];
+    let values = std::collections::HashMap::new();
+    let versions = vec![];
+    let categories = vec![];
+
+    // Resolve mode: shows Resolution Reason *
+    let html_res = render_custom_fields_form_rows(
+        &fields,
+        &values,
+        55,
+        CustomFieldFormMode::Resolve,
+        &versions,
+        &categories,
+    );
+    assert!(html_res.contains("Resolution Reason *"));
+    assert!(!html_res.contains("Closing Verification"));
+
+    // Close mode: shows Closing Verification *
+    let html_close = render_custom_fields_form_rows(
+        &fields,
+        &values,
+        70,
+        CustomFieldFormMode::Close,
+        &versions,
+        &categories,
+    );
+    assert!(!html_close.contains("Resolution Reason"));
+    assert!(html_close.contains("Closing Verification *"));
+}
+
+#[test]
+fn test_readonly_checkbox_multilist_renders_comma_separated() {
+    let cf = CustomField {
+        id: 20,
+        name: "Platforms".to_string(),
+        field_type: 5, // Checkbox
+        possible_values: "Win|Mac|Linux".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: "".to_string(),
+        access_level_r: 10,
+        access_level_rw: 70,
+        length_min: 0,
+        length_max: 0,
+        display_report: 1,
+        display_update: 1,
+        display_resolved: 0,
+        display_closed: 0,
+        require_report: 0,
+        require_update: 0,
+        require_resolved: 0,
+        require_closed: 0,
+        filter_by: 0,
+    };
+
+    let rendered = render_custom_field_input(&cf, "Win|Linux", false, true, &[], &[]);
+    assert!(rendered.contains("Win, Linux"));
+    assert!(!rendered.contains("Win|Linux"));
+}

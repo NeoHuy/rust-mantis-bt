@@ -729,3 +729,333 @@ async fn test_rest_api_filters_custom_fields_by_access_level_r() {
     assert_eq!(cfs[0]["field"]["name"], "PublicField");
     assert_eq!(cfs[0]["value"], "VisibleData");
 }
+
+#[tokio::test]
+async fn test_readonly_default_value_does_not_abort_report_when_invalid() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    let cookie = login_user(&app, "administrator", "root").await;
+    let proj_id = db
+        .create_project("ReadonlyDefaultProj", 10, 10, "", true)
+        .unwrap();
+    let _cookie = set_project_cookie(&app, &cookie, proj_id).await;
+
+    // Create an Enum custom field with a default value that is NOT in possible_values.
+    // access_level_rw = 70 (Manager), so a Reporter (25) cannot write it.
+    let cf_id = db
+        .create_custom_field_full(
+            "TargetStage",
+            3, // Enum
+            "alpha|beta|gamma",
+            "deprecated_stage", // invalid option
+            "",
+            10,
+            70,
+            0,
+            0,
+            false,
+            false,
+            true, // display_report
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_id, proj_id, 1).unwrap();
+
+    let _ = db
+        .create_user(
+            "reporter_user",
+            "Reporter User",
+            "rep@x.com",
+            "pass",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let rep_cookie = login_user(&app, "reporter_user", "pass").await;
+    let rep_cookie = set_project_cookie(&app, &rep_cookie, proj_id).await;
+
+    // Reporter reports an issue without submitting custom_field_TargetStage (since user cannot write it)
+    let body = format!(
+        "project_id={}&category_id=1&summary=ReportIssueOk&description=Desc",
+        proj_id
+    );
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Should redirect to /view_bug_page/1 without failing on the invalid default
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(loc.starts_with("/view_bug_page/"));
+    assert!(!loc.contains("err="));
+}
+
+#[tokio::test]
+async fn test_bug_change_status_ignores_writes_to_undisplayed_fields() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    let cookie = login_user(&app, "administrator", "root").await;
+    let proj_id = db
+        .create_project("StatusIgnoreProj", 10, 10, "", true)
+        .unwrap();
+    let cookie = set_project_cookie(&app, &cookie, proj_id).await;
+
+    // Field 1: display_resolved = 0
+    let cf1_id = db
+        .create_custom_field_full(
+            "UpdateOnlyField",
+            0, // String
+            "",
+            "",
+            "",
+            10,
+            25,
+            0,
+            0,
+            false,
+            true,  // display_update
+            false, // display_resolved
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf1_id, proj_id, 1).unwrap();
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            1,
+            1,
+            "Status bug",
+            "Desc",
+            "",
+            "",
+            50,
+            10,
+            30,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Change status to resolved (80), attempting to sneakily set UpdateOnlyField
+    let body = format!(
+        "new_status=80&resolution=20&custom_field_{}=SneakyVal",
+        cf1_id
+    );
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_change_status/{}", bug_id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Verify status changed to 80, but custom field was NOT saved
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.status, 80);
+
+    let cf_vals = db.get_custom_field_values_for_bug(bug_id).unwrap();
+    let cf1_val = cf_vals
+        .iter()
+        .find(|v| v.field_id == cf1_id)
+        .map(|v| v.value.as_str())
+        .unwrap_or("");
+    assert_eq!(cf1_val, "");
+}
+
+#[tokio::test]
+async fn test_view_bug_page_hides_fields_above_access_level_r() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    let cookie = login_user(&app, "administrator", "root").await;
+    let proj_id = db.create_project("AccessRProj", 10, 10, "", true).unwrap();
+    let cookie = set_project_cookie(&app, &cookie, proj_id).await;
+
+    // Field: access_level_r = 70 (Manager)
+    let cf_id = db
+        .create_custom_field_full(
+            "ManagerSecretNotes",
+            0,
+            "",
+            "",
+            "",
+            70,
+            70,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_id, proj_id, 1).unwrap();
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            1,
+            1,
+            "ViewBugTest",
+            "Desc",
+            "",
+            "",
+            50,
+            10,
+            30,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_id, bug_id, 1, "ConfidentialPayload")
+        .unwrap();
+
+    // Reporter (eff 25) views bug: ManagerSecretNotes should NOT appear in HTML
+    let _ = db
+        .create_user(
+            "viewer_rep",
+            "Viewer Rep",
+            "v@x.com",
+            "pass",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let rep_cookie = login_user(&app, "viewer_rep", "pass").await;
+    let rep_cookie = set_project_cookie(&app, &rep_cookie, proj_id).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes);
+    assert!(!html.contains("ManagerSecretNotes"));
+    assert!(!html.contains("ConfidentialPayload"));
+
+    // Administrator (eff 90) views bug: ManagerSecretNotes SHOULD appear
+    let res_admin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_admin.status(), StatusCode::OK);
+    let bytes_admin = res_admin.into_body().collect().await.unwrap().to_bytes();
+    let html_admin = String::from_utf8_lossy(&bytes_admin);
+    assert!(html_admin.contains("ManagerSecretNotes"));
+    assert!(html_admin.contains("ConfidentialPayload"));
+}
+
+#[tokio::test]
+async fn test_manage_custom_field_admin_crud_saves_new_access_and_display_flags() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    let cookie = login_user(&app, "administrator", "root").await;
+
+    // Create custom field via HTTP POST /manage_custom_field_create
+    let form_body = "name=WorkflowTag&field_type=0&access_level_r=25&access_level_rw=55&valid_regexp=%5E%5BA-Z%5D%2B%24&display_resolved=1&require_resolved=1";
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/manage_custom_field_create")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let fields = db.list_custom_fields().unwrap();
+    let cf = fields
+        .iter()
+        .find(|f| f.name == "WorkflowTag")
+        .expect("WorkflowTag should exist");
+    assert_eq!(cf.access_level_r, 25);
+    assert_eq!(cf.access_level_rw, 55);
+    assert_eq!(cf.display_resolved, 1);
+    assert_eq!(cf.require_resolved, 1);
+    assert_eq!(cf.valid_regexp, "^[A-Z]+$");
+
+    // Update custom field via HTTP POST /manage_custom_field_update/{id}
+    let update_body = "name=WorkflowTag&field_type=0&access_level_r=25&access_level_rw=70&display_resolved=1&require_resolved=1&display_closed=1&require_closed=1";
+    let res_upd = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/manage_custom_field_update/{}", cf.id))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(update_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_upd.status(), StatusCode::SEE_OTHER);
+
+    let cf_updated = db.get_custom_field_by_id(cf.id).unwrap().unwrap();
+    assert_eq!(cf_updated.access_level_rw, 70);
+    assert_eq!(cf_updated.display_closed, 1);
+    assert_eq!(cf_updated.require_closed, 1);
+}

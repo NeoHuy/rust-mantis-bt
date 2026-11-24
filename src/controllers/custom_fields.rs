@@ -87,14 +87,17 @@ pub async fn manage_custom_field_create(
         return forbidden(&ctx, "Administrator access required.");
     }
 
+    let access_level_r = form.access_level_r.unwrap_or(10);
+    let access_level_rw = form.access_level_rw.unwrap_or(25).max(access_level_r);
+
     match db.create_custom_field_full(
         &form.name,
         form.field_type.unwrap_or(0),
         form.possible_values.as_deref().unwrap_or(""),
         form.default_value.as_deref().unwrap_or(""),
         form.valid_regexp.as_deref().unwrap_or(""),
-        form.access_level_r.unwrap_or(10),
-        form.access_level_rw.unwrap_or(10),
+        access_level_r,
+        access_level_rw,
         form.length_min.unwrap_or(0),
         form.length_max.unwrap_or(0),
         parse_bool(form.require_report.as_deref()),
@@ -151,6 +154,9 @@ pub async fn manage_custom_field_update(
     if ctx.user.access_level < 90 {
         return forbidden(&ctx, "Administrator access required.");
     }
+    let access_level_r = form.access_level_r.unwrap_or(10);
+    let access_level_rw = form.access_level_rw.unwrap_or(25).max(access_level_r);
+
     let _ = db.update_custom_field_full(
         id,
         &form.name,
@@ -158,8 +164,8 @@ pub async fn manage_custom_field_update(
         form.possible_values.as_deref().unwrap_or(""),
         form.default_value.as_deref().unwrap_or(""),
         form.valid_regexp.as_deref().unwrap_or(""),
-        form.access_level_r.unwrap_or(10),
-        form.access_level_rw.unwrap_or(10),
+        access_level_r,
+        access_level_rw,
         form.length_min.unwrap_or(0),
         form.length_max.unwrap_or(0),
         parse_bool(form.require_report.as_deref()),

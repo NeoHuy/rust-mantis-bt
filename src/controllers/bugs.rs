@@ -666,21 +666,12 @@ pub async fn bug_report(
             let resolved =
                 crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
             let is_req = cf.require_report != 0;
-            if is_req && val.trim().is_empty() {
-                return Redirect::to(&format!(
-                    "/bug_report_page?err={}",
-                    url_encode(&format!("Custom field '{}' is required", cf.name))
-                ))
-                .into_response();
-            }
             if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
             {
                 return Redirect::to(&format!("/bug_report_page?err={}", url_encode(&e)))
                     .into_response();
             }
             custom_field_values_to_set.push((cf.id, val));
-        } else if !cf.default_value.is_empty() {
-            custom_field_values_to_set.push((cf.id, cf.default_value.clone()));
         }
     }
 
@@ -783,12 +774,25 @@ pub async fn view_bug_page(
     };
 
     let notes = db.list_bugnotes(id, eff).unwrap_or_default();
-    let history = db.list_bug_history(id).unwrap_or_default();
+    let mut history = db.list_bug_history(id).unwrap_or_default();
     let rels = db.list_bug_relationships(id).unwrap_or_default();
     let files = db.list_bug_files(id).unwrap_or_default();
     let bug_tags = db.list_bug_tags(id).unwrap_or_default();
     let mut cf_values = db.get_custom_field_values_for_bug(id).unwrap_or_default();
     cf_values.retain(|cfv| eff >= cfv.access_level_r);
+    let custom_fields = db
+        .list_custom_fields_for_project(bug.project_id)
+        .unwrap_or_default();
+    let hidden_cf_names: std::collections::HashSet<&str> = custom_fields
+        .iter()
+        .filter(|cf| eff < cf.access_level_r)
+        .map(|cf| cf.name.as_str())
+        .collect();
+    history.retain(|h| !hidden_cf_names.contains(h.field_name.as_str()));
+    let versions = db.list_versions(bug.project_id).unwrap_or_default();
+    let cats = db
+        .list_effective_categories(bug.project_id)
+        .unwrap_or_default();
     let monitors = db.list_bug_monitors(id).unwrap_or_default();
     let is_monitoring = monitors.iter().any(|u| u.id == ctx.user.id);
 
@@ -819,61 +823,15 @@ pub async fn view_bug_page(
     }
 
     if eff >= 40 {
-        let mut status_opts = String::new();
-        for (code, name) in [
-            (10, "new"),
-            (20, "feedback"),
-            (30, "acknowledged"),
-            (40, "confirmed"),
-            (50, "assigned"),
-            (80, "resolved"),
-            (90, "closed"),
-        ] {
-            if code == 80 && eff < 55 {
-                continue;
-            }
-            if code == 90 && eff < 70 {
-                continue;
-            }
-            let sel = if bug.status == code { "selected" } else { "" };
-            status_opts.push_str(&format!(
-                r#"<option value="{}" {}>{}</option>"#,
-                code, sel, name
-            ));
-        }
-
-        let mut res_opts = String::new();
-        for (code, name) in [
-            (10, "open"),
-            (20, "fixed"),
-            (30, "reopened"),
-            (40, "unable to reproduce"),
-            (50, "not fixable"),
-            (60, "duplicate"),
-            (70, "not a bug"),
-            (80, "suspended"),
-            (90, "won't fix"),
-        ] {
-            let sel = if bug.resolution == code {
-                "selected"
-            } else {
-                ""
-            };
-            res_opts.push_str(&format!(
-                r#"<option value="{}" {}>{}</option>"#,
-                code, sel, name
-            ));
-        }
-
-        actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
-                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
-                <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
-                <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
-            </form>"#,
-            bug.id, status_opts, res_opts
-        ));
+        let status_form = views::bugs::render_status_change_form(
+            bug,
+            eff,
+            &custom_fields,
+            &cf_values,
+            &versions,
+            &cats,
+        );
+        actions_html.push_str(&status_form);
     }
 
     if eff >= 55 {
@@ -1383,14 +1341,6 @@ pub async fn update_bug(
             let resolved =
                 crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
             let is_req = cf.require_update != 0;
-            if is_req && val.trim().is_empty() {
-                return Redirect::to(&format!(
-                    "/view_bug_page/{}?err={}",
-                    id,
-                    url_encode(&format!("Custom field '{}' is required", cf.name))
-                ))
-                .into_response();
-            }
             if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
             {
                 return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
@@ -1556,25 +1506,40 @@ pub async fn bug_change_status(
         .list_effective_categories(bug.project_id)
         .unwrap_or_default();
 
-    // Check require_resolved and require_closed
+    // Check require_resolved and require_closed & limit writes to fields displayed for target status
     let mut custom_field_values_to_set = Vec::new();
+    let is_resolving = new_status == 80;
+    let is_closing = new_status == 90;
+
     for cf in &custom_fields {
-        let is_resolving = new_status == 80;
-        let is_closing = new_status == 90;
-        let can_write = eff >= cf.access_level_rw;
-        let require_check = if is_closing {
-            can_write && cf.display_closed != 0 && cf.require_closed != 0
+        if eff < cf.access_level_r {
+            continue;
+        }
+
+        // Only process fields that are displayed for the target status
+        let displays_for_status = if is_closing {
+            cf.display_closed != 0
         } else if is_resolving {
-            can_write && cf.display_resolved != 0 && cf.require_resolved != 0
+            cf.display_resolved != 0
         } else {
             false
         };
 
-        let submitted = if eff >= cf.access_level_rw {
-            get_custom_field_submitted_value(&form_map, cf.id, cf.field_type)
+        if !displays_for_status {
+            continue;
+        }
+
+        let can_write = eff >= cf.access_level_rw;
+        let is_req = if is_closing {
+            can_write && cf.require_closed != 0
+        } else if is_resolving {
+            can_write && cf.require_resolved != 0
         } else {
-            None
+            false
         };
+
+        let is_present = form_map.contains_key(&format!("custom_field_{}", cf.id))
+            || form_map.contains_key(&format!("custom_field_{}_present", cf.id));
 
         let current_val = current_values
             .iter()
@@ -1582,13 +1547,18 @@ pub async fn bug_change_status(
             .map(|cv| cv.value.as_str())
             .unwrap_or("");
 
-        let effective_val = if let Some(ref s) = submitted {
-            s.as_str()
-        } else {
-            current_val
-        };
-
-        if require_check && effective_val.trim().is_empty() {
+        if can_write && is_present {
+            let val = get_custom_field_submitted_value(&form_map, cf.id, cf.field_type)
+                .unwrap_or_default();
+            let resolved =
+                crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
+            if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
+            {
+                return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
+                    .into_response();
+            }
+            custom_field_values_to_set.push((cf.id, val));
+        } else if is_req && current_val.trim().is_empty() {
             let action_name = if is_closing { "close" } else { "resolve" };
             return Redirect::to(&format!(
                 "/view_bug_page/{}?err={}",
@@ -1599,18 +1569,6 @@ pub async fn bug_change_status(
                 ))
             ))
             .into_response();
-        }
-
-        if let Some(val) = submitted {
-            let resolved =
-                crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
-            if let Err(e) =
-                crate::models::validate_custom_field_value(cf, &val, &resolved, require_check)
-            {
-                return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
-                    .into_response();
-            }
-            custom_field_values_to_set.push((cf.id, val));
         }
     }
 

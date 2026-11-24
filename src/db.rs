@@ -3878,7 +3878,7 @@ impl Db {
             default_value,
             valid_regexp,
             10,
-            10,
+            25,
             length_min,
             length_max,
             require_report,
@@ -3991,7 +3991,7 @@ impl Db {
                     ))
                 },
             )
-            .unwrap_or((10, 10, false, false, false, false))
+            .map_err(|e| format!("Custom field {} not found: {}", id, e))?
         };
 
         self.update_custom_field_full(

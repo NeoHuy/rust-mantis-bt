@@ -9,6 +9,8 @@ use std::collections::HashMap;
 pub enum CustomFieldFormMode {
     Report,
     Update,
+    Resolve,
+    Close,
 }
 
 pub fn render_custom_field_input(
@@ -20,9 +22,15 @@ pub fn render_custom_field_input(
     categories: &[Category],
 ) -> String {
     if read_only {
+        let display_val = match CustomFieldType::from_i32(cf.field_type) {
+            Some(CustomFieldType::Checkbox) | Some(CustomFieldType::Multilist) => {
+                current_value.replace('|', ", ")
+            }
+            _ => current_value.to_string(),
+        };
         return format!(
             r#"<span class="readonly-custom-field">{}</span>"#,
-            html_escape(current_value)
+            html_escape(&display_val)
         );
     }
 
@@ -69,14 +77,12 @@ pub fn render_custom_field_input(
             let opts =
                 crate::models::resolve_possible_values(&cf.possible_values, versions, categories);
             let mut options_html = String::new();
-            if !opts.iter().any(|o| o.is_empty()) {
-                let sel = if current_value.is_empty() {
-                    " selected"
-                } else {
-                    ""
-                };
-                options_html.push_str(&format!(r#"<option value=""{}></option>"#, sel));
-            }
+            let sel = if current_value.is_empty() {
+                " selected"
+            } else {
+                ""
+            };
+            options_html.push_str(&format!(r#"<option value=""{}></option>"#, sel));
             for opt in &opts {
                 let sel = if current_value == opt {
                     " selected"
@@ -246,6 +252,8 @@ pub fn render_custom_field_form_row(
     let (should_display, is_required) = match mode {
         CustomFieldFormMode::Report => (cf.display_report != 0, cf.require_report != 0),
         CustomFieldFormMode::Update => (cf.display_update != 0, cf.require_update != 0),
+        CustomFieldFormMode::Resolve => (cf.display_resolved != 0, cf.require_resolved != 0),
+        CustomFieldFormMode::Close => (cf.display_closed != 0, cf.require_closed != 0),
     };
 
     if !should_display {
@@ -269,10 +277,12 @@ pub fn render_custom_field_form_row(
             input_html
         ))
     } else {
-        // Read-only: on report page omit editable input, on update page render as read-only
+        // Read-only: on report page omit editable input, on other pages render as read-only
         match mode {
             CustomFieldFormMode::Report => None,
-            CustomFieldFormMode::Update => {
+            CustomFieldFormMode::Update
+            | CustomFieldFormMode::Resolve
+            | CustomFieldFormMode::Close => {
                 let input_html =
                     render_custom_field_input(cf, current_value, false, true, versions, categories);
                 Some(format!(
@@ -420,10 +430,14 @@ pub fn render_manage_custom_field_page(
                             </td>
                         </tr>
                         <tr>
+                            <td class="label-col">Regular Expression <small style="color:#888; font-weight:normal;">(metadata)</small></td>
+                            <td class="input-col"><input type="text" name="valid_regexp"></td>
+                        </tr>
+                        <tr>
                             <td class="label-col">Access Levels</td>
                             <td class="input-col">
                                 <label>Read: <input type="number" name="access_level_r" value="10" style="max-width:80px;"></label>
-                                <label style="margin-left:12px;">Write: <input type="number" name="access_level_rw" value="10" style="max-width:80px;"></label>
+                                <label style="margin-left:12px;">Write: <input type="number" name="access_level_rw" value="25" style="max-width:80px;"></label>
                             </td>
                         </tr>
                         <tr>
@@ -521,6 +535,10 @@ pub fn render_manage_custom_field_edit_page(
                             </td>
                         </tr>
                         <tr>
+                            <td class="label-col">Regular Expression <small style="color:#888; font-weight:normal;">(metadata)</small></td>
+                            <td class="input-col"><input type="text" name="valid_regexp" value="{}"></td>
+                        </tr>
+                        <tr>
                             <td class="label-col">Access Levels</td>
                             <td class="input-col">
                                 <label>Read: <input type="number" name="access_level_r" value="{}" style="max-width:80px;"></label>
@@ -570,6 +588,7 @@ pub fn render_manage_custom_field_edit_page(
         html_escape(&cf.default_value),
         cf.length_min,
         cf.length_max,
+        html_escape(&cf.valid_regexp),
         cf.access_level_r,
         cf.access_level_rw,
         if cf.display_report != 0 {

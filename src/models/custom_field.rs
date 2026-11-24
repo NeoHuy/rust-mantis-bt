@@ -185,6 +185,40 @@ pub fn timestamp_to_ymd(timestamp: i64) -> Option<String> {
     Some(format!("{:04}-{:02}-{:02}", final_y, m, d))
 }
 
+/// Compiles a regular expression pattern with a 1 MiB compiled size limit.
+/// The `regex` crate guarantees linear-time execution; the size limit bounds
+/// memory and compilation time (defending against compile-time / memory DoS).
+pub fn compile_custom_field_regex(pattern: &str) -> Result<regex::Regex, String> {
+    regex::RegexBuilder::new(pattern)
+        .size_limit(1 << 20)
+        .build()
+        .map_err(|e| {
+            let err_str = e.to_string();
+            err_str
+                .lines()
+                .find(|l| l.trim_start().starts_with("error:"))
+                .map(|l| l.trim().to_string())
+                .unwrap_or_else(|| {
+                    err_str
+                        .lines()
+                        .next()
+                        .unwrap_or("syntax error")
+                        .trim()
+                        .to_string()
+                })
+        })
+}
+
+/// Validates a custom field regular expression pattern.
+/// Returns `Ok(())` if empty or whitespace-only, otherwise ensures it compiles cleanly.
+pub fn validate_regex_pattern(pattern: &str) -> Result<(), String> {
+    let p = pattern.trim();
+    if p.is_empty() {
+        return Ok(());
+    }
+    compile_custom_field_regex(p).map(|_| ())
+}
+
 /// Validates custom field value against its definition, length constraints,
 /// required status, and resolved options.
 pub fn validate_custom_field_value(
@@ -330,5 +364,18 @@ pub fn validate_custom_field_value(
             Ok(())
         }
         None => Err(format!("Unknown custom field type: {}", cf.field_type)),
+    }?;
+
+    if !cf.valid_regexp.trim().is_empty() {
+        let re = compile_custom_field_regex(cf.valid_regexp.trim())
+            .map_err(|e| format!("Custom field '{}' has invalid pattern: {}", cf.name, e))?;
+        if !re.is_match(trimmed) {
+            return Err(format!(
+                "Custom field '{}' does not match required pattern",
+                cf.name
+            ));
+        }
     }
+
+    Ok(())
 }

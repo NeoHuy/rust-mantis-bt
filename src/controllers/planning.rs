@@ -1,7 +1,7 @@
 use crate::auth::AuthContext;
 use crate::controllers::parse_bool;
 use crate::db::Db;
-use crate::models::{Bug, BugFilter, RoadmapVersionGroup};
+use crate::models::{Bug, BugFilter};
 use crate::views;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
@@ -46,76 +46,50 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .map(|u| (u.id, u.username))
         .collect();
 
-    let mut bugs_by_target: HashMap<String, Vec<Bug>> = HashMap::new();
-    for b in bugs {
-        let tv = b.target_version.trim().to_string();
-        if !tv.is_empty() {
-            bugs_by_target.entry(tv).or_default().push(b);
-        }
-    }
-
-    // Load project versions from DB (active project or visible projects)
-    let all_project_versions = if ctx.active_project_id > 0 {
-        db.list_versions(ctx.active_project_id).unwrap_or_default()
-    } else {
-        let visible = db.list_visible_projects(&ctx.user).unwrap_or_default();
-        let mut vers = Vec::new();
-        for (p, _) in visible {
-            if let Ok(mut v_list) = db.list_versions(p.id) {
-                vers.append(&mut v_list);
+    // Determine accessible projects and their names
+    let (accessible_project_ids, project_names): (Vec<i64>, HashMap<i64, String>) =
+        if ctx.active_project_id > 0 {
+            let desc_ids = db
+                .list_project_descendant_ids(ctx.active_project_id)
+                .unwrap_or_default();
+            let mut pids = Vec::new();
+            let mut pnames = HashMap::new();
+            for pid in desc_ids {
+                if db.effective_access_level(&ctx.user, pid).unwrap_or(0)
+                    >= crate::models::AccessLevel::Viewer as i32
+                {
+                    pids.push(pid);
+                    if let Ok(Some(proj)) = db.get_project_by_id(pid) {
+                        pnames.insert(pid, proj.name);
+                    }
+                }
             }
-        }
-        vers
-    };
-
-    // Exclude versions with obsolete == 1 from the Roadmap
-    let mut obsolete_version_names: HashSet<String> = HashSet::new();
-    let mut active_versions = Vec::new();
-    for v in all_project_versions {
-        if v.obsolete == 1 {
-            obsolete_version_names.insert(v.version);
+            (pids, pnames)
         } else {
-            active_versions.push(v);
+            let visible = db.list_visible_projects(&ctx.user).unwrap_or_default();
+            let mut pids = Vec::new();
+            let mut pnames = HashMap::new();
+            for (p, _) in visible {
+                pids.push(p.id);
+                pnames.insert(p.id, p.name);
+            }
+            (pids, pnames)
+        };
+
+    // Load project versions from DB across all accessible projects
+    let mut all_project_versions = Vec::new();
+    for pid in &accessible_project_ids {
+        if let Ok(mut v_list) = db.list_versions(*pid) {
+            all_project_versions.append(&mut v_list);
         }
     }
 
-    for obs in &obsolete_version_names {
-        bugs_by_target.remove(obs);
-    }
-
-    // Sort active versions by date_order DESC, then version ASC
-    active_versions.sort_by(|a, b| {
-        b.date_order
-            .cmp(&a.date_order)
-            .then_with(|| a.version.cmp(&b.version))
-    });
-
-    let mut seen_version_names = HashSet::new();
-    let mut version_groups = Vec::new();
-
-    for v in active_versions {
-        if seen_version_names.insert(v.version.clone()) {
-            let v_bugs = bugs_by_target.remove(&v.version).unwrap_or_default();
-            version_groups.push(RoadmapVersionGroup {
-                version: v.version,
-                released: v.released == 1,
-                bugs: v_bugs,
-            });
-        }
-    }
-
-    // Append any issue target_version values not found in mantis_project_version_table alphabetically
-    let mut remaining_targets: Vec<String> = bugs_by_target.keys().cloned().collect();
-    remaining_targets.sort();
-
-    for tv in remaining_targets {
-        let v_bugs = bugs_by_target.remove(&tv).unwrap_or_default();
-        version_groups.push(RoadmapVersionGroup {
-            version: tv,
-            released: false,
-            bugs: v_bugs,
-        });
-    }
+    let version_groups = crate::models::build_roadmap_groups(
+        &accessible_project_ids,
+        all_project_versions,
+        bugs,
+        &project_names,
+    );
 
     views::planning::render_roadmap_page(&ctx, &version_groups, &users_map).into_response()
 }

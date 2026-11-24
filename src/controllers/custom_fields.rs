@@ -1,5 +1,5 @@
 use crate::auth::AuthContext;
-use crate::controllers::parse_bool;
+use crate::controllers::{parse_bool, sanitize_error_message, url_encode};
 use crate::db::Db;
 use crate::views;
 use axum::extract::{Path, Query, State};
@@ -89,13 +89,14 @@ pub async fn manage_custom_field_create(
 
     let access_level_r = form.access_level_r.unwrap_or(10);
     let access_level_rw = form.access_level_rw.unwrap_or(25).max(access_level_r);
+    let valid_regexp = form.valid_regexp.as_deref().unwrap_or("");
 
     match db.create_custom_field_full(
         &form.name,
         form.field_type.unwrap_or(0),
         form.possible_values.as_deref().unwrap_or(""),
         form.default_value.as_deref().unwrap_or(""),
-        form.valid_regexp.as_deref().unwrap_or(""),
+        valid_regexp,
         access_level_r,
         access_level_rw,
         form.length_min.unwrap_or(0),
@@ -114,8 +115,11 @@ pub async fn manage_custom_field_create(
             id
         ))
         .into_response(),
-        Err(_) => Redirect::to("/manage_custom_field_page?err=Failed+to+create+custom+field")
-            .into_response(),
+        Err(e) => Redirect::to(&format!(
+            "/manage_custom_field_page?err={}",
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response(),
     }
 }
 
@@ -156,14 +160,15 @@ pub async fn manage_custom_field_update(
     }
     let access_level_r = form.access_level_r.unwrap_or(10);
     let access_level_rw = form.access_level_rw.unwrap_or(25).max(access_level_r);
+    let valid_regexp = form.valid_regexp.as_deref().unwrap_or("");
 
-    let _ = db.update_custom_field_full(
+    match db.update_custom_field_full(
         id,
         &form.name,
         form.field_type.unwrap_or(0),
         form.possible_values.as_deref().unwrap_or(""),
         form.default_value.as_deref().unwrap_or(""),
-        form.valid_regexp.as_deref().unwrap_or(""),
+        valid_regexp,
         access_level_r,
         access_level_rw,
         form.length_min.unwrap_or(0),
@@ -176,12 +181,19 @@ pub async fn manage_custom_field_update(
         parse_bool(form.display_resolved.as_deref()),
         parse_bool(form.display_closed.as_deref()),
         parse_bool(form.require_closed.as_deref()),
-    );
-    Redirect::to(&format!(
-        "/manage_custom_field_edit_page/{}?msg=Updated",
-        id
-    ))
-    .into_response()
+    ) {
+        Ok(_) => Redirect::to(&format!(
+            "/manage_custom_field_edit_page/{}?msg=Updated",
+            id
+        ))
+        .into_response(),
+        Err(e) => Redirect::to(&format!(
+            "/manage_custom_field_edit_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response(),
+    }
 }
 
 pub async fn manage_custom_field_delete(

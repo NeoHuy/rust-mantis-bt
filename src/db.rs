@@ -3911,6 +3911,9 @@ impl Db {
         if trimmed.is_empty() {
             return Err("Custom field name cannot be empty".to_string());
         }
+        crate::models::validate_regex_pattern(valid_regexp)
+            .map_err(|e| format!("Invalid regular expression: {}", e))?;
+        let trimmed_regexp = valid_regexp.trim();
         let conn = self.conn();
         conn.execute(
             "INSERT INTO mantis_custom_field_table (
@@ -3925,7 +3928,7 @@ impl Db {
                 field_type,
                 possible_values,
                 default_value,
-                valid_regexp,
+                trimmed_regexp,
                 access_level_r,
                 access_level_rw,
                 length_min,
@@ -4006,6 +4009,9 @@ impl Db {
         if trimmed.is_empty() {
             return Err("Custom field name cannot be empty".to_string());
         }
+        crate::models::validate_regex_pattern(valid_regexp)
+            .map_err(|e| format!("Invalid regular expression: {}", e))?;
+        let trimmed_regexp = valid_regexp.trim();
         let conn = self.conn();
         let rows = conn
             .execute(
@@ -4023,7 +4029,7 @@ impl Db {
                     field_type,
                     possible_values,
                     default_value,
-                    valid_regexp,
+                    trimmed_regexp,
                     access_level_r,
                     access_level_rw,
                     length_min,

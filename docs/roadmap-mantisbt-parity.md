@@ -38,21 +38,21 @@ This document summarizes the feature comparison between `rust-mantis-bt` and ups
 
 ## 3. Implementation Roadmap Overview (5 Phases)
 
-| Phase | Focus | Primary Objectives |
-| :--- | :--- | :--- |
-| **Phase 1** | **Quick Wins & Closing Half-Built Features** | Wire existing DB columns/routes, fix filter pagination, complete Custom Fields rendering & validation |
-| **Phase 2** | **Daily Issue & Note Workflows** | Bulk actions, Clone/Move, Bugnote editing + Revisions, Markdown & `#123`/`@mention`, multi-file upload & preview |
-| **Phase 3** | **Advanced Filtering, Reporting & Exports** | Multi-select filters, column customization, Print/Excel/RSS, Activity Timeline, extended Summary & Charts |
-| **Phase 4** | **Configuration UI, Auth & SMTP** | Web UI for Workflow/Thresholds/Email Matrix, User Prefs & Profiles, Lost Password/Verification, SMTP |
-| **Phase 5** | **API Ecosystem, MCP Parity, Migration & i18n** | REST API parity with MantisBT 2.28, enhanced MCP tools, XML Import/Export, localization & Timezones |
+| Phase | Focus | Primary Objectives | Status |
+| :--- | :--- | :--- | :--- |
+| **Phase 1** | **Quick Wins & Closing Half-Built Features** | Wire existing DB columns/routes, fix filter pagination, complete Custom Fields rendering & validation | **Completed** (Milestones 1–4, `valid_regexp`, Roadmap subprojects/scoping, `tests/backward_compat_test.rs`) |
+| **Phase 2** | **Daily Issue & Note Workflows** | Bulk actions, Clone/Move, Bugnote editing + Revisions, Markdown & `#123`/`@mention`, multi-file upload & preview | Pending |
+| **Phase 3** | **Advanced Filtering, Reporting & Exports** | Multi-select filters, column customization, Print/Excel/RSS, Activity Timeline, extended Summary & Charts | Pending |
+| **Phase 4** | **Configuration UI, Auth & SMTP** | Web UI for Workflow/Thresholds/Email Matrix, User Prefs & Profiles, Lost Password/Verification, SMTP | Pending |
+| **Phase 5** | **API Ecosystem, MCP Parity, Migration & i18n** | REST API parity with MantisBT 2.28, enhanced MCP tools, XML Import/Export, localization & Timezones | Pending |
 
 ---
 
 ## 4. Detailed Phase Breakdown
 
-### Phase 1 — Closing Half-Built Features & Quick Wins
+### Phase 1 — Closing Half-Built Features & Quick Wins (Completed)
 
-*Goal: Complete features that already exist partially in the schema or routes without UI/logic wiring, establishing a clean baseline before adding larger subsystems.*
+*Goal: Complete features that already exist partially in the schema or routes without UI/logic wiring, establishing a clean baseline before adding larger subsystems. All milestones (1–4), `valid_regexp` ReDoS-safe compilation, Roadmap subproject roll-up & per-project obsolete scoping, and the 13-scenario `tests/backward_compat_test.rs` regression suite are fully implemented and verified.*
 
 1. **Fix `View Issues` Pagination, Sorting & Saved Filter Deletion** ([`src/models/filter.rs`](../src/models/filter.rs), [`src/controllers/bugs.rs`](../src/controllers/bugs.rs), [`src/controllers/filters.rs`](../src/controllers/filters.rs), [`src/views/bugs.rs`](../src/views/bugs.rs))
    - Preserve active filter query parameters across pagination links.
@@ -66,10 +66,10 @@ This document summarizes the feature comparison between `rust-mantis-bt` and ups
    - Display human-readable status/resolution/priority/severity/user names in the **Issue History** UI table instead of raw numeric codes.
 3. **Complete Custom Fields** ([`src/models/custom_field.rs`](../src/models/custom_field.rs), [`src/views/bugs.rs`](../src/views/bugs.rs), [`src/views/custom_fields.rs`](../src/views/custom_fields.rs), [`src/db.rs`](../src/db.rs))
    - Render appropriate HTML controls for all 11 `CustomFieldType` variants (`select`, `select multiple`, `checkbox`, `radio`, `date`, `textarea`, `email`, `number`) instead of only `<input type="text">`; move all HTML rendering out of controllers into `src/views/`.
-   - Enforce `display_*`, `require_*`, `access_level_r`/`rw`, type validation, dynamic `possible_values` (`=versions`, `=released_versions`, `=future_versions`, `=categories`), and `valid_regexp` *(note: full regex enforcement requires explicit approval to add the `regex` crate to `Cargo.toml`)*.
+   - Enforce `display_*`, `require_*`, `access_level_r`/`rw`, type validation, dynamic `possible_values` (`=versions`, `=released_versions`, `=future_versions`, `=categories`), and `valid_regexp` compiled with 1 MiB size cap for ReDoS safety.
 4. **Complete Missing CRUD UIs & Small Parity Gaps** ([`src/controllers/projects.rs`](../src/controllers/projects.rs), [`src/views/projects.rs`](../src/views/projects.rs), [`src/controllers/planning.rs`](../src/controllers/planning.rs), [`src/views/planning.rs`](../src/views/planning.rs), [`src/controllers/tags.rs`](../src/controllers/tags.rs), [`src/views/tags.rs`](../src/views/tags.rs), [`src/controllers/auth.rs`](../src/controllers/auth.rs), [`src/views/auth.rs`](../src/views/auth.rs))
    - Add edit forms for Categories (`POST /manage_proj_cat_update/:cat_id`), Versions (`POST /manage_proj_ver_update/:ver_id` + persist `date_order`), Tags (`POST /tag_update/:id` + `tag_view_page` & issue counts), and News (`news_edit_page` / `news_update`).
-   - Order **Roadmap** versions by `ProjectVersion.date_order` and honor `released`/`obsolete` flags.
+   - Order **Roadmap** versions by `ProjectVersion.date_order`, roll up subproject versions with private subproject isolation, scope obsolete versions per-project, and honor `released`/`obsolete` flags.
    - Wire the `perm_login` ("Remember Me") checkbox in [`src/controllers/auth.rs`](../src/controllers/auth.rs).
 
 ---

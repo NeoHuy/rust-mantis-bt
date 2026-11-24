@@ -405,3 +405,35 @@ fn test_build_csv_export_url() {
     let empty_q = ListBugsQuery::default();
     assert_eq!(build_csv_export_url(&empty_q), "/csv_export");
 }
+
+#[test]
+fn test_bug_update_defaults_and_fields() {
+    let update = BugUpdate::default();
+    assert!(update.summary.is_none());
+    assert!(update.os.is_none());
+    assert!(update.os_build.is_none());
+    assert!(update.platform.is_none());
+    assert!(update.build.is_none());
+    assert!(update.due_date.is_none());
+    assert!(update.sticky.is_none());
+
+    let populated = BugUpdate {
+        summary: Some("Test".to_string()),
+        os: Some("Linux".to_string()),
+        os_build: Some("6.1".to_string()),
+        platform: Some("x86_64".to_string()),
+        build: Some("b100".to_string()),
+        due_date: Some(1700000000),
+        sticky: Some(1),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&populated).unwrap();
+    let deserialized: BugUpdate = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.summary, Some("Test".to_string()));
+    assert_eq!(deserialized.os, Some("Linux".to_string()));
+    assert_eq!(deserialized.os_build, Some("6.1".to_string()));
+    assert_eq!(deserialized.platform, Some("x86_64".to_string()));
+    assert_eq!(deserialized.build, Some("b100".to_string()));
+    assert_eq!(deserialized.due_date, Some(1700000000));
+    assert_eq!(deserialized.sticky, Some(1));
+}

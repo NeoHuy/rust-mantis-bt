@@ -1,3 +1,4 @@
+use super::{sanitize_error_message, url_encode};
 use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::models::{clamp_per_page, sort_bugs, BugFilter, BugUpdate, ListBugsQuery};
@@ -132,6 +133,7 @@ pub fn router() -> Router<Db> {
         .route("/bug_report", post(bug_report))
         .route("/update_bug_page/:id", get(update_bug_page))
         .route("/update_bug/:id", post(update_bug))
+        .route("/bug_stick/:id", post(bug_stick))
         .route("/bug_delete/:id", post(bug_delete))
         .route("/bug_change_status/:id", post(bug_change_status))
         .route("/bug_assign/:id", post(bug_assign))
@@ -578,6 +580,9 @@ pub async fn bug_report(
     let platform = form.get("platform").cloned().unwrap_or_default();
     let os = form.get("os").cloned().unwrap_or_default();
     let os_build = form.get("os_build").cloned().unwrap_or_default();
+    let build = form.get("build").map(|s| s.trim()).unwrap_or("");
+    let due_date_str = form.get("due_date").map(|s| s.trim()).unwrap_or("");
+    let due_date = views::parse_date_to_epoch(due_date_str);
     let description = form.get("description").cloned().unwrap_or_default();
     let steps_to_reproduce = form.get("steps_to_reproduce").cloned().unwrap_or_default();
     let additional_info = form
@@ -611,6 +616,22 @@ pub async fn bug_report(
             return Redirect::to("/bug_report_page?err=Failed+to+create+issue").into_response()
         }
     };
+
+    if !build.is_empty() || due_date > 0 {
+        let mut update = BugUpdate::default();
+        if !build.is_empty() {
+            update.build = Some(build.to_string());
+        }
+        if due_date > 0 {
+            update.due_date = Some(due_date);
+        }
+        if let Err(e) = db.update_bug_fields(bug_id, ctx.user.id, update) {
+            eprintln!(
+                "[bug_report] Failed to update build/due_date for bug {}: {}",
+                bug_id, e
+            );
+        }
+    }
 
     let custom_fields = db
         .list_custom_fields_for_project(project_id)
@@ -792,6 +813,18 @@ pub async fn view_bug_page(
     }
 
     if eff >= 70 {
+        let (stick_label, stick_cls) = if bug.sticky == 1 {
+            ("Unstick", "btn btn-warning btn-sm")
+        } else {
+            ("Stick", "btn btn-secondary btn-sm")
+        };
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_stick/{}" style="display:inline;">
+                <button type="submit" class="{}">{}</button>
+            </form>"#,
+            bug.id, stick_cls, stick_label
+        ));
+
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_delete/{}" style="display:inline;">
                 <button type="submit" class="btn btn-danger btn-sm">Delete Issue</button>
@@ -1084,40 +1117,13 @@ pub async fn view_bug_page(
         String::new()
     };
 
-    let mut history_html = String::new();
-    if history.is_empty() {
-        history_html.push_str("<p>No history entries.</p>");
-    } else {
-        history_html.push_str(r#"<table class="data-table"><thead><tr><th>Date Modified</th><th>Username</th><th>Field</th><th>Change</th></tr></thead><tbody>"#);
-        for h in &history {
-            let uname = users_map
-                .get(&h.user_id)
-                .cloned()
-                .unwrap_or_else(|| format!("user#{}", h.user_id));
-            let change_desc = if h.type_ == 1 && h.field_name.is_empty() {
-                "New Issue".to_string()
-            } else {
-                format!(
-                    "{} => {}",
-                    views::html_escape(&h.old_value),
-                    views::html_escape(&h.new_value)
-                )
-            };
-            history_html.push_str(&format!(
-                r#"<tr>
-                    <td style="width:150px; white-space:nowrap;">{}</td>
-                    <td style="width:150px;">{}</td>
-                    <td style="width:180px;">{}</td>
-                    <td>{}</td>
-                </tr>"#,
-                views::format_timestamp(h.date_modified),
-                views::html_escape(&uname),
-                views::html_escape(&h.field_name),
-                change_desc
-            ));
+    let mut categories_map: HashMap<i64, String> = HashMap::new();
+    if let Ok(cats) = db.list_all_categories() {
+        for (cid, cname) in cats {
+            categories_map.insert(cid, cname);
         }
-        history_html.push_str("</tbody></table>");
     }
+    let history_html = views::bugs::render_bug_history_html(&history, &users_map, &categories_map);
 
     views::bugs::render_view_bug_page(
         &ctx,
@@ -1230,6 +1236,8 @@ pub async fn update_bug(
         }
     }
 
+    let due_date = form.get("due_date").map(|s| views::parse_date_to_epoch(s));
+
     let fields = BugUpdate {
         summary: form.get("summary").cloned(),
         category_id: form.get("category_id").and_then(|v| v.parse::<i64>().ok()),
@@ -1246,6 +1254,12 @@ pub async fn update_bug(
         description: form.get("description").cloned(),
         steps_to_reproduce: form.get("steps_to_reproduce").cloned(),
         additional_information: form.get("additional_information").cloned(),
+        os: form.get("os").cloned(),
+        os_build: form.get("os_build").cloned(),
+        platform: form.get("platform").cloned(),
+        build: form.get("build").cloned(),
+        due_date,
+        sticky: None,
     };
 
     match db.update_bug_fields(id, ctx.user.id, fields) {
@@ -1273,6 +1287,37 @@ pub async fn update_bug(
         Err(_) => Redirect::to(&format!("/view_bug_page/{}?err=Failed+to+update+issue", id))
             .into_response(),
     }
+}
+
+pub async fn bug_stick(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {
+    let bug = match db.get_bug(id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if eff < 70 {
+        return forbidden(&ctx, "Manager access required to toggle sticky status.");
+    }
+
+    let new_sticky = if bug.sticky == 1 { 0 } else { 1 };
+    let fields = BugUpdate {
+        sticky: Some(new_sticky),
+        ..Default::default()
+    };
+
+    if let Err(e) = db.update_bug_fields(id, ctx.user.id, fields) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response();
+    }
+
+    Redirect::to(&format!("/view_bug_page/{}", id)).into_response()
 }
 
 pub async fn bug_monitor_add(

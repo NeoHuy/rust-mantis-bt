@@ -339,4 +339,10 @@ pub struct BugUpdate {
     pub description: Option<String>,
     pub steps_to_reproduce: Option<String>,
     pub additional_information: Option<String>,
+    pub os: Option<String>,
+    pub os_build: Option<String>,
+    pub platform: Option<String>,
+    pub build: Option<String>,
+    pub due_date: Option<i64>,
+    pub sticky: Option<i32>,
 }

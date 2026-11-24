@@ -651,6 +651,27 @@ async fn test_bulk_actiongroup_mixed_permissions_and_execution() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     let location = res.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.contains("err=Please+select+a+valid+action"));
+
+    // 8. Bulk action preserves return_query containing '+', '.', and '~':
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "bug_arr={}&action=UP_PRIOR&priority=50&return_query=q%3Dlogin%2Berror%26ver%3D1.0.0~beta",
+                    b1
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("q=login+error&ver=1.0.0~beta"));
 }
 
 #[tokio::test]

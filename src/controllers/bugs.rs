@@ -2114,12 +2114,7 @@ pub async fn bug_actiongroup(
     let safe_return_query: String = return_query
         .chars()
         .filter(|c| {
-            c.is_ascii_alphanumeric()
-                || *c == '&'
-                || *c == '='
-                || *c == '_'
-                || *c == '-'
-                || *c == '%'
+            c.is_ascii_alphanumeric() || matches!(c, '&' | '=' | '_' | '-' | '%' | '+' | '.' | '~')
         })
         .collect();
 

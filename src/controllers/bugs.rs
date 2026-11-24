@@ -1758,7 +1758,28 @@ pub async fn bug_actiongroup(
                         .get("handler_id")
                         .and_then(|s| s.parse::<i64>().ok())
                         .unwrap_or(0);
-                    db.assign_bug(bug.id, ctx.user.id, handler_id)
+                    if handler_id > 0 {
+                        match db.get_user_by_id(handler_id) {
+                            Ok(Some(target_user)) => {
+                                if target_user.enabled != 1 {
+                                    Err("Assigned user is disabled".to_string())
+                                } else {
+                                    let target_eff = db
+                                        .effective_access_level(&target_user, bug.project_id)
+                                        .unwrap_or(0);
+                                    if target_eff < 55 {
+                                        Err("Assigned user does not have Developer access on this project".to_string())
+                                    } else {
+                                        db.assign_bug(bug.id, ctx.user.id, handler_id)
+                                    }
+                                }
+                            }
+                            Ok(None) => Err("Assigned user not found".to_string()),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    } else {
+                        db.assign_bug(bug.id, ctx.user.id, 0)
+                    }
                 } else {
                     Err("Permission denied".to_string())
                 }

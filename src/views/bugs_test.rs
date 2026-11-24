@@ -1204,4 +1204,3 @@ fn test_render_view_all_bug_page_bulk_action_bar_and_no_nested_forms() {
     // Critical check: Ensure NO nested forms exist!
     assert_no_nested_forms(&html);
 }
-}

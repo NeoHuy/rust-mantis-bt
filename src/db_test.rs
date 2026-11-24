@@ -3144,6 +3144,28 @@ fn test_clone_bug_comprehensive() {
         .unwrap();
     db.add_bug_relationship(source_id, other_bug, 0).unwrap(); // RelatedTo
 
+    let dup_bug = db
+        .create_bug(
+            p1,
+            u1,
+            c1,
+            "Duplicate Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    // dup_bug is duplicate of source_id
+    db.add_bug_relationship(dup_bug, source_id, 1).unwrap();
+
     // Add attachments to source bug: 1 blob and 1 disk file
     let blob_file_id = db
         .add_bug_file(
@@ -3220,6 +3242,24 @@ fn test_clone_bug_comprehensive() {
     assert!(rels_same
         .iter()
         .any(|r| r.destination_bug_id == other_bug && r.relationship_type == 0));
+
+    // Verify third issue (other_bug) is completely unchanged:
+    // It has no relationship row pointing at cloned_same, and its duplicate_id is 0
+    let other_rels = db.list_bug_relationships(other_bug).unwrap();
+    assert!(!other_rels
+        .iter()
+        .any(|r| r.destination_bug_id == cloned_same || r.source_bug_id == cloned_same));
+    let other_bug_full = db.get_bug(other_bug).unwrap().unwrap();
+    assert_eq!(other_bug_full.duplicate_id, 0);
+
+    // Verify dup_bug relationships and duplicate_id are completely unchanged:
+    // It has only 1 relationship pointing to source_id, not cloned_same
+    let dup_rels = db.list_bug_relationships(dup_bug).unwrap();
+    assert_eq!(dup_rels.len(), 1);
+    assert_eq!(dup_rels[0].destination_bug_id, source_id);
+    assert_eq!(dup_rels[0].relationship_type, 1);
+    let dup_bug_full = db.get_bug(dup_bug).unwrap().unwrap();
+    assert_eq!(dup_bug_full.duplicate_id, source_id);
 
     // Verify attachments copied separately
     let files_same = db.list_bug_files(cloned_same).unwrap();

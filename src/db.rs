@@ -16,6 +16,22 @@ pub struct Db {
     base_url: Arc<String>,
 }
 
+struct DiskFileCleanupGuard(Vec<std::path::PathBuf>);
+
+impl DiskFileCleanupGuard {
+    fn dismiss(mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for DiskFileCleanupGuard {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 impl Db {
     pub(crate) fn from_connection(conn: Connection) -> Self {
         Self {
@@ -3038,6 +3054,7 @@ impl Db {
         copy_files: bool,
         upload_dir: &str,
     ) -> Result<i64, String> {
+        let mut cleanup_guard = DiskFileCleanupGuard(Vec::new());
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
@@ -3258,6 +3275,13 @@ impl Db {
                 if dest_id == new_bug_id || dest_id == source_bug_id {
                     continue;
                 }
+                if rel_type == 2 {
+                    // An issue can only be a duplicate of one issue.
+                    // If source issue has a duplicate (type 2), the clone itself should NOT claim
+                    // the other issue as its duplicate. Skip type 2 entirely.
+                    continue;
+                }
+
                 tx.execute(
                     "INSERT INTO mantis_bug_relationship_table (
                         source_bug_id, destination_bug_id, relationship_type
@@ -3267,7 +3291,7 @@ impl Db {
                 .map_err(|e| e.to_string())?;
 
                 if rel_type == 1 {
-                    // Cloned issue is duplicate of dest_id
+                    // Cloned issue is duplicate of dest_id (matching add_bug_relationship)
                     tx.execute(
                         "UPDATE mantis_bug_table SET duplicate_id = ?1 WHERE id = ?2",
                         params![dest_id, new_bug_id],
@@ -3280,24 +3304,9 @@ impl Db {
                         params![dest_id, new_bug_id],
                     )
                     .map_err(|e| e.to_string())?;
-                } else if rel_type == 2 {
-                    // Cloned issue has reciprocal duplicate relationship
-                    tx.execute(
-                        "INSERT INTO mantis_bug_relationship_table (
-                            source_bug_id, destination_bug_id, relationship_type
-                        ) VALUES (?1, ?2, 1)",
-                        params![dest_id, new_bug_id],
-                    )
-                    .map_err(|e| e.to_string())?;
-                } else if rel_type == 0 {
-                    tx.execute(
-                        "INSERT OR IGNORE INTO mantis_bug_relationship_table (
-                            source_bug_id, destination_bug_id, relationship_type
-                        ) VALUES (?1, ?2, 0)",
-                        params![dest_id, new_bug_id],
-                    )
-                    .map_err(|e| e.to_string())?;
                 }
+                // For type 0 (RelatedTo): only new_bug_id -> dest_id is inserted.
+                // Do not create reciprocal reverse row on dest_id, consistent with MantisBT design.
             }
         }
 
@@ -3367,7 +3376,8 @@ impl Db {
                             rand::random::<u64>()
                         );
                         let dst_path = std::path::Path::new(target_dir).join(&fresh_name);
-                        std::fs::write(dst_path, &bytes).map_err(|e| e.to_string())?;
+                        std::fs::write(&dst_path, &bytes).map_err(|e| e.to_string())?;
+                        cleanup_guard.0.push(dst_path);
                         (fresh_name, target_dir.to_string(), None)
                     } else {
                         (String::new(), String::new(), None)
@@ -3422,6 +3432,7 @@ impl Db {
 
         // Commit transaction before sending notification
         tx.commit().map_err(|e| e.to_string())?;
+        cleanup_guard.dismiss();
 
         // Queue notification email
         let project_name = Self::helper_project_name(&conn, target_project_id);
@@ -3445,8 +3456,9 @@ impl Db {
         mover_id: i64,
         target_project_id: i64,
     ) -> Result<(), String> {
-        let conn = self.conn();
-        let bug = Self::query_bug_by_id(&conn, bug_id)
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let bug = Self::query_bug_by_id(&tx, bug_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Bug {} not found", bug_id))?;
 
@@ -3454,7 +3466,7 @@ impl Db {
             return Ok(());
         }
 
-        let target_enabled: Option<i32> = conn
+        let target_enabled: Option<i32> = tx
             .query_row(
                 "SELECT enabled FROM mantis_project_table WHERE id = ?1",
                 params![target_project_id],
@@ -3465,8 +3477,8 @@ impl Db {
             return Err("Target project not found or disabled".to_string());
         }
 
-        let effective_cats = Self::query_effective_categories(&conn, target_project_id)
-            .map_err(|e| e.to_string())?;
+        let effective_cats =
+            Self::query_effective_categories(&tx, target_project_id).map_err(|e| e.to_string())?;
         let cat_effective = effective_cats.iter().any(|c| c.id == bug.category_id);
         let (new_cat_id, cat_changed) = if cat_effective {
             (bug.category_id, false)
@@ -3481,7 +3493,7 @@ impl Db {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        conn.execute(
+        tx.execute(
             "UPDATE mantis_bug_table
              SET project_id = ?1, category_id = ?2, last_updated = ?3
              WHERE id = ?4",
@@ -3490,7 +3502,7 @@ impl Db {
         .map_err(|e| e.to_string())?;
 
         self.record_history(
-            &conn,
+            &tx,
             bug_id,
             mover_id,
             "project_id",
@@ -3502,7 +3514,7 @@ impl Db {
 
         if cat_changed {
             self.record_history(
-                &conn,
+                &tx,
                 bug_id,
                 mover_id,
                 "category_id",
@@ -3512,6 +3524,8 @@ impl Db {
             )
             .map_err(|e| e.to_string())?;
         }
+
+        tx.commit().map_err(|e| e.to_string())?;
 
         let target_project_name = Self::helper_project_name(&conn, target_project_id);
         let action_header = "The following issue has been MOVED.";

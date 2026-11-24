@@ -2227,9 +2227,6 @@ pub fn render_bug_move_page(
         &content,
     )
 }
-        &content,
-    )
-}
 
 #[cfg(test)]
 #[path = "bugs_test.rs"]

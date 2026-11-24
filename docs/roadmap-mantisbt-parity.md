@@ -163,3 +163,63 @@ Tài liệu này tổng hợp kết quả đối chiếu giữa `rust-mantis-bt`
 - **Hệ thống Plugin PHP động:** Không phù hợp với kiến trúc single-binary của Rust; thay vào đó nên tích hợp sẵn dưới dạng module bật/tắt qua trait event hooks nội bộ (Formatting, Graphs, XML Import/Export, Gravatar).
 - **Sponsorships & Legacy Wiki adapters (TWiki, WackoWiki, WikkaWiki...):** Mức độ sử dụng thực tế rất thấp so với chi phí bảo trì.
 - **Đa CSDL (Oracle / MS SQL / MySQL via ADOdb):** Chỉ nên cân nhắc thêm PostgreSQL về sau nếu có nhu cầu scale vượt SQLite.
+
+---
+
+## 6. Chiến lược Regression Test & Đảm bảo tương thích dữ liệu cũ
+
+### 6.1. Hiện trạng & Khoảng trống kiểm thử
+
+- **Hiện trạng đã có (~207 tests tự động):**
+  - ~167 unit tests phân bổ 1:1 tại các file `src/*_test.rs`, `src/models/models_test.rs`, `src/controllers/*_test.rs`, `src/views/*_test.rs`.
+  - 40 HTTP/integration tests trong thư mục [`tests/`](../tests) (`subproject1_http_test.rs` – `subproject5_http_test.rs`, `mcp_test.rs`, `test_sendgrid_mailer.rs`, `test_jira_*.rs`) cùng kịch bản kiểm thử thủ công [`tests/manual_test.sh`](../tests/manual_test.sh).
+  - Mọi PR đều đi qua quality gate bắt buộc (`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test`), giúp ngăn hồi quy các luồng cơ bản.
+- **Khoảng trống cần bổ sung:**
+  - **Chưa có bài test tương thích ngược dữ liệu cũ (Upgrade / Backward-Compatibility Test):** Toàn bộ test hiện tại khởi tạo DB mới hoàn toàn (`in-memory`), chưa kiểm chứng việc mở lại một file `mantis.db` mang dữ liệu cũ qua các bản nâng cấp.
+  - **Độ phủ integration test HTTP cho Filter, Planning & REST API còn mỏng:** [`tests/subproject3_http_test.rs`](../tests/subproject3_http_test.rs) (2 tests), [`tests/subproject4_http_test.rs`](../tests/subproject4_http_test.rs) (1 test), [`tests/subproject5_http_test.rs`](../tests/subproject5_http_test.rs) (1 test) hiện mới kiểm tra các luồng tối thiểu.
+
+### 6.2. Bổ sung bộ Backward-Compatibility Test (`tests/backward_compat_test.rs`)
+
+Đề xuất tạo file test tích hợp chuyên biệt `tests/backward_compat_test.rs` (tách riêng với các fixture DB mới) để kiểm chứng an toàn dữ liệu cũ xuyên suốt Phase 1–5:
+
+1. **Tương thích ngược JSON của Saved Filters (`mantis_filters_table.filter_string`):**
+   - Seed sẵn các chuỗi JSON `BugFilter` kiểu cũ (chỉ chứa tập field ban đầu, thiếu các trường mở rộng như `sort`, `dir`, `per_page`, `match_type`, v.v.).
+   - Đảm bảo `serde_json::from_str::<BugFilter>` luôn thành công (nhờ `#[serde(default)]`) và route `/view_all_bug_page?filter_id=...` hiển thị đúng mà không lỗi 500 hay mất filter.
+2. **Idempotent Migration trên DB có sẵn dữ liệu cũ (`Db::migrate()`):**
+   - Tạo DB mang dữ liệu mẫu phiên bản cũ (issue với `sticky = 0`, `due_date = 0`, `build = ""`, project có `access_min = 10` mặc định, version cũ, các dòng `mantis_bug_history_table` lưu giá trị số cũ).
+   - Chạy lại `Db::migrate()` nhiều lần liên tiếp và kiểm tra không mất bản ghi, không lỗi ràng buộc SQL, đồng thời mọi truy vấn đọc/liệt kê/hiển thị đều hoạt động bình thường.
+3. **Dữ liệu Custom Fields cũ (`mantis_custom_field_string_table`):**
+   - Seed dữ liệu text tự do cũ trong các custom field kiểu `Numeric`, `Float`, `Email`, `Date`, `Enum`.
+   - Đảm bảo trang xem (`view_bug_page`) và trang mở form sửa (`update_bug_page`) **không crash** khi đọc giá trị cũ; khi người dùng bấm lưu lại với giá trị sai định dạng thì trả thông báo validation rõ ràng (còn trường không bắt buộc để trống vẫn lưu được).
+4. **Ranh giới phân quyền & phạm vi hiển thị dữ liệu cũ:**
+   - Kiểm tra subproject roll-up giữ nguyên cô lập private subproject đối với user không có quyền xem.
+   - Kiểm tra `Project.access_min` chặn đúng user dưới ngưỡng (trừ khi có override trong `mantis_project_user_list_table`) và giữ nguyên hành vi cho các project cũ có `access_min = 10`.
+   - Kiểm tra trả về `403 Forbidden` cho các hành động Manager/Admin mới (`bug_stick`, chỉnh sửa Category/Version/Tag/News, xóa filter của người khác).
+
+### 6.3. Checklist Regression Test mở rộng theo từng Phase
+
+- **Phase 1:**
+  - Giữ nguyên toàn bộ query parameters bộ lọc khi chuyển trang phân trang (`/view_all_bug_page`), kiểm tra URL encoding, sorting (kèm `sticky` luôn ghim trên đầu), clamping `per_page`.
+  - Test đầy đủ CRUD + phân quyền cho Category, Version (`date_order`), Tag (detail page + đếm issue), News edit, `bug_stick`, `due_date`/`build`/`os` update, subproject roll-up, category default assignee, `perm_login` cookie `Max-Age`, render/validate cả 11 `CustomFieldType` (bao gồm multi-value `Checkbox`/`Multilist`), và đảm bảo không lồng thẻ `<form>` trong trang edit (`test_no_nested_forms_in_edit_pages`).
+- **Phase 2:**
+  - Test toàn bộ `bug_actiongroup` (Bulk Close/Resolve/Assign/Move/Copy/Tags), kiểm tra giới hạn quyền theo từng project khi thao tác hàng loạt.
+  - Test lịch sử `mantis_bug_revision_table`, Optimistic Locking (`last_updated` conflict), gửi Reminder, quản lý Monitor người khác, và chống XSS khi `MantisCoreFormatting` render Markdown / `#123` / `~123` / `@mention`.
+- **Phase 3:**
+  - Mở rộng `subproject3_http_test.rs` và `subproject4_http_test.rs` cho multi-select filter (`MATCH ALL` / `MATCH ANY`), tùy biến cột, Print/Excel XML export (vẫn giữ chống Formula Injection), RSS feed auth, Activity Timeline, Summary mở rộng và Billing theo khoảng ngày.
+- **Phase 4:**
+  - Test cấu hình phân cấp `(project_id, user_id)` trong `mantis_config_table`, ma trận Workflow Transitions (bao gồm fallback mặc định khi chưa cấu hình), `mantis_user_pref_table`, `mantis_user_profile_table`, luồng Lost Password / Email Verification / Admin Re-auth, và mock/integration test gửi mail SMTP song song SendGrid.
+- **Phase 5:**
+  - Mở rộng `subproject5_http_test.rs` và [`tests/mcp_test.rs`](../tests/mcp_test.rs) để đảm bảo tương thích ngược payload JSON của REST API & 8 MCP tools cũ khi bổ sung fields/endpoints mới (`files`, `tags`, `monitors`, `relationships`), cùng round-trip XML Import/Export chuẩn `mantis.dtd`.
+
+### 6.4. Quy trình kiểm thử & nâng cấp an toàn dữ liệu (SQLite WAL)
+
+1. **Quality Gate trước khi merge mỗi PR:**
+   ```bash
+   cargo fmt --check
+   cargo clippy --all-targets --all-features -- -D warnings
+   cargo test --verbose
+   ```
+2. **Sao lưu CSDL trước khi nâng cấp bản chạy thật:** Do [`src/db.rs`](../src/db.rs) bật `PRAGMA journal_mode = WAL`, dữ liệu mới có thể còn nằm trong file `-wal`; luôn backup bằng lệnh SQLite snapshot thay vì copy file thô khi dịch vụ đang chạy:
+   ```bash
+   sqlite3 mantis.db ".backup mantis.db.bak"
+   ```

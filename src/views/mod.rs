@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod bugs;
 pub mod custom_fields;
+pub mod formatting;
 pub mod jira;
 pub mod layout;
 pub mod planning;
@@ -50,6 +51,53 @@ pub fn format_timestamp(ts: i64) -> String {
     let year = if m <= 2 { y + 1 } else { y };
 
     format!("{:04}-{:02}-{:02} {:02}:{:02}", year, m, d, hour, minute)
+}
+
+/// Convert Unix timestamp (seconds) to `YYYY-MM-DD` in UTC. Returns empty string if `ts <= 0`.
+pub fn format_date(ts: i64) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
+    let formatted = format_timestamp(ts);
+    if let Some(date_part) = formatted.split_whitespace().next() {
+        date_part.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Parse `YYYY-MM-DD` to UTC epoch seconds using Howard Hinnant's days_from_civil algorithm.
+/// Returns `0` if empty or invalid.
+pub fn parse_date_to_epoch(s: &str) -> i64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return 0;
+    }
+    let year: i64 = match parts[0].parse() {
+        Ok(y) => y,
+        Err(_) => return 0,
+    };
+    let month: u32 = match parts[1].parse() {
+        Ok(m) if (1..=12).contains(&m) => m,
+        _ => return 0,
+    };
+    let day: u32 = match parts[2].parse() {
+        Ok(d) if (1..=31).contains(&d) => d,
+        _ => return 0,
+    };
+
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = month as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (day as u64) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era * 146_097 + (doe as i64)) - 719_468;
+    days * 86_400
 }
 
 /// Official MantisBT status color palette

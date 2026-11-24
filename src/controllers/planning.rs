@@ -46,17 +46,52 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .map(|u| (u.id, u.username))
         .collect();
 
-    let mut by_target: BTreeMap<String, Vec<Bug>> = BTreeMap::new();
-    for b in bugs {
-        if !b.target_version.trim().is_empty() {
-            by_target
-                .entry(b.target_version.trim().to_string())
-                .or_default()
-                .push(b);
+    // Determine accessible projects and their names
+    let (accessible_project_ids, project_names): (Vec<i64>, HashMap<i64, String>) =
+        if ctx.active_project_id > 0 {
+            let desc_ids = db
+                .list_project_descendant_ids(ctx.active_project_id)
+                .unwrap_or_default();
+            let mut pids = Vec::new();
+            let mut pnames = HashMap::new();
+            for pid in desc_ids {
+                if db.effective_access_level(&ctx.user, pid).unwrap_or(0)
+                    >= crate::models::AccessLevel::Viewer as i32
+                {
+                    pids.push(pid);
+                    if let Ok(Some(proj)) = db.get_project_by_id(pid) {
+                        pnames.insert(pid, proj.name);
+                    }
+                }
+            }
+            (pids, pnames)
+        } else {
+            let visible = db.list_visible_projects(&ctx.user).unwrap_or_default();
+            let mut pids = Vec::new();
+            let mut pnames = HashMap::new();
+            for (p, _) in visible {
+                pids.push(p.id);
+                pnames.insert(p.id, p.name);
+            }
+            (pids, pnames)
+        };
+
+    // Load project versions from DB across all accessible projects
+    let mut all_project_versions = Vec::new();
+    for pid in &accessible_project_ids {
+        if let Ok(mut v_list) = db.list_versions(*pid) {
+            all_project_versions.append(&mut v_list);
         }
     }
 
-    views::planning::render_roadmap_page(&ctx, &by_target, &users_map).into_response()
+    let version_groups = crate::models::build_roadmap_groups(
+        &accessible_project_ids,
+        all_project_versions,
+        bugs,
+        &project_names,
+    );
+
+    views::planning::render_roadmap_page(&ctx, &version_groups, &users_map).into_response()
 }
 
 pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response {
@@ -298,6 +333,60 @@ pub async fn news_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<
     Redirect::to("/news_page?msg=News+deleted").into_response()
 }
 
+#[derive(Deserialize)]
+pub struct NewsUpdateForm {
+    pub headline: String,
+    pub body: String,
+    pub announcement: Option<String>,
+    pub view_state: Option<i32>,
+}
+
+pub async fn news_edit_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(q): Query<FlashQuery>,
+) -> Response {
+    if ctx.user.access_level < 70 {
+        return forbidden(&ctx, "Manager access required to edit news.");
+    }
+    let item = match db.get_news(id) {
+        Ok(Some(item)) => item,
+        Ok(None) => return views::render_not_found_page(&ctx, "News item not found"),
+        Err(_) => return views::render_not_found_page(&ctx, "News item not found"),
+    };
+    views::planning::render_news_edit_page(&ctx, &item, q.msg.as_deref(), q.err.as_deref())
+        .into_response()
+}
+
+pub async fn news_update(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<NewsUpdateForm>,
+) -> Response {
+    if ctx.user.access_level < 70 {
+        return forbidden(&ctx, "Manager access required to update news.");
+    }
+    match db.get_news(id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return views::render_not_found_page(&ctx, "News item not found"),
+        Err(_) => return views::render_not_found_page(&ctx, "News item not found"),
+    }
+    let ann = if parse_bool(form.announcement.as_deref()) {
+        1
+    } else {
+        0
+    };
+    let vs = form.view_state.unwrap_or(10);
+    match db.update_news(id, &form.headline, &form.body, vs, ann) {
+        Ok(_) => Redirect::to("/news_page?msg=News+updated").into_response(),
+        Err(_) => {
+            Redirect::to(&format!("/news_edit_page/{}?err=Invalid+news+fields", id)).into_response()
+        }
+    }
+}
+
 pub async fn manage_email_queue_page(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -352,6 +441,8 @@ pub fn router() -> Router<Db> {
         .route("/billing_page", get(billing_page))
         .route("/news_page", get(news_page))
         .route("/news_add", post(news_add))
+        .route("/news_edit_page/:id", get(news_edit_page))
+        .route("/news_update/:id", post(news_update))
         .route("/news_delete/:id", post(news_delete))
         .route("/manage_email_queue_page", get(manage_email_queue_page))
         .route("/manage_email_queue_flush", post(manage_email_queue_flush))

@@ -1,14 +1,173 @@
 use crate::auth::AuthContext;
 use crate::models::{
-    Bug, BugFilter, BugFull, BugPriority, BugReproducibility, BugResolution, BugSeverity,
-    BugStatus, CustomField, CustomFieldValue, JiraLink, ProjectVersion, RelationshipType,
+    build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
+    BugHistory, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus, Category,
+    CustomField, CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType,
     SavedFilter, Tag, User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
-use crate::views::{format_timestamp, render_status_badge, render_status_legend, status_color};
+use crate::views::{
+    format_date, format_timestamp, render_status_badge, render_status_legend, status_color,
+};
 use axum::response::Html;
 use std::collections::HashMap;
+
+pub fn format_history_value(
+    field_name: &str,
+    val: &str,
+    users_map: &HashMap<i64, String>,
+    categories_map: &HashMap<i64, String>,
+) -> String {
+    let trimmed = val.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    match field_name {
+        "status" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(st) = BugStatus::from_i32(code) {
+                    return st.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "resolution" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(res) = BugResolution::from_i32(code) {
+                    return res.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "priority" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(pr) = BugPriority::from_i32(code) {
+                    return pr.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "severity" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(sev) = BugSeverity::from_i32(code) {
+                    return sev.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "reproducibility" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(rep) = BugReproducibility::from_i32(code) {
+                    return rep.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "view_state" => {
+            if let Ok(code) = trimmed.parse::<i32>() {
+                if let Some(vs) = ViewState::from_i32(code) {
+                    return vs.as_str().to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "sticky" => {
+            if trimmed == "1" {
+                "yes".to_string()
+            } else if trimmed == "0" {
+                "no".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+        "due_date" => {
+            if let Ok(ts) = trimmed.parse::<i64>() {
+                if ts > 0 {
+                    let d = format_date(ts);
+                    if !d.is_empty() {
+                        return d;
+                    }
+                } else if ts == 0 {
+                    return "none".to_string();
+                }
+            }
+            trimmed.to_string()
+        }
+        "handler_id" => {
+            if let Ok(uid) = trimmed.parse::<i64>() {
+                if uid == 0 {
+                    return "none".to_string();
+                }
+                if let Some(uname) = users_map.get(&uid) {
+                    return uname.clone();
+                }
+                return format!("user#{}", uid);
+            }
+            trimmed.to_string()
+        }
+        "category_id" => {
+            if let Ok(cid) = trimmed.parse::<i64>() {
+                if cid == 0 {
+                    return "none".to_string();
+                }
+                if let Some(cname) = categories_map.get(&cid) {
+                    return cname.clone();
+                }
+                return format!("category#{}", cid);
+            }
+            trimmed.to_string()
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+pub fn render_bug_history_html(
+    history: &[BugHistory],
+    users_map: &HashMap<i64, String>,
+    categories_map: &HashMap<i64, String>,
+) -> String {
+    if history.is_empty() {
+        return "<p>No history entries.</p>".to_string();
+    }
+    let mut history_html = String::from(
+        r#"<table class="data-table"><thead><tr><th>Date Modified</th><th>Username</th><th>Field</th><th>Change</th></tr></thead><tbody>"#,
+    );
+    for h in history {
+        let uname = users_map
+            .get(&h.user_id)
+            .cloned()
+            .unwrap_or_else(|| format!("user#{}", h.user_id));
+        let change_desc = if h.type_ == 1 && h.field_name.is_empty() {
+            "New Issue".to_string()
+        } else {
+            let formatted_old =
+                format_history_value(&h.field_name, &h.old_value, users_map, categories_map);
+            let formatted_new =
+                format_history_value(&h.field_name, &h.new_value, users_map, categories_map);
+            format!(
+                "{} =&gt; {}",
+                html_escape(&formatted_old),
+                html_escape(&formatted_new)
+            )
+        };
+        history_html.push_str(&format!(
+            r#"<tr>
+                <td style="width:150px; white-space:nowrap;">{}</td>
+                <td style="width:150px;">{}</td>
+                <td style="width:180px;">{}</td>
+                <td>{}</td>
+            </tr>"#,
+            format_timestamp(h.date_modified),
+            html_escape(&uname),
+            html_escape(&h.field_name),
+            change_desc
+        ));
+    }
+    history_html.push_str("</tbody></table>");
+    history_html
+}
 
 pub fn status_label(v: i32) -> &'static str {
     BugStatus::from_i32(v)
@@ -139,6 +298,42 @@ pub fn render_my_view_page(
     render_layout("My View", ctx, None, &content)
 }
 
+fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String {
+    let current_sort = q.sort.as_deref().unwrap_or("last_updated");
+    let current_dir = q.dir.as_deref().unwrap_or("desc");
+    let is_active = current_sort == sort_key;
+
+    let next_dir = if is_active {
+        if current_dir.eq_ignore_ascii_case("asc") {
+            "desc"
+        } else {
+            "asc"
+        }
+    } else {
+        "desc"
+    };
+
+    let arrow = if is_active {
+        if current_dir.eq_ignore_ascii_case("asc") {
+            " &#9650;"
+        } else {
+            " &#9660;"
+        }
+    } else {
+        ""
+    };
+
+    let mut target_q = q.clone();
+    target_q.sort = Some(sort_key.to_string());
+    target_q.dir = Some(next_dir.to_string());
+    let url = build_view_all_bug_page_url(&target_q, 1);
+
+    format!(
+        r#"<th><a href="{}" style="color:inherit; text-decoration:none;">{}{}</a></th>"#,
+        url, label, arrow
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_view_all_bug_page(
     ctx: &AuthContext,
@@ -157,6 +352,7 @@ pub fn render_view_all_bug_page(
     saved_filters: &[SavedFilter],
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
+    query: &ListBugsQuery,
 ) -> Html<String> {
     let offset = (page - 1) * per_page;
     let mut rows_html = String::new();
@@ -188,6 +384,11 @@ pub fn render_view_all_bug_page(
             } else {
                 ""
             };
+            let sticky_badge = if b.sticky == 1 {
+                r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:10px; font-weight:bold; padding:2px 4px; border-radius:3px;">[Sticky]</span>"#
+            } else {
+                ""
+            };
             let jira_badge = if let Some(jl) = jira_links.get(&b.id) {
                 format!(
                     r#" <a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; font-size:10px; text-decoration:none;">Jira: {}</a>"#,
@@ -201,19 +402,20 @@ pub fn render_view_all_bug_page(
 
             rows_html.push_str(&format!(
                 r#"<tr class="{}">
-                    <td style="border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a></td>
+                    <td style="border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}{}{}</td>
-                    <td><a href="/view_bug_page/{}">{}</a>{}{}</td>
+                    <td><a href="/view_bug_page/{}">{}</a>{}{}{}</td>
                     <td style="white-space:nowrap;">{}</td>
                 </tr>"#,
                 row_class,
                 status_color(b.status),
                 b.id,
                 b.id,
+                sticky_badge,
                 html_escape(&proj_name),
                 html_escape(&cat_name),
                 html_escape(severity_label(b.severity)),
@@ -228,6 +430,7 @@ pub fn render_view_all_bug_page(
                 b.id,
                 html_escape(&b.summary),
                 priv_badge,
+                sticky_badge,
                 jira_badge,
                 format_timestamp(b.last_updated)
             ));
@@ -240,16 +443,16 @@ pub fn render_view_all_bug_page(
 
     let prev_link = if page > 1 {
         format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/view_all_bug_page?page={}">« Prev</a>"#,
-            page - 1
+            r#"<a class="btn btn-secondary btn-sm" href="{}">« Prev</a>"#,
+            build_view_all_bug_page_url(query, page - 1)
         )
     } else {
         String::new()
     };
     let next_link = if (offset as usize) + bugs.len() < total {
         format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/view_all_bug_page?page={}">Next »</a>"#,
-            page + 1
+            r#"<a class="btn btn-secondary btn-sm" href="{}">Next »</a>"#,
+            build_view_all_bug_page_url(query, page + 1)
         )
     } else {
         String::new()
@@ -406,12 +609,54 @@ pub fn render_view_all_bug_page(
 
     let mut saved_filters_html = String::new();
     for sf in saved_filters {
+        let delete_btn = if sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
+            format!(
+                r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete filter?');" title="Delete filter">Delete</button></form>"#,
+                sf.id
+            )
+        } else {
+            String::new()
+        };
         saved_filters_html.push_str(&format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/view_all_bug_page?filter_id={}">{}</a> "#,
+            r#"<span class="saved-filter-item" style="display:inline-flex; align-items:center; gap:2px; margin-right:8px;"><a class="btn btn-secondary btn-sm" href="/view_all_bug_page?filter_id={}">{}</a>{}</span>"#,
             sf.id,
-            html_escape(&sf.name)
+            html_escape(&sf.name),
+            delete_btn
         ));
     }
+
+    let active_per_page = clamp_per_page(query.per_page.or(filter.per_page));
+    let mut per_page_html =
+        String::from(r#"<span style="font-size:12px; margin-right:6px;">Per page:</span>"#);
+    for &cnt in &[10, 25, 50, 100] {
+        if cnt == active_per_page {
+            per_page_html.push_str(&format!(
+                r#"<span class="btn btn-secondary btn-sm" style="font-weight:bold; background:#e0e0e0; pointer-events:none;">{}</span> "#,
+                cnt
+            ));
+        } else {
+            let mut pp_q = query.clone();
+            pp_q.per_page = Some(cnt);
+            let url = build_view_all_bug_page_url(&pp_q, 1);
+            per_page_html.push_str(&format!(
+                r#"<a class="btn btn-secondary btn-sm" href="{}">{}</a> "#,
+                url, cnt
+            ));
+        }
+    }
+
+    let cur_sort = query.sort.as_deref().unwrap_or("");
+    let cur_dir = query.dir.as_deref().unwrap_or("");
+    let cur_per_page_str = active_per_page.to_string();
+
+    let th_id = render_sortable_th(query, "id", "ID");
+    let th_project = "<th>Project</th>";
+    let th_category = "<th>Category</th>";
+    let th_severity = render_sortable_th(query, "severity", "Severity");
+    let th_priority = render_sortable_th(query, "priority", "Priority");
+    let th_status = render_sortable_th(query, "status", "Status");
+    let th_summary = render_sortable_th(query, "summary", "Summary");
+    let th_updated = render_sortable_th(query, "last_updated", "Updated");
 
     let search_val = filter.search.as_deref().unwrap_or("");
     let save_filter_form = if ctx.user.access_level >= 25 {
@@ -422,6 +667,9 @@ pub fn render_view_all_bug_page(
                 <input type="hidden" name="priority" value="{}">
                 <input type="hidden" name="severity" value="{}">
                 <input type="hidden" name="tag_id" value="{}">
+                <input type="hidden" name="sort" value="{}">
+                <input type="hidden" name="dir" value="{}">
+                <input type="hidden" name="per_page" value="{}">
                 <input type="text" name="name" placeholder="Saved filter name" style="max-width:180px;" required>
                 <label><input type="checkbox" name="is_public" value="1"> Public</label>
                 <button type="submit" class="btn btn-secondary btn-sm">Save Current Filter</button>
@@ -430,7 +678,10 @@ pub fn render_view_all_bug_page(
             filter.status.unwrap_or(0),
             filter.priority.unwrap_or(0),
             filter.severity.unwrap_or(0),
-            filter.tag_id.unwrap_or(0)
+            filter.tag_id.unwrap_or(0),
+            html_escape(cur_sort),
+            html_escape(cur_dir),
+            cur_per_page_str
         )
     } else {
         String::new()
@@ -445,6 +696,9 @@ pub fn render_view_all_bug_page(
             </div>
             <div class="panel-body">
                 <form method="GET" action="/view_all_bug_page">
+                    <input type="hidden" name="sort" value="{}">
+                    <input type="hidden" name="dir" value="{}">
+                    <input type="hidden" name="per_page" value="{}">
                     <div class="filter-grid">
                         <div class="filter-cell">
                             <span class="filter-label">Reporter</span>
@@ -501,7 +755,7 @@ pub fn render_view_all_bug_page(
             <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
                 <span>Viewing Issues ({})</span>
                 <div style="display:flex; gap:8px;">
-                    <a class="btn btn-secondary btn-sm" href="/csv_export?q={}&status={}&priority={}&severity={}&tag_id={}">CSV Export</a>
+                    <a class="btn btn-secondary btn-sm" href="{}">CSV Export</a>
                     <a class="btn btn-sm" href="/bug_report_page">Report Issue</a>
                 </div>
             </div>
@@ -509,27 +763,35 @@ pub fn render_view_all_bug_page(
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>ID</th>
-                            <th>Project</th>
-                            <th>Category</th>
-                            <th>Severity</th>
-                            <th>Priority</th>
-                            <th>Status</th>
-                            <th>Summary</th>
-                            <th>Updated</th>
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
+                            {}
                         </tr>
                     </thead>
                     <tbody>
                         {}
                     </tbody>
                 </table>
-                <div style="display:flex; gap:8px; justify-content:flex-end;">
-                    {} {}
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+                    <div style="display:flex; align-items:center;">
+                        {}
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        {} {}
+                    </div>
                 </div>
             </div>
         </div>
         {}"#,
         err_banner,
+        html_escape(cur_sort),
+        html_escape(cur_dir),
+        cur_per_page_str,
         reporter_opts,
         handler_opts,
         monitored_opts,
@@ -543,12 +805,17 @@ pub fn render_view_all_bug_page(
         saved_filters_html,
         save_filter_form,
         total,
-        html_escape(search_val),
-        filter.status.unwrap_or(0),
-        filter.priority.unwrap_or(0),
-        filter.severity.unwrap_or(0),
-        filter.tag_id.unwrap_or(0),
+        build_csv_export_url(query),
+        th_id,
+        th_project,
+        th_category,
+        th_severity,
+        th_priority,
+        th_status,
+        th_summary,
+        th_updated,
         rows_html,
+        per_page_html,
         prev_link,
         next_link,
         render_status_legend()
@@ -557,12 +824,14 @@ pub fn render_view_all_bug_page(
     render_layout("View Issues", ctx, flash_msg, &content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_bug_report_page(
     ctx: &AuthContext,
     project_opts: &[(i64, String, bool)],
     categories: &[(i64, String)],
     versions: &[ProjectVersion],
     custom_fields: &[CustomField],
+    effective_access: i32,
     flash_err: Option<&str>,
     flash_msg: Option<&str>,
 ) -> Html<String> {
@@ -595,27 +864,25 @@ pub fn render_bug_report_page(
         ));
     }
 
-    let mut cf_rows_html = String::new();
-    for cf in custom_fields {
-        if cf.display_report != 0 {
-            let req = if cf.require_report != 0 {
-                "required"
-            } else {
-                ""
-            };
-            cf_rows_html.push_str(&format!(
-                r#"<tr>
-                    <td class="label-col">{}{}</td>
-                    <td class="input-col"><input type="text" name="custom_field_{}" value="{}" {}></td>
-                </tr>"#,
-                html_escape(&cf.name),
-                if cf.require_report != 0 { " *" } else { "" },
-                cf.id,
-                html_escape(&cf.default_value),
-                req
-            ));
-        }
-    }
+    let dummy_cats: Vec<Category> = categories
+        .iter()
+        .map(|(id, name)| Category {
+            id: *id,
+            project_id: 0,
+            user_id: 0,
+            name: name.clone(),
+            status: 0,
+        })
+        .collect();
+    let empty_vals = HashMap::new();
+    let cf_rows_html = crate::views::custom_fields::render_custom_fields_form_rows(
+        custom_fields,
+        &empty_vals,
+        effective_access,
+        crate::views::custom_fields::CustomFieldFormMode::Report,
+        versions,
+        &dummy_cats,
+    );
 
     let err_banner = flash_err
         .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
@@ -690,6 +957,14 @@ pub fn render_bug_report_page(
                             </td>
                         </tr>
                         <tr>
+                            <td class="label-col">Build</td>
+                            <td class="input-col"><input type="text" name="build" placeholder="Build" style="max-width:200px;"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Due Date</td>
+                            <td class="input-col"><input type="date" name="due_date" style="max-width:200px;"></td>
+                        </tr>
+                        <tr>
                             <td class="label-col">Summary *</td>
                             <td class="input-col"><input type="text" name="summary" required></td>
                         </tr>
@@ -726,6 +1001,122 @@ pub fn render_bug_report_page(
     render_layout("Report Issue", ctx, flash_msg, &content)
 }
 
+pub fn render_status_change_form(
+    bug: &Bug,
+    effective_access: i32,
+    custom_fields: &[CustomField],
+    cf_values: &[CustomFieldValue],
+    versions: &[ProjectVersion],
+    categories: &[Category],
+) -> String {
+    let mut status_opts = String::new();
+    for (code, name) in [
+        (10, "new"),
+        (20, "feedback"),
+        (30, "acknowledged"),
+        (40, "confirmed"),
+        (50, "assigned"),
+        (80, "resolved"),
+        (90, "closed"),
+    ] {
+        if code == 80 && effective_access < 55 {
+            continue;
+        }
+        if code == 90 && effective_access < 70 {
+            continue;
+        }
+        let sel = if bug.status == code { "selected" } else { "" };
+        status_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code, sel, name
+        ));
+    }
+
+    let mut res_opts = String::new();
+    for (code, name) in [
+        (10, "open"),
+        (20, "fixed"),
+        (30, "reopened"),
+        (40, "unable to reproduce"),
+        (50, "not fixable"),
+        (60, "duplicate"),
+        (70, "not a bug"),
+        (80, "suspended"),
+        (90, "won't fix"),
+    ] {
+        let sel = if bug.resolution == code {
+            "selected"
+        } else {
+            ""
+        };
+        res_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code, sel, name
+        ));
+    }
+
+    let mut val_map = HashMap::new();
+    for v in cf_values {
+        val_map.insert(v.field_id, v.value.clone());
+    }
+
+    let mut cf_inputs = String::new();
+    for cf in custom_fields {
+        if effective_access < cf.access_level_r {
+            continue;
+        }
+        let is_resolve_disp = cf.display_resolved != 0 && effective_access >= 55;
+        let is_close_disp = cf.display_closed != 0 && effective_access >= 70;
+        let qualifies = if bug.status < 80 {
+            is_resolve_disp || is_close_disp
+        } else if bug.status < 90 {
+            is_close_disp
+        } else {
+            false
+        };
+
+        if qualifies {
+            let is_req = (is_resolve_disp && cf.require_resolved != 0)
+                || (is_close_disp && cf.require_closed != 0);
+            let can_write = effective_access >= cf.access_level_rw;
+            let current_val = val_map
+                .get(&cf.id)
+                .map(|s| s.as_str())
+                .unwrap_or(cf.default_value.as_str());
+            // Do not set HTML required attribute on the status form input: the status form handles
+            // multiple transition targets (e.g. assigning or resolving), so client-side required
+            // attributes would block intermediate non-resolve status changes. The server validates
+            // requirements based on the chosen target status.
+            let input_html = crate::views::custom_fields::render_custom_field_input(
+                cf,
+                current_val,
+                false,
+                !can_write,
+                versions,
+                categories,
+            );
+            let req_star = if is_req { " *" } else { "" };
+            cf_inputs.push_str(&format!(
+                r#"<label style="margin:0; font-size:12px; font-weight:bold; color:#555;">{}{}: {}</label>"#,
+                html_escape(&cf.name),
+                req_star,
+                input_html
+            ));
+        }
+    }
+
+    format!(
+        r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
+            <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
+            <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
+            {}
+            <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
+        </form>"#,
+        bug.id, status_opts, res_opts, cf_inputs
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_view_bug_page(
     ctx: &AuthContext,
@@ -748,6 +1139,7 @@ pub fn render_view_bug_page(
     jira_section_html: &str,
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
+    format_ctx: &crate::views::formatting::FormatContext,
 ) -> Html<String> {
     let bug = &full.bug;
     let banner = if let Some(m) = flash_msg {
@@ -770,19 +1162,56 @@ pub fn render_view_bug_page(
 
     let mut cf_rows_html = String::new();
     for cfv in cf_values {
+        let is_multi = matches!(
+            crate::models::CustomFieldType::from_i32(cfv.field_type),
+            Some(crate::models::CustomFieldType::Checkbox)
+                | Some(crate::models::CustomFieldType::Multilist)
+        );
+        let display_value = if is_multi && cfv.value.contains('|') {
+            cfv.value.replace('|', ", ")
+        } else {
+            cfv.value.clone()
+        };
         cf_rows_html.push_str(&format!(
             r#"<tr>
                 <td class="label-col">{}</td>
                 <td class="input-col" colspan="5">{}</td>
             </tr>"#,
             html_escape(&cfv.field_name),
-            html_escape(&cfv.value)
+            html_escape(&display_value)
         ));
     }
 
     let view_state_str = ViewState::from_i32(bug.view_state)
         .map(|v| v.as_str())
         .unwrap_or("public");
+
+    let sticky_badge = if bug.sticky == 1 {
+        r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:11px; font-weight:bold; padding:2px 6px; border-radius:3px; margin-left:6px;">[Sticky]</span>"#
+    } else {
+        ""
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let due_date_html = if bug.due_date > 0 {
+        let d = format_date(bug.due_date);
+        let overdue = if bug.status < 80 && bug.due_date < now {
+            r#" <span class="badge badge-danger" style="background:#d9534f; color:#fff; font-size:11px; padding:2px 6px; border-radius:3px; margin-left:6px;">Overdue</span>"#
+        } else {
+            ""
+        };
+        format!("{}{}", html_escape(&d), overdue)
+    } else {
+        "-".to_string()
+    };
+    let build_str = if bug.build.trim().is_empty() {
+        "-".to_string()
+    } else {
+        html_escape(&bug.build)
+    };
 
     let status_badge = render_status_badge(bug.status, status_label(bug.status));
 
@@ -804,7 +1233,7 @@ pub fn render_view_bug_page(
                     </thead>
                     <tbody>
                         <tr>
-                            <td>{:07}{}</td>
+                            <td>{:07}{}{}</td>
                             <td>{}</td>
                             <td>{}</td>
                             <td>{}</td>
@@ -848,8 +1277,14 @@ pub fn render_view_bug_page(
                             <td class="input-col">{}</td>
                         </tr>
                         <tr>
+                            <td class="label-col">Build</td>
+                            <td class="input-col">{}</td>
+                            <td class="label-col">Due Date</td>
+                            <td class="input-col" colspan="3">{}</td>
+                        </tr>
+                        <tr>
                             <td class="label-col">Summary</td>
-                            <td class="input-col" colspan="5"><strong>{:07}: {}</strong></td>
+                            <td class="input-col" colspan="5"><strong>{:07}: {}</strong>{}</td>
                         </tr>
                         <tr>
                             <td class="label-col">Description</td>
@@ -915,6 +1350,7 @@ pub fn render_view_bug_page(
         bug.id,
         bug.id,
         jira_badge,
+        sticky_badge,
         html_escape(proj_name),
         html_escape(cat_name),
         html_escape(view_state_str),
@@ -933,11 +1369,14 @@ pub fn render_view_bug_page(
         html_escape(&bug.version),
         html_escape(&bug.target_version),
         html_escape(&bug.fixed_in_version),
+        build_str,
+        due_date_html,
         bug.id,
         html_escape(&bug.summary),
-        html_escape(&full.description),
-        html_escape(&full.steps_to_reproduce),
-        html_escape(&full.additional_information),
+        sticky_badge,
+        crate::views::formatting::format_text(&full.description, format_ctx),
+        crate::views::formatting::format_text(&full.steps_to_reproduce, format_ctx),
+        crate::views::formatting::format_text(&full.additional_information, format_ctx),
         cf_rows_html,
         actions_html,
         tags_html,
@@ -954,13 +1393,30 @@ pub fn render_view_bug_page(
     render_layout(&format!("Issue #{:07}", bug.id), ctx, flash_msg, &content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_update_bug_page(
     ctx: &AuthContext,
     full: &BugFull,
     cat_opts: &str,
-    cf_rows_html: &str,
+    custom_fields: &[CustomField],
+    cf_values: &[CustomFieldValue],
+    effective_access: i32,
+    versions: &[ProjectVersion],
+    categories: &[Category],
 ) -> Html<String> {
     let bug = &full.bug;
+    let mut val_map = HashMap::new();
+    for v in cf_values {
+        val_map.insert(v.field_id, v.value.clone());
+    }
+    let cf_rows_html = crate::views::custom_fields::render_custom_fields_form_rows(
+        custom_fields,
+        &val_map,
+        effective_access,
+        crate::views::custom_fields::CustomFieldFormMode::Update,
+        versions,
+        categories,
+    );
     let content = format!(
         r#"<div class="panel">
             <div class="panel-header">Update Issue #{:07}</div>
@@ -1023,6 +1479,26 @@ pub fn render_update_bug_page(
                         <tr>
                             <td class="label-col">Target Version</td>
                             <td class="input-col"><input type="text" name="target_version" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Platform</td>
+                            <td class="input-col"><input type="text" name="platform" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">OS</td>
+                            <td class="input-col"><input type="text" name="os" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">OS Build</td>
+                            <td class="input-col"><input type="text" name="os_build" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Build</td>
+                            <td class="input-col"><input type="text" name="build" value="{}"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Due Date</td>
+                            <td class="input-col"><input type="date" name="due_date" value="{}"></td>
                         </tr>
                         <tr>
                             <td class="label-col">View Status</td>
@@ -1105,6 +1581,11 @@ pub fn render_update_bug_page(
         html_escape(&bug.version),
         html_escape(&bug.fixed_in_version),
         html_escape(&bug.target_version),
+        html_escape(&bug.platform),
+        html_escape(&bug.os),
+        html_escape(&bug.os_build),
+        html_escape(&bug.build),
+        html_escape(&format_date(bug.due_date)),
         if bug.view_state == 10 { "selected" } else { "" },
         if bug.view_state == 50 { "selected" } else { "" },
         html_escape(&bug.summary),

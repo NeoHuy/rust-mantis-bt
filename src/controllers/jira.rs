@@ -544,8 +544,27 @@ pub async fn sync_bug_with_jira(
         bug_full.description, bug.id, bug.summary, bug.reporter_id, bug.priority
     );
 
+    // Create as the current user when resolvable on Jira; config email is the fallback.
+    let user_email = ctx.user.email.trim();
+    let reporter_id = if user_email.is_empty() {
+        None
+    } else {
+        client
+            .find_user_by_email(&config, user_email)
+            .await
+            .ok()
+            .flatten()
+    };
+
     let jira_resp = match client
-        .create_issue(&config, &bug.summary, &description, issue_type, epic_key)
+        .create_issue(
+            &config,
+            &bug.summary,
+            &description,
+            issue_type,
+            epic_key,
+            reporter_id.as_deref(),
+        )
         .await
     {
         Ok(resp) => resp,
@@ -648,31 +667,7 @@ pub async fn push_bug_to_jira(
     sync_bug_with_jira(State(db), ctx, Path(bug_id), Ok(Form(sync_form))).await
 }
 
-fn sanitize_error_message(s: &str) -> String {
-    let single_line = s.replace(['\r', '\n', '\t'], " ");
-    let trimmed = single_line.trim();
-    if trimmed.chars().count() > 120 {
-        format!("{}...", trimmed.chars().take(117).collect::<String>())
-    } else {
-        trimmed.to_string()
-    }
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::new();
-    for b in s.bytes() {
-        match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push('+'),
-            _ => {
-                out.push_str(&format!("%{:02X}", b));
-            }
-        }
-    }
-    out
-}
+pub(crate) use super::{sanitize_error_message, url_encode};
 
 pub fn router() -> Router<Db> {
     Router::new()

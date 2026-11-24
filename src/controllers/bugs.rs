@@ -1,6 +1,9 @@
+use super::{sanitize_error_message, url_encode};
 use crate::auth::AuthContext;
 use crate::db::Db;
-use crate::models::{BugFilter, BugUpdate};
+use crate::models::{
+    clamp_per_page, sort_bugs, BugFilter, BugUpdate, CustomFieldType, ListBugsQuery,
+};
 use crate::views;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -9,31 +12,47 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-#[derive(Deserialize, Default)]
-pub struct ListBugsQuery {
-    pub page: Option<i64>,
-    pub filter_id: Option<i64>,
-    pub q: Option<String>,
-    pub search: Option<String>,
-    pub status: Option<i32>,
-    pub hide_status: Option<i32>,
-    pub priority: Option<i32>,
-    pub severity: Option<i32>,
-    pub category_id: Option<i64>,
-    pub reporter_id: Option<i64>,
-    pub handler_id: Option<i64>,
-    pub tag_id: Option<i64>,
-    pub monitored_by: Option<i64>,
-    pub msg: Option<String>,
-    pub err: Option<String>,
-}
+use crate::views::formatting::extract_mentions;
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
     pub msg: Option<String>,
     pub err: Option<String>,
+}
+
+fn get_single_val<'a>(form_map: &'a HashMap<String, Vec<String>>, key: &str) -> Option<&'a str> {
+    form_map
+        .get(key)
+        .and_then(|v| v.first())
+        .map(|s| s.as_str())
+}
+
+fn get_custom_field_submitted_value(
+    form_map: &HashMap<String, Vec<String>>,
+    field_id: i64,
+    field_type: i32,
+) -> Option<String> {
+    let key = format!("custom_field_{}", field_id);
+    let present_key = format!("custom_field_{}_present", field_id);
+    if let Some(values) = form_map.get(&key) {
+        match CustomFieldType::from_i32(field_type) {
+            Some(CustomFieldType::Checkbox) | Some(CustomFieldType::Multilist) => {
+                let non_empty: Vec<&str> = values
+                    .iter()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                Some(non_empty.join("|"))
+            }
+            _ => values.first().map(|s| s.trim().to_string()),
+        }
+    } else if form_map.contains_key(&present_key) {
+        Some(String::new())
+    } else {
+        None
+    }
 }
 
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
@@ -78,6 +97,23 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
                 if ctx.active_project_id > 0 {
                     bf.project_id = Some(ctx.active_project_id);
                 }
+                if let Some(ref s) = q.sort {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        bf.sort = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(ref d) = q.dir {
+                    let trimmed = d.trim();
+                    if !trimmed.is_empty() {
+                        bf.dir = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(pp) = q.per_page {
+                    if pp > 0 {
+                        bf.per_page = Some(clamp_per_page(Some(pp)));
+                    }
+                }
                 return bf;
             }
         }
@@ -104,6 +140,22 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         handler_id: q.handler_id.filter(|&v| v != 0),
         tag_id: q.tag_id.filter(|&v| v > 0),
         monitored_by: q.monitored_by.filter(|&v| v > 0),
+        sort: q
+            .sort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        dir: q
+            .dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        per_page: q
+            .per_page
+            .filter(|&v| v > 0)
+            .map(|pp| clamp_per_page(Some(pp))),
     }
 }
 
@@ -118,6 +170,7 @@ pub fn router() -> Router<Db> {
         .route("/bug_report", post(bug_report))
         .route("/update_bug_page/:id", get(update_bug_page))
         .route("/update_bug/:id", post(update_bug))
+        .route("/bug_stick/:id", post(bug_stick))
         .route("/bug_delete/:id", post(bug_delete))
         .route("/bug_change_status/:id", post(bug_change_status))
         .route("/bug_assign/:id", post(bug_assign))
@@ -259,7 +312,20 @@ pub async fn csv_export(
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
-    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    let effective_sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.sort.as_deref());
+    let effective_dir = q
+        .dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.dir.as_deref());
+    sort_bugs(&mut bugs, effective_sort, effective_dir);
 
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
@@ -335,10 +401,6 @@ pub async fn view_all_bug_page(
     ctx: AuthContext,
     Query(q): Query<ListBugsQuery>,
 ) -> Response {
-    let page = q.page.unwrap_or(1).max(1);
-    let per_page: i64 = 25;
-    let offset = (page - 1) * per_page;
-
     if ctx.active_project_id > 0 {
         let eff = db
             .effective_access_level(&ctx.user, ctx.active_project_id)
@@ -349,7 +411,44 @@ pub async fn view_all_bug_page(
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
-    let bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    let page = q.page.unwrap_or(1).max(1);
+
+    let effective_sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.sort.as_deref())
+        .map(|s| s.to_string());
+
+    let effective_dir = q
+        .dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(filter.dir.as_deref())
+        .map(|s| s.to_string());
+
+    let effective_per_page = q
+        .per_page
+        .filter(|&v| v > 0)
+        .or(filter.per_page)
+        .map(|v| clamp_per_page(Some(v)));
+
+    let per_page = clamp_per_page(effective_per_page) as i64;
+    let offset = (page - 1) * per_page;
+
+    let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
+    sort_bugs(
+        &mut bugs,
+        effective_sort.as_deref(),
+        effective_dir.as_deref(),
+    );
+
+    let mut effective_q = q.clone();
+    effective_q.sort = effective_sort;
+    effective_q.dir = effective_dir;
+    effective_q.per_page = Some(per_page as usize);
 
     let total = bugs.len();
     let paged_bugs: Vec<_> = bugs
@@ -409,6 +508,7 @@ pub async fn view_all_bug_page(
         &saved_filters,
         q.msg.as_deref(),
         q.err.as_deref(),
+        &effective_q,
     )
     .into_response()
 }
@@ -424,14 +524,14 @@ pub async fn bug_report_page(
         ctx.visible_projects.first().map(|(p, _)| p.id).unwrap_or(0)
     };
 
-    if default_proj_id > 0 {
-        let eff = db
-            .effective_access_level(&ctx.user, default_proj_id)
-            .unwrap_or(0);
-        if eff < 25 {
-            return forbidden(&ctx, "Reporter access required to report an issue.");
-        }
-    } else if ctx.user.access_level < 25 {
+    let default_eff = if default_proj_id > 0 {
+        db.effective_access_level(&ctx.user, default_proj_id)
+            .unwrap_or(0)
+    } else {
+        ctx.user.access_level
+    };
+
+    if default_eff < 25 {
         return forbidden(&ctx, "Reporter access required to report an issue.");
     }
 
@@ -466,6 +566,7 @@ pub async fn bug_report_page(
         &cat_pairs,
         &versions,
         &custom_fields,
+        default_eff,
         q.err.as_deref(),
         q.msg.as_deref(),
     )
@@ -475,9 +576,15 @@ pub async fn bug_report_page(
 pub async fn bug_report(
     State(db): State<Db>,
     ctx: AuthContext,
-    axum::Form(form): axum::Form<HashMap<String, String>>,
+    axum::Form(form_data): axum::Form<Vec<(String, String)>>,
 ) -> Response {
-    let project_id: i64 = match form.get("project_id").and_then(|v| v.parse().ok()) {
+    let mut form_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in form_data {
+        form_map.entry(k).or_default().push(v);
+    }
+
+    let project_id: i64 = match get_single_val(&form_map, "project_id").and_then(|v| v.parse().ok())
+    {
         Some(pid) => pid,
         None => return Redirect::to("/bug_report_page?err=Invalid+project").into_response(),
     };
@@ -492,43 +599,94 @@ pub async fn bug_report(
         );
     }
 
-    let summary = form.get("summary").map(|s| s.trim()).unwrap_or("");
+    let summary = get_single_val(&form_map, "summary")
+        .map(|s| s.trim())
+        .unwrap_or("");
     if summary.is_empty() {
         return Redirect::to("/bug_report_page?err=Summary+is+required").into_response();
     }
 
-    let category_id: i64 = form
-        .get("category_id")
+    let category_id: i64 = get_single_val(&form_map, "category_id")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let reproducibility: i32 = form
-        .get("reproducibility")
+    let reproducibility: i32 = get_single_val(&form_map, "reproducibility")
         .and_then(|v| v.parse().ok())
         .unwrap_or(70);
-    let severity: i32 = form
-        .get("severity")
+    let severity: i32 = get_single_val(&form_map, "severity")
         .and_then(|v| v.parse().ok())
         .unwrap_or(50);
-    let priority: i32 = form
-        .get("priority")
+    let priority: i32 = get_single_val(&form_map, "priority")
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
-    let version = form.get("version").cloned().unwrap_or_default();
-    let platform = form.get("platform").cloned().unwrap_or_default();
-    let os = form.get("os").cloned().unwrap_or_default();
-    let os_build = form.get("os_build").cloned().unwrap_or_default();
-    let description = form.get("description").cloned().unwrap_or_default();
-    let steps_to_reproduce = form.get("steps_to_reproduce").cloned().unwrap_or_default();
-    let additional_info = form
-        .get("additional_information")
-        .cloned()
-        .unwrap_or_default();
-    let view_state: i32 = form
-        .get("view_state")
+    let version = get_single_val(&form_map, "version")
+        .unwrap_or_default()
+        .to_string();
+    let platform = get_single_val(&form_map, "platform")
+        .unwrap_or_default()
+        .to_string();
+    let os = get_single_val(&form_map, "os")
+        .unwrap_or_default()
+        .to_string();
+    let os_build = get_single_val(&form_map, "os_build")
+        .unwrap_or_default()
+        .to_string();
+    let build = get_single_val(&form_map, "build")
+        .map(|s| s.trim())
+        .unwrap_or("");
+    let due_date_str = get_single_val(&form_map, "due_date")
+        .map(|s| s.trim())
+        .unwrap_or("");
+    let due_date = views::parse_date_to_epoch(due_date_str);
+    let description = get_single_val(&form_map, "description")
+        .unwrap_or_default()
+        .to_string();
+    let steps_to_reproduce = get_single_val(&form_map, "steps_to_reproduce")
+        .unwrap_or_default()
+        .to_string();
+    let additional_info = get_single_val(&form_map, "additional_information")
+        .unwrap_or_default()
+        .to_string();
+    let view_state: i32 = get_single_val(&form_map, "view_state")
         .and_then(|v| v.parse().ok())
         .unwrap_or(10);
 
-    let bug_id = match db.create_bug(
+    let custom_fields = db
+        .list_custom_fields_for_project(project_id)
+        .unwrap_or_default();
+    let versions = db.list_versions(project_id).unwrap_or_default();
+    let cats = db.list_effective_categories(project_id).unwrap_or_default();
+
+    // Validate custom fields before creating the bug
+    let mut custom_field_values_to_set = Vec::new();
+    for cf in &custom_fields {
+        if eff < cf.access_level_r || cf.display_report == 0 {
+            continue;
+        }
+        if eff >= cf.access_level_rw {
+            let submitted = get_custom_field_submitted_value(&form_map, cf.id, cf.field_type);
+            let val = submitted.unwrap_or_else(|| cf.default_value.clone());
+            let resolved =
+                crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
+            let is_req = cf.require_report != 0;
+            if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
+            {
+                return Redirect::to(&format!(
+                    "/bug_report_page?err={}",
+                    url_encode(&sanitize_error_message(&e))
+                ))
+                .into_response();
+            }
+            custom_field_values_to_set.push((cf.id, val));
+        }
+    }
+
+    let deduped = crate::views::formatting::collect_mentions(&[
+        &description,
+        &steps_to_reproduce,
+        &additional_info,
+    ]);
+
+    let bug_id = match db.create_bug_with_mentions(
         project_id,
         ctx.user.id,
         category_id,
@@ -544,6 +702,7 @@ pub async fn bug_report(
         &os_build,
         &platform,
         view_state,
+        &deduped,
     ) {
         Ok(id) => id,
         Err(_) => {
@@ -551,13 +710,40 @@ pub async fn bug_report(
         }
     };
 
-    let custom_fields = db
-        .list_custom_fields_for_project(project_id)
-        .unwrap_or_default();
-    for cf in &custom_fields {
-        let key = format!("custom_field_{}", cf.id);
-        if let Some(val) = form.get(&key) {
-            let _ = db.set_custom_field_value(cf.id, bug_id, ctx.user.id, val);
+    if !build.is_empty() || due_date > 0 {
+        let mut update = BugUpdate::default();
+        if !build.is_empty() {
+            update.build = Some(build.to_string());
+        }
+        if due_date > 0 {
+            update.due_date = Some(due_date);
+        }
+        if let Err(e) = db.update_bug_fields(bug_id, ctx.user.id, update) {
+            eprintln!(
+                "[bug_report] Failed to update build/due_date for bug {}: {}",
+                bug_id, e
+            );
+        }
+    }
+
+    for (cf_id, val) in custom_field_values_to_set {
+        if let Err(e) = db.set_custom_field_value(cf_id, bug_id, ctx.user.id, &val) {
+            return Redirect::to(&format!("/view_bug_page/{}?err={}", bug_id, url_encode(&e)))
+                .into_response();
+        }
+    }
+
+    if !deduped.is_empty() {
+        let context_text = crate::views::formatting::combine_context(
+            summary,
+            &[&description, &steps_to_reproduce, &additional_info],
+        );
+        if let Err(e) = db.notify_bug_mentions(bug_id, ctx.user.id, &deduped, false, &context_text)
+        {
+            eprintln!(
+                "[mentions] failed to send mention notifications on bug_report: {}",
+                e
+            );
         }
     }
 
@@ -614,11 +800,65 @@ pub async fn view_bug_page(
     };
 
     let notes = db.list_bugnotes(id, eff).unwrap_or_default();
-    let history = db.list_bug_history(id).unwrap_or_default();
+    let mut history = db.list_bug_history(id).unwrap_or_default();
     let rels = db.list_bug_relationships(id).unwrap_or_default();
     let files = db.list_bug_files(id).unwrap_or_default();
     let bug_tags = db.list_bug_tags(id).unwrap_or_default();
-    let cf_values = db.get_custom_field_values_for_bug(id).unwrap_or_default();
+    let mut cf_values = db.get_custom_field_values_for_bug(id).unwrap_or_default();
+    cf_values.retain(|cfv| eff >= cfv.access_level_r);
+    let custom_fields = db
+        .list_custom_fields_for_project(bug.project_id)
+        .unwrap_or_default();
+    const CORE_HISTORY_FIELDS: &[&str] = &[
+        "status",
+        "resolution",
+        "handler_id",
+        "priority",
+        "severity",
+        "reproducibility",
+        "summary",
+        "description",
+        "steps_to_reproduce",
+        "additional_information",
+        "category",
+        "category_id",
+        "project",
+        "project_id",
+        "version",
+        "target_version",
+        "fixed_in_version",
+        "os",
+        "os_build",
+        "platform",
+        "build",
+        "due_date",
+        "sticky",
+        "view_state",
+        "bugnote_added",
+        "bugnote_deleted",
+        "bugnote_updated",
+        "relationship_added",
+        "relationship_deleted",
+        "file_added",
+        "file_deleted",
+        "monitor_added",
+        "monitor_deleted",
+        "tag_attached",
+        "tag_detached",
+    ];
+    let hidden_cf_names: std::collections::HashSet<&str> = custom_fields
+        .iter()
+        .filter(|cf| {
+            eff < cf.access_level_r
+                && !CORE_HISTORY_FIELDS.contains(&cf.name.trim().to_lowercase().as_str())
+        })
+        .map(|cf| cf.name.as_str())
+        .collect();
+    history.retain(|h| !hidden_cf_names.contains(h.field_name.as_str()));
+    let versions = db.list_versions(bug.project_id).unwrap_or_default();
+    let cats = db
+        .list_effective_categories(bug.project_id)
+        .unwrap_or_default();
     let monitors = db.list_bug_monitors(id).unwrap_or_default();
     let is_monitoring = monitors.iter().any(|u| u.id == ctx.user.id);
 
@@ -649,61 +889,15 @@ pub async fn view_bug_page(
     }
 
     if eff >= 40 {
-        let mut status_opts = String::new();
-        for (code, name) in [
-            (10, "new"),
-            (20, "feedback"),
-            (30, "acknowledged"),
-            (40, "confirmed"),
-            (50, "assigned"),
-            (80, "resolved"),
-            (90, "closed"),
-        ] {
-            if code == 80 && eff < 55 {
-                continue;
-            }
-            if code == 90 && eff < 70 {
-                continue;
-            }
-            let sel = if bug.status == code { "selected" } else { "" };
-            status_opts.push_str(&format!(
-                r#"<option value="{}" {}>{}</option>"#,
-                code, sel, name
-            ));
-        }
-
-        let mut res_opts = String::new();
-        for (code, name) in [
-            (10, "open"),
-            (20, "fixed"),
-            (30, "reopened"),
-            (40, "unable to reproduce"),
-            (50, "not fixable"),
-            (60, "duplicate"),
-            (70, "not a bug"),
-            (80, "suspended"),
-            (90, "won't fix"),
-        ] {
-            let sel = if bug.resolution == code {
-                "selected"
-            } else {
-                ""
-            };
-            res_opts.push_str(&format!(
-                r#"<option value="{}" {}>{}</option>"#,
-                code, sel, name
-            ));
-        }
-
-        actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
-                <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
-                <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
-                <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
-            </form>"#,
-            bug.id, status_opts, res_opts
-        ));
+        let status_form = views::bugs::render_status_change_form(
+            bug,
+            eff,
+            &custom_fields,
+            &cf_values,
+            &versions,
+            &cats,
+        );
+        actions_html.push_str(&status_form);
     }
 
     if eff >= 55 {
@@ -731,6 +925,18 @@ pub async fn view_bug_page(
     }
 
     if eff >= 70 {
+        let (stick_label, stick_cls) = if bug.sticky == 1 {
+            ("Unstick", "btn btn-warning btn-sm")
+        } else {
+            ("Stick", "btn btn-secondary btn-sm")
+        };
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_stick/{}" style="display:inline;">
+                <button type="submit" class="{}">{}</button>
+            </form>"#,
+            bug.id, stick_cls, stick_label
+        ));
+
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_delete/{}" style="display:inline;">
                 <button type="submit" class="btn btn-danger btn-sm">Delete Issue</button>
@@ -932,6 +1138,100 @@ pub async fn view_bug_page(
         String::new()
     };
 
+    let formatting_enabled = db.is_plugin_enabled("MantisCoreFormatting");
+    let mut format_ctx = views::formatting::FormatContext {
+        enabled: formatting_enabled,
+        ..Default::default()
+    };
+
+    if formatting_enabled {
+        let mut text_corpus = Vec::new();
+        text_corpus.push(full.description.as_str());
+        text_corpus.push(full.steps_to_reproduce.as_str());
+        text_corpus.push(full.additional_information.as_str());
+        for n in &notes {
+            text_corpus.push(n.note.as_str());
+        }
+
+        let mut issue_ids = std::collections::BTreeSet::new();
+        let mut note_ids = std::collections::BTreeSet::new();
+
+        for text in text_corpus {
+            for id in views::formatting::scan_issue_refs(text) {
+                issue_ids.insert(id);
+            }
+            for id in views::formatting::scan_note_refs(text) {
+                note_ids.insert(id);
+            }
+        }
+
+        // Limit batch lookups to 100 refs in deterministic order to prevent N+1 amplification DoS
+        let target_issue_ids: Vec<i64> = issue_ids.into_iter().take(100).collect();
+        let target_note_ids: Vec<i64> = note_ids.into_iter().take(100).collect();
+
+        let mut project_eff_cache: HashMap<i64, i32> = HashMap::new();
+
+        // 1. Batch-fetch all referenced issues in a single query
+        match db.get_bugs_by_ids(&target_issue_ids) {
+            Ok(target_bugs) => {
+                for (&id, target_bug) in &target_bugs {
+                    let target_eff = *project_eff_cache
+                        .entry(target_bug.project_id)
+                        .or_insert_with(|| {
+                            db.effective_access_level(&ctx.user, target_bug.project_id)
+                                .unwrap_or(0)
+                        });
+                    if Db::can_view_bug(ctx.user.id, target_eff, target_bug) {
+                        format_ctx.issue_refs.insert(
+                            id,
+                            views::formatting::IssueRefInfo {
+                                id: target_bug.id,
+                                status: target_bug.status,
+                                summary: target_bug.summary.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+            Err(e) => eprintln!("[formatting] error batch fetching target bugs: {}", e),
+        }
+
+        // 2. Batch-fetch all referenced notes and their parent issues in batch queries
+        match db.get_bugnotes_by_ids(&target_note_ids) {
+            Ok(target_notes) => {
+                let parent_bug_ids: Vec<i64> = target_notes.values().map(|n| n.bug_id).collect();
+                let parent_bugs = db.get_bugs_by_ids(&parent_bug_ids).unwrap_or_default();
+
+                for (&nid, target_note) in &target_notes {
+                    if let Some(target_bug) = parent_bugs.get(&target_note.bug_id) {
+                        let target_eff = *project_eff_cache
+                            .entry(target_bug.project_id)
+                            .or_insert_with(|| {
+                                db.effective_access_level(&ctx.user, target_bug.project_id)
+                                    .unwrap_or(0)
+                            });
+                        if Db::can_view_bug(ctx.user.id, target_eff, target_bug) {
+                            // For private bugnotes, require ACCESS_DEVELOPER (eff >= 55)
+                            if target_note.view_state != crate::models::VIEW_STATE_PRIVATE
+                                || target_eff >= crate::models::ACCESS_DEVELOPER
+                            {
+                                format_ctx.note_refs.insert(nid, target_note.bug_id);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => eprintln!("[formatting] error batch fetching target bugnotes: {}", e),
+        }
+
+        for u in &users {
+            if u.enabled != 0 {
+                format_ctx.valid_usernames.insert(u.username.clone());
+                format_ctx.valid_usernames.insert(u.username.to_lowercase());
+            }
+        }
+    }
+
     let mut notes_html = total_time_html;
     if notes.is_empty() {
         notes_html.push_str("<p>No notes attached to this issue.</p>");
@@ -961,8 +1261,9 @@ pub async fn view_bug_page(
             } else {
                 String::new()
             };
+            let formatted_note = views::formatting::format_text(&n.note, &format_ctx);
             notes_html.push_str(&format!(
-                r#"<tr>
+                r#"<tr id="c{}">
                     <td style="width:180px; background:#f2f5f8;">
                         <strong>{}</strong><br>
                         <span style="font-size:11px; color:#666;">{}</span>
@@ -972,9 +1273,10 @@ pub async fn view_bug_page(
                     <td style="width:90px;">{}</td>
                     <td style="width:90px;">{}</td>
                 </tr>"#,
+                n.id,
                 views::html_escape(&author),
                 views::format_timestamp(n.date_submitted),
-                views::html_escape(&n.note),
+                formatted_note,
                 time_str,
                 vis,
                 del_btn
@@ -1023,40 +1325,13 @@ pub async fn view_bug_page(
         String::new()
     };
 
-    let mut history_html = String::new();
-    if history.is_empty() {
-        history_html.push_str("<p>No history entries.</p>");
-    } else {
-        history_html.push_str(r#"<table class="data-table"><thead><tr><th>Date Modified</th><th>Username</th><th>Field</th><th>Change</th></tr></thead><tbody>"#);
-        for h in &history {
-            let uname = users_map
-                .get(&h.user_id)
-                .cloned()
-                .unwrap_or_else(|| format!("user#{}", h.user_id));
-            let change_desc = if h.type_ == 1 && h.field_name.is_empty() {
-                "New Issue".to_string()
-            } else {
-                format!(
-                    "{} => {}",
-                    views::html_escape(&h.old_value),
-                    views::html_escape(&h.new_value)
-                )
-            };
-            history_html.push_str(&format!(
-                r#"<tr>
-                    <td style="width:150px; white-space:nowrap;">{}</td>
-                    <td style="width:150px;">{}</td>
-                    <td style="width:180px;">{}</td>
-                    <td>{}</td>
-                </tr>"#,
-                views::format_timestamp(h.date_modified),
-                views::html_escape(&uname),
-                views::html_escape(&h.field_name),
-                change_desc
-            ));
+    let mut categories_map: HashMap<i64, String> = HashMap::new();
+    if let Ok(cats) = db.list_all_categories() {
+        for (cid, cname) in cats {
+            categories_map.insert(cid, cname);
         }
-        history_html.push_str("</tbody></table>");
     }
+    let history_html = views::bugs::render_bug_history_html(&history, &users_map, &categories_map);
 
     views::bugs::render_view_bug_page(
         &ctx,
@@ -1079,6 +1354,7 @@ pub async fn view_bug_page(
         &jira_section_html,
         q.msg.as_deref(),
         q.err.as_deref(),
+        &format_ctx,
     )
     .into_response()
 }
@@ -1124,28 +1400,35 @@ pub async fn update_bug_page(
     }
 
     let cf_values = db.get_custom_field_values_for_bug(id).unwrap_or_default();
-    let mut cf_rows_html = String::new();
-    for cfv in &cf_values {
-        cf_rows_html.push_str(&format!(
-            r#"<tr>
-                <td class="label-col">{}</td>
-                <td class="input-col"><input type="text" name="custom_field_{}" value="{}"></td>
-            </tr>"#,
-            views::html_escape(&cfv.field_name),
-            cfv.field_id,
-            views::html_escape(&cfv.value)
-        ));
-    }
+    let custom_fields = db
+        .list_custom_fields_for_project(bug.project_id)
+        .unwrap_or_default();
+    let versions = db.list_versions(bug.project_id).unwrap_or_default();
 
-    views::bugs::render_update_bug_page(&ctx, &full, &cat_opts, &cf_rows_html).into_response()
+    views::bugs::render_update_bug_page(
+        &ctx,
+        &full,
+        &cat_opts,
+        &custom_fields,
+        &cf_values,
+        eff,
+        &versions,
+        &cats,
+    )
+    .into_response()
 }
 
 pub async fn update_bug(
     State(db): State<Db>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-    axum::Form(form): axum::Form<HashMap<String, String>>,
+    axum::Form(form_data): axum::Form<Vec<(String, String)>>,
 ) -> Response {
+    let mut form_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in form_data {
+        form_map.entry(k).or_default().push(v);
+    }
+
     let bug = match db.get_bug(id) {
         Ok(Some(b)) => b,
         _ => return not_found(&ctx, "Issue not found."),
@@ -1162,49 +1445,139 @@ pub async fn update_bug(
         return forbidden(&ctx, "Insufficient access to update this issue.");
     }
 
-    let handler_id = form.get("handler_id").and_then(|v| v.parse::<i64>().ok());
+    let handler_id = get_single_val(&form_map, "handler_id").and_then(|v| v.parse::<i64>().ok());
     if let Some(hid) = handler_id {
         if hid != bug.handler_id && eff < 55 {
             return forbidden(&ctx, "Developer access required to assign issues.");
         }
     }
 
+    let due_date = get_single_val(&form_map, "due_date").map(views::parse_date_to_epoch);
+
     let fields = BugUpdate {
-        summary: form.get("summary").cloned(),
-        category_id: form.get("category_id").and_then(|v| v.parse::<i64>().ok()),
-        priority: form.get("priority").and_then(|v| v.parse::<i32>().ok()),
-        severity: form.get("severity").and_then(|v| v.parse::<i32>().ok()),
-        reproducibility: form
-            .get("reproducibility")
+        summary: get_single_val(&form_map, "summary").map(|s| s.to_string()),
+        category_id: get_single_val(&form_map, "category_id").and_then(|v| v.parse::<i64>().ok()),
+        priority: get_single_val(&form_map, "priority").and_then(|v| v.parse::<i32>().ok()),
+        severity: get_single_val(&form_map, "severity").and_then(|v| v.parse::<i32>().ok()),
+        reproducibility: get_single_val(&form_map, "reproducibility")
             .and_then(|v| v.parse::<i32>().ok()),
-        version: form.get("version").cloned(),
-        target_version: form.get("target_version").cloned(),
-        fixed_in_version: form.get("fixed_in_version").cloned(),
-        view_state: form.get("view_state").and_then(|v| v.parse::<i32>().ok()),
+        version: get_single_val(&form_map, "version").map(|s| s.to_string()),
+        target_version: get_single_val(&form_map, "target_version").map(|s| s.to_string()),
+        fixed_in_version: get_single_val(&form_map, "fixed_in_version").map(|s| s.to_string()),
+        view_state: get_single_val(&form_map, "view_state").and_then(|v| v.parse::<i32>().ok()),
         handler_id,
-        description: form.get("description").cloned(),
-        steps_to_reproduce: form.get("steps_to_reproduce").cloned(),
-        additional_information: form.get("additional_information").cloned(),
+        description: get_single_val(&form_map, "description").map(|s| s.to_string()),
+        steps_to_reproduce: get_single_val(&form_map, "steps_to_reproduce").map(|s| s.to_string()),
+        additional_information: get_single_val(&form_map, "additional_information")
+            .map(|s| s.to_string()),
+        os: get_single_val(&form_map, "os").map(|s| s.to_string()),
+        os_build: get_single_val(&form_map, "os_build").map(|s| s.to_string()),
+        platform: get_single_val(&form_map, "platform").map(|s| s.to_string()),
+        build: get_single_val(&form_map, "build").map(|s| s.to_string()),
+        due_date,
+        sticky: None,
     };
+
+    let custom_fields = db
+        .list_custom_fields_for_project(bug.project_id)
+        .unwrap_or_default();
+    let versions = db.list_versions(bug.project_id).unwrap_or_default();
+    let cats = db
+        .list_effective_categories(bug.project_id)
+        .unwrap_or_default();
+
+    // Validate custom fields
+    let mut custom_field_values_to_set = Vec::new();
+    for cf in &custom_fields {
+        if eff < cf.access_level_r || cf.display_update == 0 {
+            continue;
+        }
+        // access_level_rw: ignore submitted mutations when effective access < cf.access_level_rw
+        if eff < cf.access_level_rw {
+            continue;
+        }
+        let is_present = form_map.contains_key(&format!("custom_field_{}", cf.id))
+            || form_map.contains_key(&format!("custom_field_{}_present", cf.id));
+        if is_present {
+            let val = get_custom_field_submitted_value(&form_map, cf.id, cf.field_type)
+                .unwrap_or_default();
+            let resolved =
+                crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
+            let is_req = cf.require_update != 0;
+            if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
+            {
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err={}",
+                    id,
+                    url_encode(&sanitize_error_message(&e))
+                ))
+                .into_response();
+            }
+            custom_field_values_to_set.push((cf.id, val));
+        }
+    }
+
+    let old_full = db.get_bug_full(id).ok().flatten();
+    let mut old_mentions = HashSet::new();
+    if let Some(ref f) = old_full {
+        for m in extract_mentions(&f.description) {
+            old_mentions.insert(m.to_ascii_lowercase());
+        }
+        for m in extract_mentions(&f.steps_to_reproduce) {
+            old_mentions.insert(m.to_ascii_lowercase());
+        }
+        for m in extract_mentions(&f.additional_information) {
+            old_mentions.insert(m.to_ascii_lowercase());
+        }
+    }
+
+    let mut new_mentions = Vec::new();
+    let mut context_parts = Vec::new();
+    if let Some(ref d) = fields.description {
+        let m = extract_mentions(d);
+        if !m.is_empty() {
+            context_parts.push(d.as_str());
+        }
+        new_mentions.extend(m);
+    }
+    if let Some(ref s) = fields.steps_to_reproduce {
+        let m = extract_mentions(s);
+        if !m.is_empty() {
+            context_parts.push(s.as_str());
+        }
+        new_mentions.extend(m);
+    }
+    if let Some(ref a) = fields.additional_information {
+        let m = extract_mentions(a);
+        if !m.is_empty() {
+            context_parts.push(a.as_str());
+        }
+        new_mentions.extend(m);
+    }
+
+    let fresh_mentions = crate::views::formatting::diff_new_mentions(&old_mentions, &new_mentions);
+    let context_text = context_parts.join("\n\n");
 
     match db.update_bug_fields(id, ctx.user.id, fields) {
         Ok(_) => {
-            let custom_fields = db
-                .list_custom_fields_for_project(bug.project_id)
-                .unwrap_or_default();
-            for cf in &custom_fields {
-                let key = format!("custom_field_{}", cf.id);
-                if let Some(val) = form.get(&key) {
-                    if db
-                        .set_custom_field_value(cf.id, id, ctx.user.id, val)
-                        .is_err()
-                    {
-                        return Redirect::to(&format!(
-                            "/view_bug_page/{}?err=Invalid+custom+field",
-                            id
-                        ))
-                        .into_response();
-                    }
+            for (cf_id, val) in custom_field_values_to_set {
+                if let Err(e) = db.set_custom_field_value(cf_id, id, ctx.user.id, &val) {
+                    return Redirect::to(&format!(
+                        "/view_bug_page/{}?err={}",
+                        id,
+                        url_encode(&sanitize_error_message(&e))
+                    ))
+                    .into_response();
+                }
+            }
+            if !fresh_mentions.is_empty() {
+                if let Err(e) =
+                    db.notify_bug_mentions(id, ctx.user.id, &fresh_mentions, false, &context_text)
+                {
+                    eprintln!(
+                        "[mentions] failed to send mention notifications on update_bug: {}",
+                        e
+                    );
                 }
             }
             Redirect::to(&format!("/view_bug_page/{}?msg=Issue+updated", id)).into_response()
@@ -1212,6 +1585,37 @@ pub async fn update_bug(
         Err(_) => Redirect::to(&format!("/view_bug_page/{}?err=Failed+to+update+issue", id))
             .into_response(),
     }
+}
+
+pub async fn bug_stick(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {
+    let bug = match db.get_bug(id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if eff < 70 {
+        return forbidden(&ctx, "Manager access required to toggle sticky status.");
+    }
+
+    let new_sticky = if bug.sticky == 1 { 0 } else { 1 };
+    let fields = BugUpdate {
+        sticky: Some(new_sticky),
+        ..Default::default()
+    };
+
+    if let Err(e) = db.update_bug_fields(id, ctx.user.id, fields) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response();
+    }
+
+    Redirect::to(&format!("/view_bug_page/{}", id)).into_response()
 }
 
 pub async fn bug_monitor_add(
@@ -1263,19 +1667,17 @@ pub async fn bug_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i
     Redirect::to("/view_all_bug_page?msg=Issue+deleted").into_response()
 }
 
-#[derive(Deserialize)]
-pub struct ChangeStatusForm {
-    pub new_status: i32,
-    pub resolution: Option<i32>,
-    pub note: Option<String>,
-}
-
 pub async fn bug_change_status(
     State(db): State<Db>,
     ctx: AuthContext,
     Path(id): Path<i64>,
-    axum::Form(form): axum::Form<ChangeStatusForm>,
+    axum::Form(form_data): axum::Form<Vec<(String, String)>>,
 ) -> Response {
+    let mut form_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in form_data {
+        form_map.entry(k).or_default().push(v);
+    }
+
     let bug = match db.get_bug(id) {
         Ok(Some(b)) => b,
         _ => return not_found(&ctx, "Issue not found."),
@@ -1288,9 +1690,18 @@ pub async fn bug_change_status(
         return forbidden(&ctx, "Insufficient access to view private issue.");
     }
 
-    let required_level = if form.new_status == 90 {
+    let new_status: i32 = match get_single_val(&form_map, "new_status").and_then(|v| v.parse().ok())
+    {
+        Some(s) => s,
+        None => {
+            return Redirect::to(&format!("/view_bug_page/{}?err=Invalid+status", id))
+                .into_response()
+        }
+    };
+
+    let required_level = if new_status == 90 {
         70 // Close requires Manager
-    } else if form.new_status == 80 || bug.status >= 80 {
+    } else if new_status == 80 || bug.status >= 80 {
         55 // Resolve or reopen requires Developer
     } else {
         40 // Other status transitions require Updater
@@ -1303,15 +1714,98 @@ pub async fn bug_change_status(
         );
     }
 
-    let resolution = form.resolution.unwrap_or(bug.resolution);
-    match db.change_bug_status(
-        id,
-        ctx.user.id,
-        form.new_status,
-        resolution,
-        form.note.as_deref(),
-    ) {
+    let resolution = get_single_val(&form_map, "resolution")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(bug.resolution);
+    let note = get_single_val(&form_map, "note").map(|s| s.to_string());
+
+    let custom_fields = db
+        .list_custom_fields_for_project(bug.project_id)
+        .unwrap_or_default();
+    let current_values = db.get_custom_field_values_for_bug(id).unwrap_or_default();
+    let versions = db.list_versions(bug.project_id).unwrap_or_default();
+    let cats = db
+        .list_effective_categories(bug.project_id)
+        .unwrap_or_default();
+
+    // Check require_resolved and require_closed & limit writes to fields displayed for target status
+    let mut custom_field_values_to_set = Vec::new();
+    let is_resolving = new_status == 80;
+    let is_closing = new_status == 90;
+
+    for cf in &custom_fields {
+        if eff < cf.access_level_r {
+            continue;
+        }
+
+        // Only process fields that are displayed for the target status
+        let displays_for_status = if is_closing {
+            cf.display_closed != 0
+        } else if is_resolving {
+            cf.display_resolved != 0
+        } else {
+            false
+        };
+
+        if !displays_for_status {
+            continue;
+        }
+
+        let can_write = eff >= cf.access_level_rw;
+        let is_req = if is_closing {
+            can_write && cf.require_closed != 0
+        } else if is_resolving {
+            can_write && cf.require_resolved != 0
+        } else {
+            false
+        };
+
+        let is_present = form_map.contains_key(&format!("custom_field_{}", cf.id))
+            || form_map.contains_key(&format!("custom_field_{}_present", cf.id));
+
+        let current_val = current_values
+            .iter()
+            .find(|cv| cv.field_id == cf.id)
+            .map(|cv| cv.value.as_str())
+            .unwrap_or("");
+
+        if can_write && is_present {
+            let val = get_custom_field_submitted_value(&form_map, cf.id, cf.field_type)
+                .unwrap_or_default();
+            let resolved =
+                crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
+            if let Err(e) = crate::models::validate_custom_field_value(cf, &val, &resolved, is_req)
+            {
+                return Redirect::to(&format!(
+                    "/view_bug_page/{}?err={}",
+                    id,
+                    url_encode(&sanitize_error_message(&e))
+                ))
+                .into_response();
+            }
+            custom_field_values_to_set.push((cf.id, val));
+        } else if is_req && current_val.trim().is_empty() {
+            let action_name = if is_closing { "close" } else { "resolve" };
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err={}",
+                id,
+                url_encode(&format!(
+                    "Custom field '{}' is required to {} this issue",
+                    cf.name, action_name
+                ))
+            ))
+            .into_response();
+        }
+    }
+
+    match db.change_bug_status(id, ctx.user.id, new_status, resolution, note.as_deref()) {
         Ok(()) => {
+            for (cf_id, val) in custom_field_values_to_set {
+                if let Err(e) = db.set_custom_field_value(cf_id, id, ctx.user.id, &val) {
+                    return Redirect::to(&format!("/view_bug_page/{}?err={}", id, url_encode(&e)))
+                        .into_response();
+                }
+            }
             Redirect::to(&format!("/view_bug_page/{}?msg=Status+updated", id)).into_response()
         }
         Err(_) => Redirect::to(&format!(
@@ -1392,23 +1886,46 @@ pub async fn bugnote_add(
     let eff = db
         .effective_access_level(&ctx.user, bug.project_id)
         .unwrap_or(0);
-    if eff < 25 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
+    if eff < crate::models::ACCESS_REPORTER || !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Reporter access required to add bugnotes.");
     }
 
-    let vs = form.view_state.unwrap_or(10);
-    if vs == 50 && eff < 55 {
+    let vs = form.view_state.unwrap_or(crate::models::VIEW_STATE_PUBLIC);
+    if vs == crate::models::VIEW_STATE_PRIVATE && eff < crate::models::ACCESS_DEVELOPER {
         return forbidden(&ctx, "Developer access required to add private bugnotes.");
     }
 
-    let time_mins = if eff >= 55 {
+    let time_mins = if eff >= crate::models::ACCESS_DEVELOPER {
         parse_time_tracking_minutes(form.time_tracking.as_deref())
     } else {
         0
     };
 
-    match db.add_bugnote_with_time(bug_id, ctx.user.id, &form.note, vs, time_mins) {
-        Ok(_) => Redirect::to(&format!("/view_bug_page/{}?msg=Note+added", bug_id)).into_response(),
+    let trimmed_note = form.note.trim();
+    let deduped = crate::views::formatting::collect_mentions(&[trimmed_note]);
+
+    match db.add_bugnote_with_time_and_mentions(
+        bug_id,
+        ctx.user.id,
+        trimmed_note,
+        vs,
+        time_mins,
+        &deduped,
+    ) {
+        Ok(_) => {
+            if !deduped.is_empty() {
+                let is_private = vs == crate::models::VIEW_STATE_PRIVATE;
+                if let Err(e) =
+                    db.notify_bug_mentions(bug_id, ctx.user.id, &deduped, is_private, trimmed_note)
+                {
+                    eprintln!(
+                        "[mentions] failed to send mention notifications on bugnote_add: {}",
+                        e
+                    );
+                }
+            }
+            Redirect::to(&format!("/view_bug_page/{}?msg=Note+added", bug_id)).into_response()
+        }
         Err(_) => Redirect::to(&format!(
             "/view_bug_page/{}?err=Note+cannot+be+empty",
             bug_id

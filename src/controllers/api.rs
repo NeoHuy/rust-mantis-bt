@@ -181,15 +181,17 @@ pub async fn manage_plugin_toggle(
     Path(basename): Path<String>,
     axum::Form(form): axum::Form<PluginToggleForm>,
 ) -> Response {
-    if ctx.user.access_level < 90 {
+    if ctx.user.access_level < crate::models::ACCESS_ADMINISTRATOR {
         return forbidden_html(&ctx, "Administrator access required.");
     }
     let enabled = parse_bool(form.enabled.as_deref());
-    match db.set_plugin_enabled(&basename, enabled) {
+    match db.set_plugin_enabled_admin(&basename, enabled) {
         Ok(()) => Redirect::to("/manage_plugin_page?msg=Plugin+updated").into_response(),
-        Err(_) => {
-            Redirect::to("/manage_plugin_page?err=Cannot+modify+protected+plugin").into_response()
-        }
+        Err(e) => Redirect::to(&format!(
+            "/manage_plugin_page?err={}",
+            crate::models::url_encode(&e)
+        ))
+        .into_response(),
     }
 }
 
@@ -407,6 +409,7 @@ fn serialize_issue_json(db: &Db, bug_id: i64, user_access: i32) -> Option<Value>
         .get_custom_field_values_for_bug(b.id)
         .unwrap_or_default()
         .into_iter()
+        .filter(|cf| user_access >= cf.access_level_r)
         .map(|cf| {
             json!({
                 "field": { "id": cf.field_id, "name": cf.field_name },
@@ -580,7 +583,13 @@ pub async fn rest_create_issue(
         .unwrap_or(70) as i32;
     let view_state = payload.view_state.as_ref().and_then(|v| v.id).unwrap_or(10) as i32;
 
-    match db.create_bug(
+    let mentions = crate::views::formatting::collect_mentions(&[
+        payload.description.as_deref().unwrap_or(""),
+        payload.steps_to_reproduce.as_deref().unwrap_or(""),
+        payload.additional_information.as_deref().unwrap_or(""),
+    ]);
+
+    match db.create_bug_with_mentions(
         project_id,
         auth.user.id,
         category_id,
@@ -596,6 +605,7 @@ pub async fn rest_create_issue(
         "",
         "",
         view_state,
+        &mentions,
     ) {
         Ok(bug_id) => {
             if let Some(ref tv) = payload.target_version {
@@ -608,6 +618,24 @@ pub async fn rest_create_issue(
                     },
                 );
             }
+
+            // Mention notifications
+            if !mentions.is_empty() {
+                let context_text = crate::views::formatting::combine_context(
+                    &payload.summary,
+                    &[
+                        payload.description.as_deref().unwrap_or(""),
+                        payload.steps_to_reproduce.as_deref().unwrap_or(""),
+                        payload.additional_information.as_deref().unwrap_or(""),
+                    ],
+                );
+                if let Err(e) =
+                    db.notify_bug_mentions(bug_id, auth.user.id, &mentions, false, &context_text)
+                {
+                    eprintln!("[rest] failed to notify mentions on issue create: {}", e);
+                }
+            }
+
             let issue_json =
                 serialize_issue_json(&db, bug_id, eff).unwrap_or(json!({ "id": bug_id }));
             (StatusCode::CREATED, Json(json!({ "issue": issue_json }))).into_response()
@@ -708,6 +736,27 @@ pub async fn rest_update_issue(
         }
     }
 
+    let old_full = db.get_bug_full(id).ok().flatten();
+    let old_mentions: std::collections::HashSet<String> = if let Some(ref f) = old_full {
+        let mut m = std::collections::HashSet::new();
+        for u in crate::views::formatting::extract_mentions(&f.description) {
+            m.insert(u.to_lowercase());
+        }
+        for u in crate::views::formatting::extract_mentions(&f.steps_to_reproduce) {
+            m.insert(u.to_lowercase());
+        }
+        for u in crate::views::formatting::extract_mentions(&f.additional_information) {
+            m.insert(u.to_lowercase());
+        }
+        m
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let new_desc = payload.description.clone();
+    let new_steps = payload.steps_to_reproduce.clone();
+    let new_add = payload.additional_information.clone();
+
     let update = BugUpdate {
         summary: payload.summary,
         description: payload.description,
@@ -723,6 +772,27 @@ pub async fn rest_update_issue(
 
     if let Err(e) = db.update_bug_fields(id, auth.user.id, update) {
         return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
+    }
+
+    // Mention notifications for newly added mentions
+    let updated_mentions = crate::views::formatting::collect_mentions(&[
+        new_desc.as_deref().unwrap_or(""),
+        new_steps.as_deref().unwrap_or(""),
+        new_add.as_deref().unwrap_or(""),
+    ]);
+    let newly_added = crate::views::formatting::diff_new_mentions(&old_mentions, &updated_mentions);
+    if !newly_added.is_empty() {
+        let context = crate::views::formatting::combine_context(
+            &bug.summary,
+            &[
+                new_desc.as_deref().unwrap_or(""),
+                new_steps.as_deref().unwrap_or(""),
+                new_add.as_deref().unwrap_or(""),
+            ],
+        );
+        if let Err(e) = db.notify_bug_mentions(id, auth.user.id, &newly_added, false, &context) {
+            eprintln!("[rest] failed to notify mentions on issue update: {}", e);
+        }
     }
 
     if let Some(new_st) = requested_status_change {
@@ -820,8 +890,29 @@ pub async fn rest_add_issue_note(
         0
     };
 
-    match db.add_bugnote_with_time(id, auth.user.id, &payload.text, vs, mins) {
+    let mentions = crate::views::formatting::collect_mentions(&[&payload.text]);
+
+    match db.add_bugnote_with_time_and_mentions(
+        id,
+        auth.user.id,
+        &payload.text,
+        vs,
+        mins,
+        &mentions,
+    ) {
         Ok(note_id) => {
+            if !mentions.is_empty() {
+                if let Err(e) = db.notify_bug_mentions(
+                    id,
+                    auth.user.id,
+                    &mentions,
+                    vs == crate::models::VIEW_STATE_PRIVATE,
+                    &payload.text,
+                ) {
+                    eprintln!("[rest] failed to notify mentions on add_note: {}", e);
+                }
+            }
+
             let note = db.get_bugnote_by_id(note_id).ok().flatten();
             (
                 StatusCode::CREATED,

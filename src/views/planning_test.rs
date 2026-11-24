@@ -44,10 +44,10 @@ fn test_planning_labels() {
 #[test]
 fn test_render_roadmap_page_empty() {
     let ctx = dummy_ctx();
-    let groups: Vec<RoadmapVersionGroup> = Vec::new();
+    let by_target = BTreeMap::new();
     let users_map = HashMap::new();
 
-    let out = render_roadmap_page(&ctx, &groups, &users_map);
+    let out = render_roadmap_page(&ctx, &by_target, &users_map);
     let html = out.0;
     assert!(html.contains("Roadmap"));
     assert!(html.contains("No roadmap items with a Target Version found."));
@@ -56,6 +56,7 @@ fn test_render_roadmap_page_empty() {
 #[test]
 fn test_render_roadmap_page_with_items() {
     let ctx = dummy_ctx();
+    let mut by_target = BTreeMap::new();
     let bug = Bug {
         id: 12,
         project_id: 1,
@@ -82,62 +83,16 @@ fn test_render_roadmap_page_with_items() {
         due_date: 0,
         last_updated: 1700000000,
     };
-    let groups = vec![
-        RoadmapVersionGroup {
-            version: "1.0.0".to_string(),
-            released: true,
-            bugs: vec![bug],
-            project_name: None,
-            project_id: None,
-        },
-        RoadmapVersionGroup {
-            version: "2.0.0".to_string(),
-            released: false,
-            bugs: vec![],
-            project_name: None,
-            project_id: None,
-        },
-    ];
+    by_target.insert("1.0.0".to_string(), vec![bug]);
     let mut users_map = HashMap::new();
     users_map.insert(1, "alice".to_string());
 
-    let out = render_roadmap_page(&ctx, &groups, &users_map);
+    let out = render_roadmap_page(&ctx, &by_target, &users_map);
     let html = out.0;
     assert!(html.contains("1.0.0"));
     assert!(html.contains("Release v1.0.0 feature"));
     assert!(html.contains("100%"));
     assert!(html.contains("(alice)"));
-    assert!(html.contains("Released"));
-    assert!(html.contains("Planned"));
-    assert!(!html.contains("badge-info"));
-}
-
-#[test]
-fn test_render_roadmap_page_with_multiple_projects_shows_badge() {
-    let ctx = dummy_ctx();
-    let groups = vec![
-        RoadmapVersionGroup {
-            version: "1.0.0".to_string(),
-            released: true,
-            bugs: vec![],
-            project_name: Some("Project Alpha".to_string()),
-            project_id: Some(1),
-        },
-        RoadmapVersionGroup {
-            version: "1.0.0".to_string(),
-            released: false,
-            bugs: vec![],
-            project_name: Some("Project Beta".to_string()),
-            project_id: Some(2),
-        },
-    ];
-    let users_map = HashMap::new();
-
-    let out = render_roadmap_page(&ctx, &groups, &users_map);
-    let html = out.0;
-    assert!(html.contains("Project Alpha"));
-    assert!(html.contains("Project Beta"));
-    assert!(html.contains("badge-info"));
 }
 
 #[test]
@@ -158,45 +113,4 @@ fn test_render_manage_email_queue_page() {
     assert!(html.contains("user@example.com"));
     assert!(html.contains("Issue #1 assigned"));
     assert!(html.contains(r#"action="/manage_email_delete/1""#));
-}
-
-#[test]
-fn test_render_news_edit_page_and_news_page_edit_link() {
-    let ctx = dummy_ctx();
-    let news = NewsItem {
-        id: 42,
-        project_id: 1,
-        poster_id: 1,
-        date_posted: 1700000000,
-        last_modified: 1700000000,
-        view_state: 10,
-        announcement: 1,
-        headline: "Server Migration".to_string(),
-        body: "Migration scheduled tonight.".to_string(),
-    };
-
-    // 1. News edit page renders prefilled form
-    let out_edit = render_news_edit_page(&ctx, &news, Some("Saved"), None);
-    let html_edit = out_edit.0;
-    assert!(html_edit.contains(r#"action="/news_update/42""#));
-    assert!(html_edit.contains("Server Migration"));
-    assert!(html_edit.contains("Migration scheduled tonight."));
-    assert!(html_edit.contains("checked")); // Announcement checkbox checked
-
-    // 2. News list renders Edit link for Manager (eff >= 70)
-    let mut users_map = HashMap::new();
-    users_map.insert(1, "admin".to_string());
-    let out_list_mgr = render_news_page(
-        &ctx,
-        std::slice::from_ref(&news),
-        &users_map,
-        70,
-        None,
-        None,
-    );
-    assert!(out_list_mgr.0.contains(r#"href="/news_edit_page/42""#));
-
-    // 3. News list does NOT render Edit link for Reporter (eff = 25)
-    let out_list_rep = render_news_page(&ctx, &[news], &users_map, 25, None, None);
-    assert!(!out_list_rep.0.contains(r#"href="/news_edit_page/42""#));
 }

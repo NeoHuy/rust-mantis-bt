@@ -239,7 +239,6 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 handler_id: args.get("handler_id").and_then(|v| v.as_i64()),
                 tag_id: None,
                 monitored_by: None,
-                ..Default::default()
             };
 
             let bugs = match db.filter_bugs(&filter, user) {
@@ -395,10 +394,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 .and_then(|v| v.as_i64())
                 .unwrap_or(10) as i32;
 
-            let mentions =
-                crate::views::formatting::collect_mentions(&[description, steps, add_info]);
-
-            match db.create_bug_with_mentions(
+            match db.create_bug(
                 project_id,
                 user.id,
                 category_id,
@@ -414,21 +410,8 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 "",
                 "",
                 view_state,
-                &mentions,
             ) {
                 Ok(bug_id) => {
-                    if !mentions.is_empty() {
-                        let context_text = crate::views::formatting::combine_context(
-                            summary,
-                            &[description, steps, add_info],
-                        );
-                        if let Err(e) =
-                            db.notify_bug_mentions(bug_id, user.id, &mentions, false, &context_text)
-                        {
-                            eprintln!("[mcp] failed to notify mentions on issue create: {}", e);
-                        }
-                    }
-
                     let data = json!({
                         "issue_id": bug_id,
                         "project_id": project_id,
@@ -590,28 +573,8 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 0
             };
 
-            let mentions = crate::views::formatting::collect_mentions(&[text]);
-            match db.add_bugnote_with_time_and_mentions(
-                issue_id,
-                user.id,
-                text,
-                view_state,
-                time_tracking,
-                &mentions,
-            ) {
+            match db.add_bugnote_with_time(issue_id, user.id, text, view_state, time_tracking) {
                 Ok(note_id) => {
-                    if !mentions.is_empty() {
-                        if let Err(e) = db.notify_bug_mentions(
-                            issue_id,
-                            user.id,
-                            &mentions,
-                            view_state == crate::models::VIEW_STATE_PRIVATE,
-                            text,
-                        ) {
-                            eprintln!("[mcp] failed to notify mentions on add_note: {}", e);
-                        }
-                    }
-
                     let data = json!({
                         "note_id": note_id,
                         "issue_id": issue_id,

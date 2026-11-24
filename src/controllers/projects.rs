@@ -78,7 +78,7 @@ pub struct AddVerForm {
     pub description: Option<String>,
     pub released: Option<String>,
     pub obsolete: Option<String>,
-    pub date_order: Option<String>,
+    pub date_order: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -88,7 +88,7 @@ pub struct UpdateVerForm {
     pub description: Option<String>,
     pub released: Option<String>,
     pub obsolete: Option<String>,
-    pub date_order: Option<String>,
+    pub date_order: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -420,22 +420,6 @@ pub async fn manage_proj_cat_delete(
     }
 }
 
-fn parse_date_order(raw: Option<&str>) -> Option<i64> {
-    let s = raw?.trim();
-    if s.is_empty() {
-        return None;
-    }
-    if let Ok(ts) = s.parse::<i64>() {
-        return Some(ts);
-    }
-    let epoch = views::parse_date_to_epoch(s);
-    if epoch != 0 || s == "1970-01-01" {
-        Some(epoch)
-    } else {
-        None
-    }
-}
-
 pub async fn manage_proj_ver_add(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -449,9 +433,8 @@ pub async fn manage_proj_ver_add(
     let released = parse_bool(form.released.as_deref());
     let obsolete = parse_bool(form.obsolete.as_deref());
     let desc = form.description.as_deref().unwrap_or("");
-    let date_order = parse_date_order(form.date_order.as_deref());
 
-    match db.add_version_with_order(id, &form.version, desc, released, obsolete, date_order) {
+    match db.add_version(id, &form.version, desc, released, obsolete) {
         Ok(_) => Redirect::to(&format!("/manage_proj_edit_page/{}", id)).into_response(),
         Err(e) => views::projects::render_version_error(&ctx, id, &e).into_response(),
     }
@@ -470,10 +453,8 @@ pub async fn manage_proj_ver_update(
     let released = parse_bool(form.released.as_deref());
     let obsolete = parse_bool(form.obsolete.as_deref());
     let desc = form.description.as_deref().unwrap_or("");
-    let date_order = parse_date_order(form.date_order.as_deref());
 
-    match db.update_version_with_order(ver_id, &form.version, desc, released, obsolete, date_order)
-    {
+    match db.update_version(ver_id, &form.version, desc, released, obsolete) {
         Ok(_) => {
             Redirect::to(&format!("/manage_proj_edit_page/{}", form.project_id)).into_response()
         }

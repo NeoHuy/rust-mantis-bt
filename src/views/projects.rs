@@ -2,8 +2,8 @@ use crate::auth::AuthContext;
 use crate::models::{
     AccessLevel, Category, Project, ProjectStatus, ProjectVersion, User, ViewState,
 };
+use crate::views::html_escape;
 use crate::views::layout::render_layout;
-use crate::views::{format_date, html_escape};
 use axum::http::StatusCode;
 use axum::response::Html;
 
@@ -245,49 +245,22 @@ pub fn render_proj_edit_page(
     for (idx, (c, assignee_name)) in direct_cats.iter().enumerate() {
         let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
 
-        let mut cat_user_opts = String::new();
-        cat_user_opts.push_str(r#"<option value="0">- None -</option>"#);
-        for u in all_users {
-            let sel = if u.id == c.user_id { "selected" } else { "" };
-            cat_user_opts.push_str(&format!(
-                r#"<option value="{}" {}>{}</option>"#,
-                u.id,
-                sel,
-                html_escape(&u.username)
-            ));
-        }
-
         cat_rows.push_str(&format!(
-            r#"<tr class="{row_class}">
-                <td><strong>{name}</strong></td>
-                <td>{assignee}</td>
+            r#"<tr class="{}">
+                <td><strong>{}</strong></td>
+                <td>{}</td>
                 <td>
-                    <form action="/manage_proj_cat_delete/{cat_id}" method="POST" style="display:inline;" onsubmit="return confirm('Delete category?');">
-                        <input type="hidden" name="project_id" value="{proj_id}" />
+                    <form action="/manage_proj_cat_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Delete category?');">
+                        <input type="hidden" name="project_id" value="{}" />
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
                     </form>
                 </td>
-            </tr>
-            <tr class="{row_class} edit-row" style="background:#f9fbfd;">
-                <td colspan="3" style="padding:6px 12px;">
-                    <form method="POST" action="/manage_proj_cat_update/{cat_id}" style="display:inline-flex; align-items:center; gap:8px; margin:0; flex-wrap:wrap;">
-                        <input type="hidden" name="project_id" value="{proj_id}" />
-                        <span style="font-size:12px; color:#555; font-weight:600;">Edit:</span>
-                        <input type="text" name="name" value="{name}" required style="width:180px;" placeholder="Category Name" />
-                        <label style="font-size:12px; color:#555; margin-left:4px;">Assign To:</label>
-                        <select name="user_id" style="width:160px;">
-                            {cat_user_opts}
-                        </select>
-                        <button type="submit" class="btn btn-sm">Update Category</button>
-                    </form>
-                </td>
             </tr>"#,
-            row_class = row_class,
-            name = html_escape(&c.name),
-            assignee = html_escape(assignee_name),
-            cat_id = c.id,
-            proj_id = project.id,
-            cat_user_opts = cat_user_opts
+            row_class,
+            html_escape(&c.name),
+            html_escape(assignee_name),
+            c.id,
+            project.id
         ));
     }
 
@@ -296,54 +269,26 @@ pub fn render_proj_edit_page(
         let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
         let rel_badge = if v.released == 1 { "yes" } else { "no" };
         let obs_badge = if v.obsolete == 1 { "yes" } else { "no" };
-        let rel_checked = if v.released == 1 { "checked" } else { "" };
-        let obs_checked = if v.obsolete == 1 { "checked" } else { "" };
-        let date_str = format_date(v.date_order);
-        let date_display = if date_str.is_empty() {
-            "-".to_string()
-        } else {
-            date_str.clone()
-        };
-
         ver_rows.push_str(&format!(
-            r#"<tr class="{row_class}">
-                <td><strong>{version}</strong></td>
-                <td>{desc}</td>
-                <td>{date_display}</td>
-                <td>{rel_badge}</td>
-                <td>{obs_badge}</td>
+            r#"<tr class="{}">
+                <td><strong>{}</strong></td>
+                <td>{}</td>
+                <td>{}</td>
+                <td>{}</td>
                 <td>
-                    <form action="/manage_proj_ver_delete/{ver_id}" method="POST" style="display:inline;" onsubmit="return confirm('Delete version?');">
-                        <input type="hidden" name="project_id" value="{proj_id}" />
+                    <form action="/manage_proj_ver_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Delete version?');">
+                        <input type="hidden" name="project_id" value="{}" />
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
                     </form>
                 </td>
-            </tr>
-            <tr class="{row_class} edit-row" style="background:#f9fbfd;">
-                <td colspan="6" style="padding:6px 12px;">
-                    <form method="POST" action="/manage_proj_ver_update/{ver_id}" style="display:inline-flex; align-items:center; gap:8px; margin:0; flex-wrap:wrap;">
-                        <input type="hidden" name="project_id" value="{proj_id}" />
-                        <span style="font-size:12px; color:#555; font-weight:600;">Edit:</span>
-                        <input type="text" name="version" value="{version}" required style="width:140px;" placeholder="Version" />
-                        <input type="text" name="description" value="{desc}" placeholder="Description" style="width:200px;" />
-                        <input type="date" name="date_order" value="{date_str}" style="width:130px;" title="Date Order" />
-                        <label style="display:flex; align-items:center; gap:4px; font-size:12px;"><input type="checkbox" name="released" value="1" {rel_checked} /> Released</label>
-                        <label style="display:flex; align-items:center; gap:4px; font-size:12px;"><input type="checkbox" name="obsolete" value="1" {obs_checked} /> Obsolete</label>
-                        <button type="submit" class="btn btn-sm">Update Version</button>
-                    </form>
-                </td>
             </tr>"#,
-            row_class = row_class,
-            version = html_escape(&v.version),
-            desc = html_escape(&v.description),
-            date_display = date_display,
-            rel_badge = rel_badge,
-            obs_badge = obs_badge,
-            ver_id = v.id,
-            proj_id = project.id,
-            date_str = date_str,
-            rel_checked = rel_checked,
-            obs_checked = obs_checked,
+            row_class,
+            html_escape(&v.version),
+            html_escape(&v.description),
+            rel_badge,
+            obs_badge,
+            v.id,
+            project.id
         ));
     }
 
@@ -517,7 +462,6 @@ pub fn render_proj_edit_page(
                         <tr>
                             <th>Version</th>
                             <th>Description</th>
-                            <th>Date Order</th>
                             <th>Released</th>
                             <th>Obsolete</th>
                             <th>Actions</th>
@@ -531,7 +475,6 @@ pub fn render_proj_edit_page(
                 <form method="POST" action="/manage_proj_ver_add/{}" style="margin-top:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                     <input type="text" name="version" placeholder="Version (e.g. 1.0.0)" required style="width:160px;" />
                     <input type="text" name="description" placeholder="Description" style="width:220px;" />
-                    <input type="date" name="date_order" style="width:140px;" placeholder="YYYY-MM-DD" title="Date Order" />
                     <label style="display:flex; align-items:center;"><input type="checkbox" name="released" value="1" checked /> Released</label>
                     <label style="display:flex; align-items:center;"><input type="checkbox" name="obsolete" value="1" /> Obsolete</label>
                     <button type="submit" class="btn">Add Version</button>

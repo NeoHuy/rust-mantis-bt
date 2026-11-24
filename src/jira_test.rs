@@ -8,14 +8,8 @@ fn test_basic_auth_header_format() {
 
 #[test]
 fn test_issue_payload_serialization() {
-    let payload = build_create_issue_payload(
-        "PROJ",
-        "Issue Summary",
-        "Detailed description",
-        "Bug",
-        None,
-        None,
-    );
+    let payload =
+        build_create_issue_payload("PROJ", "Issue Summary", "Detailed description", "Bug", None);
     let json = serde_json::to_string(&payload).unwrap();
     assert!(json.contains(r#""project":{"key":"PROJ"}"#));
     assert!(json.contains(r#""summary":"Issue Summary""#));
@@ -32,7 +26,6 @@ fn test_issue_payload_serialization_with_epic() {
         "Detailed description",
         "Story",
         Some("PROJ-10"),
-        None,
     );
     let json = serde_json::to_string(&payload).unwrap();
     assert!(json.contains(r#""parent":{"key":"PROJ-10"}"#));
@@ -142,7 +135,7 @@ async fn test_create_issue_missing_credentials_fails_fast() {
         project_key: "PROJ".to_string(),
     };
     let err = client
-        .create_issue(&conf, "Summary", "Desc", "Bug", None, None)
+        .create_issue(&conf, "Summary", "Desc", "Bug", None)
         .await
         .unwrap_err();
     match err {
@@ -249,122 +242,4 @@ fn test_check_resolved_ips_blocks_internal_addresses() {
         assert!(check_resolved_ips("dual.example.com", &[public_ip, blocked], false).is_err());
         assert!(check_resolved_ips("localhost", &[blocked], true).is_ok());
     }
-}
-
-#[test]
-fn test_issue_payload_reporter() {
-    let with = build_create_issue_payload("P", "S", "D", "Bug", None, Some("acc-1"));
-    assert!(serde_json::to_string(&with)
-        .unwrap()
-        .contains(r#""reporter":{"accountId":"acc-1"}"#));
-    let without = build_create_issue_payload("P", "S", "D", "Bug", None, None);
-    assert!(!serde_json::to_string(&without)
-        .unwrap()
-        .contains("reporter"));
-}
-
-async fn spawn_mock(app: axum::Router) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{}", addr)
-}
-
-fn mock_conf(url: &str) -> JiraResolvedConfig {
-    JiraResolvedConfig {
-        enabled: true,
-        base_url: url.to_string(),
-        email: "bot@x.com".to_string(),
-        api_token: "tok".to_string(),
-        default_issue_type: "Bug".to_string(),
-        project_key: "PROJ".to_string(),
-    }
-}
-
-#[tokio::test]
-async fn test_find_user_by_email_found_and_not_found() {
-    let app = axum::Router::new().route(
-        "/rest/api/3/user/search",
-        axum::routing::get(
-            |axum::extract::Query(q): axum::extract::Query<
-                std::collections::HashMap<String, String>,
-            >| async move {
-                let body = if q.get("query").map(String::as_str) == Some("me@x.com") {
-                    r#"[{"accountId":"other","emailAddress":"o@x.com","active":true},
-                        {"accountId":"gone","emailAddress":"me@x.com","active":false},
-                        {"accountId":"acc-me","emailAddress":"ME@x.com","active":true}]"#
-                } else if q.get("query").map(String::as_str) == Some("hidden@x.com") {
-                    r#"[{"accountId":"acc-hidden","active":true}]"#
-                } else {
-                    "[]"
-                };
-                (
-                    [(axum::http::header::CONTENT_TYPE, "application/json")],
-                    body,
-                )
-            },
-        ),
-    );
-    let conf = mock_conf(&spawn_mock(app).await);
-    let c = JiraClient::with_allow_local(true);
-    assert_eq!(
-        c.find_user_by_email(&conf, "me@x.com").await.unwrap(),
-        Some("acc-me".to_string())
-    );
-    assert_eq!(
-        c.find_user_by_email(&conf, "hidden@x.com").await.unwrap(),
-        Some("acc-hidden".to_string())
-    );
-    assert_eq!(
-        c.find_user_by_email(&conf, "none@x.com").await.unwrap(),
-        None
-    );
-}
-
-#[tokio::test]
-async fn test_find_user_by_email_404_is_none() {
-    let app = axum::Router::new();
-    let conf = mock_conf(&spawn_mock(app).await);
-    assert_eq!(
-        JiraClient::with_allow_local(true)
-            .find_user_by_email(&conf, "a@x.com")
-            .await
-            .unwrap(),
-        None
-    );
-}
-
-#[tokio::test]
-async fn test_create_issue_reporter_400_falls_back_without_reporter() {
-    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<bool>::new()));
-    let c2 = calls.clone();
-    let app = axum::Router::new().route(
-        "/rest/api/2/issue",
-        axum::routing::post(
-            move |axum::extract::Json(b): axum::extract::Json<serde_json::Value>| {
-                let c2 = c2.clone();
-                async move {
-                    let has = b["fields"].get("reporter").is_some();
-                    c2.lock().unwrap().push(has);
-                    if has {
-                        (axum::http::StatusCode::BAD_REQUEST, "{}".to_string())
-                    } else {
-                        (
-                            axum::http::StatusCode::CREATED,
-                            r#"{"id":"1","key":"PROJ-1","self":"http://x/1"}"#.to_string(),
-                        )
-                    }
-                }
-            },
-        ),
-    );
-    let conf = mock_conf(&spawn_mock(app).await);
-    let resp = JiraClient::with_allow_local(true)
-        .create_issue(&conf, "S", "D", "Bug", None, Some("acc-1"))
-        .await
-        .unwrap();
-    assert_eq!(resp.key, "PROJ-1");
-    assert_eq!(*calls.lock().unwrap(), vec![true, false]);
 }

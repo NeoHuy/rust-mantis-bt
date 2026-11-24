@@ -544,8 +544,27 @@ pub async fn sync_bug_with_jira(
         bug_full.description, bug.id, bug.summary, bug.reporter_id, bug.priority
     );
 
+    // Create as the current user when resolvable on Jira; config email is the fallback.
+    let user_email = ctx.user.email.trim();
+    let reporter_id = if user_email.is_empty() {
+        None
+    } else {
+        client
+            .find_user_by_email(&config, user_email)
+            .await
+            .ok()
+            .flatten()
+    };
+
     let jira_resp = match client
-        .create_issue(&config, &bug.summary, &description, issue_type, epic_key)
+        .create_issue(
+            &config,
+            &bug.summary,
+            &description,
+            issue_type,
+            epic_key,
+            reporter_id.as_deref(),
+        )
         .await
     {
         Ok(resp) => resp,

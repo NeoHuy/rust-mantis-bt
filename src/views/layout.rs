@@ -542,6 +542,78 @@ body.login-layout {
     padding: 7px 10px;
     font-size: 13px;
 }
+
+/* Core Formatting & Mentions */
+.formatted-text {
+    line-height: 1.6;
+    word-break: break-word;
+    white-space: normal;
+}
+.formatted-text p {
+    margin-bottom: 8px;
+}
+.formatted-text p:last-child {
+    margin-bottom: 0;
+}
+.formatted-text ul, .formatted-text ol {
+    margin: 6px 0 6px 24px;
+    padding: 0;
+}
+.formatted-text li {
+    margin-bottom: 4px;
+}
+.formatted-text h1, .formatted-text h2, .formatted-text h3, .formatted-text h4, .formatted-text h5, .formatted-text h6 {
+    margin: 12px 0 6px 0;
+    font-weight: 600;
+    color: #2b3d51;
+}
+.formatted-text h1 { font-size: 18px; }
+.formatted-text h2 { font-size: 16px; }
+.formatted-text h3 { font-size: 14px; }
+.formatted-text h4, .formatted-text h5, .formatted-text h6 { font-size: 13px; }
+.formatted-text hr {
+    border: 0;
+    border-top: 1px solid #d0d7de;
+    margin: 12px 0;
+}
+.formatted-text blockquote {
+    border-left: 4px solid #438eb9;
+    padding: 4px 12px;
+    margin: 8px 0;
+    color: #555;
+    background-color: #f8fafc;
+}
+.code-block {
+    background-color: #f6f8fa;
+    border: 1px solid #e1e4e8;
+    border-radius: 4px;
+    padding: 10px 12px;
+    font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12px;
+    overflow-x: auto;
+    margin: 8px 0;
+    white-space: pre;
+}
+.inline-code {
+    background-color: #f0f2f5;
+    border: 1px solid #e1e4e8;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: 12px;
+    color: #c7254e;
+}
+.mention {
+    background-color: #e8f0fe;
+    color: #1967d2;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-weight: 600;
+}
+.issue-link-resolved {
+    text-decoration: line-through;
+    opacity: 0.75;
+}
 "#;
 
 pub fn render_layout(

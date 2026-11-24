@@ -2308,6 +2308,46 @@ impl Db {
         platform: &str,
         view_state: i32,
     ) -> Result<i64, String> {
+        self.create_bug_with_mentions(
+            project_id,
+            reporter_id,
+            category_id,
+            summary,
+            description,
+            steps_to_reproduce,
+            additional_information,
+            priority,
+            severity,
+            reproducibility,
+            version,
+            os,
+            os_build,
+            platform,
+            view_state,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bug_with_mentions(
+        &self,
+        project_id: i64,
+        reporter_id: i64,
+        category_id: i64,
+        summary: &str,
+        description: &str,
+        steps_to_reproduce: &str,
+        additional_information: &str,
+        priority: i32,
+        severity: i32,
+        reproducibility: i32,
+        version: &str,
+        os: &str,
+        os_build: &str,
+        platform: &str,
+        view_state: i32,
+        mentioned_usernames: &[String],
+    ) -> Result<i64, String> {
         let trimmed_summary = summary.trim();
         if trimmed_summary.is_empty() {
             return Err("Summary cannot be empty".to_string());
@@ -2397,7 +2437,15 @@ impl Db {
         let action_header = "The following issue has been SUBMITTED.";
         if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, None) {
             let subject = format!("[{} {:07}] New: {}", project_name, bug_id, trimmed_summary);
-            self.notify_bug_event(&conn, bug_id, &subject, &body);
+            self.notify_bug_event_filtered_with_exclude(
+                &conn,
+                bug_id,
+                0,
+                &[],
+                mentioned_usernames,
+                &subject,
+                &body,
+            );
         }
 
         Ok(bug_id)
@@ -2406,6 +2454,34 @@ impl Db {
     pub fn get_bug(&self, id: i64) -> rusqlite::Result<Option<Bug>> {
         let conn = self.conn();
         Self::query_bug_by_id(&conn, id)
+    }
+
+    pub fn get_bugs_by_ids(&self, ids: &[i64]) -> rusqlite::Result<HashMap<i64, Bug>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.conn();
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT id, project_id, reporter_id, handler_id, duplicate_id,
+                    priority, severity, reproducibility, status, resolution,
+                    category_id, date_submitted, last_updated, os, os_build,
+                    platform, version, fixed_in_version, target_version, build,
+                    summary, view_state, sticky, due_date
+             FROM mantis_bug_table
+             WHERE id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), Self::map_bug_row)?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let bug = row?;
+            map.insert(bug.id, bug);
+        }
+        Ok(map)
     }
 
     pub fn get_bug_full(&self, id: i64) -> rusqlite::Result<Option<BugFull>> {
@@ -2883,7 +2959,16 @@ impl Db {
             if !trimmed.is_empty() {
                 Some(
                     Self::insert_bugnote_inner(
-                        &conn, self, bug_id, user_id, trimmed, 10, 0, 0, false,
+                        &conn,
+                        self,
+                        bug_id,
+                        user_id,
+                        trimmed,
+                        10,
+                        0,
+                        0,
+                        false,
+                        &[],
                     )
                     .map_err(|e| e.to_string())?,
                 )
@@ -3553,6 +3638,7 @@ impl Db {
         time_tracking: i32,
         note_type: i32,
         notify: bool,
+        exclude_usernames: &[String],
     ) -> rusqlite::Result<i64> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -3631,11 +3717,12 @@ impl Db {
                 .unwrap_or_default();
 
             let min_access = if view_state == 50 { 55 } else { 0 };
-            db.notify_bug_event_filtered(
+            db.notify_bug_event_filtered_with_exclude(
                 conn,
                 bug_id,
                 min_access,
                 &[],
+                exclude_usernames,
                 &format!(
                     "[{} {:07}] Note added by {}: {}",
                     project_name, bug_id, actor_name, bug_summary
@@ -3690,6 +3777,44 @@ impl Db {
             time_tracking,
             note_type,
             notify,
+            &[],
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    pub fn add_bugnote_with_time_and_mentions(
+        &self,
+        bug_id: i64,
+        reporter_id: i64,
+        note: &str,
+        view_state: i32,
+        time_tracking: i32,
+        mentioned_usernames: &[String],
+    ) -> Result<i64, String> {
+        let trimmed = note.trim();
+        if trimmed.is_empty() {
+            return Err("Note cannot be empty".to_string());
+        }
+
+        let conn = self.conn();
+        if Self::query_bug_by_id(&conn, bug_id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!("Bug {} not found", bug_id));
+        }
+
+        Self::insert_bugnote_inner(
+            &conn,
+            self,
+            bug_id,
+            reporter_id,
+            trimmed,
+            view_state,
+            time_tracking,
+            0,
+            true,
+            mentioned_usernames,
         )
         .map_err(|e| e.to_string())
     }
@@ -3735,6 +3860,47 @@ impl Db {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    pub fn get_bugnotes_by_ids(&self, ids: &[i64]) -> rusqlite::Result<HashMap<i64, Bugnote>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.conn();
+        let placeholders: Vec<String> = (1..=ids.len()).map(|i| format!("?{}", i)).collect();
+        let sql = format!(
+            "SELECT n.id, n.bug_id, n.reporter_id, n.bugnote_text_id, n.view_state,
+                    n.date_submitted, n.last_modified, n.note_type, n.note_attr,
+                    n.time_tracking, COALESCE(t.note, '')
+             FROM mantis_bugnote_table n
+             LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+             WHERE n.id IN ({})",
+            placeholders.join(",")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok(Bugnote {
+                id: row.get(0)?,
+                bug_id: row.get(1)?,
+                reporter_id: row.get(2)?,
+                bugnote_text_id: row.get(3)?,
+                view_state: row.get(4)?,
+                date_submitted: row.get(5)?,
+                last_modified: row.get(6)?,
+                note_type: row.get(7)?,
+                note_attr: row.get(8)?,
+                time_tracking: row.get(9)?,
+                note: row.get(10)?,
+            })
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let note = row?;
+            map.insert(note.id, note);
+        }
+        Ok(map)
     }
 
     pub fn delete_bugnote(&self, note_id: i64) -> rusqlite::Result<()> {
@@ -6038,14 +6204,44 @@ impl Db {
         event_subject: &str,
         event_body: &str,
     ) {
+        self.notify_bug_event_filtered_with_exclude(
+            conn,
+            bug_id,
+            min_access,
+            extra_recipients,
+            &[],
+            event_subject,
+            event_body,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn notify_bug_event_filtered_with_exclude(
+        &self,
+        conn: &Connection,
+        bug_id: i64,
+        min_access: i32,
+        extra_recipients: &[i64],
+        exclude_usernames: &[String],
+        event_subject: &str,
+        event_body: &str,
+    ) {
         let bug = match Self::query_bug_by_id(conn, bug_id) {
             Ok(Some(b)) => b,
             _ => return,
         };
 
+        let exclude_set: HashSet<String> = exclude_usernames
+            .iter()
+            .map(|u| u.to_ascii_lowercase())
+            .collect();
+
         let needs_access_check = bug.view_state == 50 || min_access > 10;
         let can_receive = |u: &User| -> bool {
             if u.enabled == 0 || u.email.trim().is_empty() {
+                return false;
+            }
+            if exclude_set.contains(&u.username.to_ascii_lowercase()) {
                 return false;
             }
             if needs_access_check {
@@ -6134,6 +6330,96 @@ impl Db {
                 params![(prev_count + 1).to_string()],
             );
         }
+    }
+
+    pub fn notify_bug_mentions(
+        &self,
+        bug_id: i64,
+        actor_id: i64,
+        mentioned_usernames: &[String],
+        is_private_note: bool,
+        context_text: &str,
+    ) -> rusqlite::Result<()> {
+        if mentioned_usernames.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn();
+        let bug = match Self::query_bug_by_id(&conn, bug_id)? {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+        let actor_name = Self::query_user_by_id(&conn, actor_id)?
+            .map(|u| u.username)
+            .unwrap_or_else(|| "(Unknown)".to_string());
+        let project_name = Self::helper_project_name(&conn, bug.project_id);
+        let subject = format!(
+            "[{} {:07}] Mentioned by {}: {}",
+            project_name, bug.id, actor_name, bug.summary
+        );
+        let truncated_context = if context_text.len() > 2000 {
+            let mut end = 2000;
+            while !context_text.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            format!("{}...", &context_text[..end])
+        } else {
+            context_text.to_string()
+        };
+        let body = format!(
+            "You were mentioned by {} in issue #{:07} ({}).\n\n{}\n\nView issue: {}/view_bug_page/{}",
+            actor_name, bug.id, bug.summary, truncated_context, self.base_url, bug.id
+        );
+
+        let mut notified_emails = HashSet::new();
+
+        for uname in mentioned_usernames.iter().take(30) {
+            let user_res = conn.query_row(
+                "SELECT id, username, realname, email, password, enabled, protected,
+                        access_level, login_count, lost_password_request_count, failed_login_count,
+                        cookie_string, last_visit, date_created
+                 FROM mantis_user_table
+                 WHERE LOWER(username) = LOWER(?1) AND enabled != 0",
+                params![uname],
+                Self::map_user_row,
+            );
+
+            let u = match user_res {
+                Ok(u) => u,
+                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                Err(e) => {
+                    eprintln!(
+                        "[mentions] error querying user for mention '{}': {}",
+                        uname, e
+                    );
+                    continue;
+                }
+            };
+
+            if u.id == actor_id {
+                continue;
+            }
+            let email = u.email.trim();
+            let email_lower = email.to_ascii_lowercase();
+            if email.is_empty() || notified_emails.contains(&email_lower) {
+                continue;
+            }
+            let eff = Self::query_effective_access_level(&conn, &u, bug.project_id).unwrap_or(0);
+            if !Self::can_view_bug(u.id, eff, &bug) {
+                continue;
+            }
+            if is_private_note && eff < crate::models::ACCESS_DEVELOPER {
+                continue;
+            }
+            if let Err(e) = self.enqueue_email(&conn, email, &subject, &body) {
+                eprintln!(
+                    "[mailer] failed to enqueue mention email to {}: {}",
+                    email, e
+                );
+            } else {
+                notified_emails.insert(email_lower);
+            }
+        }
+        Ok(())
     }
 
     pub fn list_queued_emails(&self) -> rusqlite::Result<Vec<EmailMessage>> {
@@ -6509,7 +6795,12 @@ impl Db {
         rows.collect()
     }
 
-    pub fn set_plugin_enabled(&self, basename: &str, enabled: bool) -> Result<(), String> {
+    fn set_plugin_enabled_internal(
+        &self,
+        basename: &str,
+        enabled: bool,
+        allow_toggleable_core: bool,
+    ) -> Result<(), String> {
         let conn = self.conn();
         let protected: i32 = conn
             .query_row(
@@ -6518,18 +6809,34 @@ impl Db {
                 |row| row.get(0),
             )
             .map_err(|_| format!("Plugin '{}' not found", basename))?;
-        if protected != 0 && !enabled {
+        if protected != 0
+            && !enabled
+            && (!allow_toggleable_core
+                || !crate::models::TOGGLEABLE_CORE_PLUGINS.contains(&basename))
+        {
             return Err(format!(
                 "Protected plugin '{}' cannot be disabled",
                 basename
             ));
         }
-        conn.execute(
-            "UPDATE mantis_plugin_table SET enabled = ?1 WHERE basename = ?2",
-            params![if enabled { 1 } else { 0 }, basename],
-        )
-        .map_err(|e| e.to_string())?;
+        let rows = conn
+            .execute(
+                "UPDATE mantis_plugin_table SET enabled = ?1 WHERE basename = ?2",
+                params![if enabled { 1 } else { 0 }, basename],
+            )
+            .map_err(|e| e.to_string())?;
+        if rows == 0 {
+            return Err(format!("Plugin '{}' not found", basename));
+        }
         Ok(())
+    }
+
+    pub fn set_plugin_enabled(&self, basename: &str, enabled: bool) -> Result<(), String> {
+        self.set_plugin_enabled_internal(basename, enabled, false)
+    }
+
+    pub fn set_plugin_enabled_admin(&self, basename: &str, enabled: bool) -> Result<(), String> {
+        self.set_plugin_enabled_internal(basename, enabled, true)
     }
 
     pub fn is_plugin_enabled(&self, basename: &str) -> bool {

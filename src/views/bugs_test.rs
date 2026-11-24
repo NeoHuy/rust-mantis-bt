@@ -582,6 +582,7 @@ fn test_view_bug_page_build_due_date_overdue_and_sticky() {
         "",
         None,
         None,
+        &crate::views::formatting::FormatContext::default(),
     );
 
     let html_str = html.0;
@@ -785,7 +786,8 @@ fn test_render_bugnotes_table_and_actions() {
     // Can edit note 101 (own note), cannot edit note 102
     // Cannot toggle visibility (requires eff >= 55)
     // Can see revisions link for both
-    let table_rep = render_bugnotes_table(&notes, &users_map, 25, 1);
+    let empty_fmt = crate::views::formatting::FormatContext::default();
+    let table_rep = render_bugnotes_table(&notes, &users_map, 25, 1, &empty_fmt);
     assert!(table_rep.contains("alice"));
     assert!(table_rep.contains("Hello public note"));
     assert!(table_rep.contains(r#"href="/bugnote_edit_page/101""#));
@@ -796,7 +798,7 @@ fn test_render_bugnotes_table_and_actions() {
 
     // Developer (eff 55, user 3):
     // Can toggle visibility for note 101 (Make Private) and note 102 (Make Public)
-    let table_dev = render_bugnotes_table(&notes, &users_map, 55, 3);
+    let table_dev = render_bugnotes_table(&notes, &users_map, 55, 3, &empty_fmt);
     assert!(table_dev.contains(r#"action="/bugnote_set_view_state/101""#));
     assert!(table_dev.contains("Make Private"));
     assert!(table_dev.contains(r#"action="/bugnote_set_view_state/102""#));
@@ -804,7 +806,7 @@ fn test_render_bugnotes_table_and_actions() {
 
     // Manager (eff 70, user 3):
     // Can edit and delete any note
-    let table_mgr = render_bugnotes_table(&notes, &users_map, 70, 3);
+    let table_mgr = render_bugnotes_table(&notes, &users_map, 70, 3, &empty_fmt);
     assert!(table_mgr.contains(r#"href="/bugnote_edit_page/101""#));
     assert!(table_mgr.contains(r#"href="/bugnote_edit_page/102""#));
     assert!(table_mgr.contains(r#"action="/bugnote_delete/101""#));

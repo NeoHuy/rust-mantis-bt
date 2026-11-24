@@ -1515,6 +1515,7 @@ pub fn render_view_bug_page(
     jira_section_html: &str,
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
+    format_ctx: &crate::views::formatting::FormatContext,
 ) -> Html<String> {
     let bug = &full.bug;
     let banner = if let Some(m) = flash_msg {
@@ -1757,9 +1758,9 @@ pub fn render_view_bug_page(
         bug.id,
         html_escape(&bug.summary),
         sticky_badge,
-        html_escape(&full.description),
-        html_escape(&full.steps_to_reproduce),
-        html_escape(&full.additional_information),
+        crate::views::formatting::format_text(&full.description, format_ctx),
+        crate::views::formatting::format_text(&full.steps_to_reproduce, format_ctx),
+        crate::views::formatting::format_text(&full.additional_information, format_ctx),
         cf_rows_html,
         actions_html,
         tags_html,
@@ -1990,6 +1991,7 @@ pub fn render_bugnotes_table(
     users_map: &HashMap<i64, String>,
     eff: i32,
     current_user_id: i64,
+    format_ctx: &crate::views::formatting::FormatContext,
 ) -> String {
     if notes.is_empty() {
         return "<p>No notes attached to this issue.</p>".to_string();
@@ -2052,8 +2054,10 @@ pub fn render_bugnotes_table(
         let actions_html = actions.join(" ");
         let reminder_badge = render_reminder_badge(n.note_type);
 
+        let formatted_note = crate::views::formatting::format_text(&n.note, format_ctx);
+
         html.push_str(&format!(
-            r#"<tr>
+            r#"<tr id="c{}">
                 <td style="width:180px; background:#f2f5f8;">
                     <strong>{}</strong>{}<br>
                     <span style="font-size:11px; color:#666;">{}</span>
@@ -2063,10 +2067,11 @@ pub fn render_bugnotes_table(
                 <td style="width:90px;">{}</td>
                 <td style="width:260px;">{}</td>
             </tr>"#,
+            n.id,
             html_escape(&author),
             reminder_badge,
             format_timestamp(n.date_submitted),
-            html_escape(&n.note),
+            formatted_note,
             time_str,
             vis,
             actions_html

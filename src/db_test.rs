@@ -848,7 +848,7 @@ fn test_tags_custom_fields_filters_search_and_monitors() {
 
     // 3. Monitors
     db.add_bug_monitor(b2, uid).unwrap();
-    assert_eq!(db.list_bug_monitors(b2).unwrap().len(), 1);
+    assert_eq!(db.list_bug_monitor_users(b2).unwrap().len(), 1);
 
     // 4. Full-text Search & Filtering
     let by_kw = db
@@ -3550,4 +3550,320 @@ fn test_clone_bug_cleanup_guard_removes_partial_writes_on_failure() {
     assert_eq!(remaining_files[0].path(), disk_file1);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_list_bug_monitor_users_ordering() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("Monitors Project", 10, 10, "", true)
+        .unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let bid = db
+        .create_bug(
+            pid,
+            admin.id,
+            1,
+            "Issue for monitors",
+            "Details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let u_charlie = db
+        .create_user(
+            "charlie",
+            "Charlie User",
+            "charlie@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let u_alice = db
+        .create_user(
+            "alice",
+            "Alice User",
+            "alice@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let u_bob = db
+        .create_user(
+            "bob",
+            "Bob User",
+            "bob@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    db.add_bug_monitor(bid, u_charlie).unwrap();
+    db.add_bug_monitor(bid, u_alice).unwrap();
+    db.add_bug_monitor(bid, u_bob).unwrap();
+
+    let monitors = db.list_bug_monitor_users(bid).unwrap();
+    assert_eq!(monitors.len(), 3);
+    assert_eq!(monitors[0].username, "alice");
+    assert_eq!(monitors[1].username, "bob");
+    assert_eq!(monitors[2].username, "charlie");
+}
+
+#[test]
+fn test_add_and_remove_bug_monitor_with_actor_records_history() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("History Monitor Project", 10, 10, "", true)
+        .unwrap();
+    let actor_id = db
+        .create_user(
+            "lead_dev",
+            "Lead Dev",
+            "lead@example.com",
+            "password",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let target_id = db
+        .create_user(
+            "target_user",
+            "Target User",
+            "target@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let bid = db
+        .create_bug(
+            pid,
+            actor_id,
+            1,
+            "History Bug",
+            "Details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // 1. Add monitor with actor
+    db.add_bug_monitor_with_actor(bid, target_id, actor_id)
+        .unwrap();
+
+    let monitors = db.list_bug_monitor_users(bid).unwrap();
+    assert_eq!(monitors.len(), 1);
+    assert_eq!(monitors[0].id, target_id);
+
+    // Verify history entry type 12 (monitor_added)
+    let history = db.list_bug_history(bid).unwrap();
+    let add_entry = history.iter().find(|h| h.field_name == "monitor_added");
+    assert!(add_entry.is_some(), "Expected monitor_added history entry");
+    let add_entry = add_entry.unwrap();
+    assert_eq!(add_entry.user_id, actor_id);
+    assert_eq!(add_entry.new_value, "target_user");
+    assert_eq!(add_entry.old_value, "");
+    assert_eq!(add_entry.type_, 12);
+
+    // 2. Remove monitor with actor
+    db.remove_bug_monitor_with_actor(bid, target_id, actor_id)
+        .unwrap();
+
+    let monitors_after = db.list_bug_monitor_users(bid).unwrap();
+    assert!(monitors_after.is_empty());
+
+    // Verify history entry type 13 (monitor_removed / BUG_UNMONITOR)
+    let history_after = db.list_bug_history(bid).unwrap();
+    let remove_entry = history_after
+        .iter()
+        .find(|h| h.field_name == "monitor_removed");
+    assert!(
+        remove_entry.is_some(),
+        "Expected monitor_removed history entry"
+    );
+    let remove_entry = remove_entry.unwrap();
+    assert_eq!(remove_entry.user_id, actor_id);
+    assert_eq!(remove_entry.old_value, "target_user");
+    assert_eq!(remove_entry.type_, 13);
+}
+
+#[test]
+fn test_notify_users_only_emails_target_recipients() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("Notify Users Project", 10, 10, "", true)
+        .unwrap();
+
+    let reporter_id = db
+        .create_user(
+            "issue_reporter",
+            "Reporter User",
+            "reporter@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let handler_id = db
+        .create_user(
+            "issue_handler",
+            "Handler User",
+            "handler@example.com",
+            "password",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let monitor_id = db
+        .create_user(
+            "issue_monitor",
+            "Monitor User",
+            "monitor@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let target_id = db
+        .create_user(
+            "target_recipient",
+            "Target Recipient",
+            "target@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let bid = db
+        .create_bug(
+            pid,
+            reporter_id,
+            1,
+            "Targeted Notification Bug",
+            "Details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Assign handler and add monitor
+    db.assign_bug(bid, handler_id, reporter_id).unwrap();
+    db.add_bug_monitor(bid, monitor_id).unwrap();
+
+    // Clear any previous queued emails from creation/assignment
+    let conn = db.conn();
+    conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+
+    // Now call notify_users strictly targeting target_id
+    db.notify_users(
+        &conn,
+        bid,
+        &[target_id],
+        10,
+        "Reminder Subject",
+        "Reminder Body",
+    );
+
+    // Verify: ONLY target@example.com received an email
+    let mut stmt = conn
+        .prepare("SELECT email FROM mantis_email_table ORDER BY email ASC")
+        .unwrap();
+    let emails: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .flatten()
+        .collect();
+
+    assert_eq!(emails, vec!["target@example.com".to_string()]);
+}
+
+#[test]
+fn test_add_bugnote_with_type() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("Bugnote Type Project", 10, 10, "", true)
+        .unwrap();
+    let uid = db
+        .create_user(
+            "note_user",
+            "Note User",
+            "note@example.com",
+            "password",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let bid = db
+        .create_bug(
+            pid,
+            uid,
+            1,
+            "Bugnote Type Bug",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let n1 = db
+        .add_bugnote_with_type(bid, uid, "Standard Note", 10, 0, 0)
+        .unwrap();
+    let n2 = db
+        .add_bugnote_with_type(bid, uid, "Reminder Note", 10, 0, 1)
+        .unwrap();
+
+    let notes = db.list_bugnotes(bid, 90).unwrap();
+    assert_eq!(notes.len(), 2);
+    let note1 = notes.iter().find(|n| n.id == n1).unwrap();
+    let note2 = notes.iter().find(|n| n.id == n2).unwrap();
+
+    assert_eq!(note1.note_type, 0);
+    assert_eq!(note2.note_type, 1);
 }

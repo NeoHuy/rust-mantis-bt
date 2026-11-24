@@ -113,6 +113,8 @@ docs/                           # Design specifications and implementation plans
   - `MANTIS_BASE_URL`: Base URL for issue links in notification emails (`Db::resolve_base_url` in `src/db.rs`; defaults to `http://<MANTIS_ADDR>`).
   - `MANTIS_MAX_FILE_SIZE`: Maximum upload size in bytes for bug attachments (default: `5242880` = 5MB).
   - `MANTIS_UPLOAD_DIR`: Optional directory path for attachment disk storage (default: empty; attachments stored directly in database).
+  - `MANTIS_ALLOWED_FILES`: Optional comma-separated whitelist of allowed file extensions (when non-empty, only extensions in this list may be attached).
+  - `MANTIS_DISALLOWED_FILES`: Optional comma-separated blacklist of disallowed file extensions (overriding the default dangerous extension guard).
 - **Security, Auth & Sessions:**
   - `MANTIS_COOKIE_SECURE`: When set to `1` or `true`, marks cookies as `Secure` and enables `Strict-Transport-Security` (HSTS: `max-age=31536000; includeSubDomains`).
   - `MANTIS_PUBLIC_ORIGIN`: Whitelisted public origin URL for CSRF validation behind reverse proxies / SSL termination (e.g. `https://mantis.example.com`).

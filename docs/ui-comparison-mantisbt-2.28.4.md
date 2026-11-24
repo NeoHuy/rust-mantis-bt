@@ -132,19 +132,30 @@ This document captures a direct side-by-side browser comparison between upstream
 
 ---
 
-## 4. Recommended UI Improvement Plan
+## 4. 100% UI/UX Parity Architecture & 4-Milestone Implementation Plan
 
-### Track A — Quick CSS & Template Polish PR (`fix/ui-qa-polish`)
-*(Zero backend schema changes; low-risk visual & form fixes)*
-1. Fix `.btn-secondary` contrast (darker slate `#6c757d` or dark text `#393939` on `#e7ebee` with `#c5cdd4` border) and fix `.panel-header` flex alignment + `.panel-header a` override for `Edit`/`Delete` action buttons on `/news_page`.
-2. Add `@media (max-width: 768px)` responsive rules in [`src/views/layout.rs`](../src/views/layout.rs) (hamburger sidebar toggle, wrapping navbar controls cleanly, `.table-responsive { overflow-x: auto; }` around wide data tables).
-3. Wire `<div class="sidebar-collapse">&laquo;</div>` with lightweight CSP-safe inline JS + `.sidebar-min` CSS rules (persisted in `localStorage` or cookie).
-4. Remove the duplicate `.flash-success` block inside `render_view_bug_page` ([`src/views/bugs.rs#L1145`](../src/views/bugs.rs#L1145)).
-5. Uncheck `released` by default on the Add Version form ([`src/views/projects.rs#L535`](../src/views/projects.rs#L535)).
-6. Convert `version`, `fixed_in_version`, and `target_version` on `/update_bug_page/:id` to `<select>` dropdowns (preserving any legacy non-matching string as an extra selected `<option>` for backward compatibility), and add `target_version` `<select>` on `/bug_report_page`.
-7. Display `CustomFieldType::as_str()` on `/manage_custom_field_edit_page/:id`, exclude ancestor IDs from the subproject dropdown, and clarify `OS Build` vs `Product Build` labels.
+### 4.1. Architectural Decisions
+- **Zero Legacy Frontend Libraries:** Do **not** bundle Bootstrap 3.4.1, jQuery 2.2.4, Ace JS, or Font Awesome 4.7. Achieve visual parity with MantisBT 2.28.4's `.skin-3` Ace theme using:
+  - A modern native CSS design system (`assets/css/mantis.css` using `:root` custom properties, Flexbox/CSS Grid, `@media` responsive breakpoints, and `@media print`).
+  - Crisp inline SVG icons (`src/views/icons.rs`) matching MantisBT's icon semantics (eliminating Unicode glyph rendering inconsistencies).
+  - Lightweight, CSP-safe vanilla ES6 JavaScript (`assets/js/mantis.js`, no `eval`, no external CDNs, zero new `Cargo.toml` dependencies).
+  - Static assets embedded directly into the single binary via `include_str!` / `include_bytes!` and served from `/assets/mantis.css` and `/assets/mantis.js` (keeping existing `/favicon.ico` and `/images/mantis_logo.png` routes intact).
+- **Exact MantisBT 2.28.4 `.skin-3` Color & Geometry Tokens:**
+  - **Top Navbar:** Charcoal `#404040` (`45px` height), green `#629b58` Report Issue CTA, `#438eb9` / `#2e6589` secondary blue accents, light `#f5f5f5` / `#edf3f4` breadcrumb & user bar.
+  - **Left Sidebar:** `#f2f2f2` surface with `#ccc` right border, `125px` compact stacked icon-above-label width collapsing to `43px` icon-only (`.menu-min`), and mobile slide-in / collapse drawer below `992px`.
+  - **Widgets & Forms:** `#ffffff` canvas, `#307ecc` / `#5090c1` `.widget-header` (`widget-color-blue2`), `#edf3f4` `.category` table label cells, `#f59942` input focus border, WCAG-compliant MantisBT outline buttons (`.btn-white.btn-round`: `#ffffff` fill, `#8fbcd9` border, `#3a87ad` / `#428bca` text; dark slate/charcoal `.btn-secondary` passing WCAG AA), and exact 7-status colors (`#fcbdbd`, `#e3b7eb`, `#ffcd85`, `#fff494`, `#c2dfff`, `#d2f5b0`, `#c9ccc4`).
+- **Auth UX Decision:** Match MantisBT 2.28.4's `.login-layout.light-login` visual appearance (white `#ffffff` canvas, centered MantisBT logo, `#f2f2f2` card, SVG input icons, `#f59942` focus ring, right-aligned `#404040` charcoal `Login` button) while keeping the convenient **single-step** login form (`username` + `password` + `perm_login`) for usability and backward compatibility with automated tests.
 
-### Track B — Structural UX Parity (Aligned with [roadmap-mantisbt-parity.md](./roadmap-mantisbt-parity.md))
-- **Phase 2:** Collapsible filter & detail panels, `Bug Actiongroup` checkboxes on `View Issues`, `Clone`/`Move`/`Reminder` buttons & `Users monitoring` list on `view_bug_page`, and `MantisCoreFormatting` rich text rendering.
-- **Phase 3:** `Print` / `Excel` / `RSS` export buttons, `My View` Activity Timeline, `Summary` extended tables + charts, and optionally separating `Released` versions out of Roadmap into Changelog.
-- **Phase 4:** `Manage Overview` (`/manage_overview_page`), `Manage Configuration` tabs, `Recently Visited` breadcrumb strip, and lightweight inline SVG icons replacing mismatched Unicode glyphs.
+### 4.2. 4-Milestone Delivery Roadmap
+
+| Milestone | Branch | Scope & Key Deliverables |
+| :--- | :--- | :--- |
+| **UI-M1** | `feat/ui-m1-design-system-shell-login` | Embed `assets/css/mantis.css` & `assets/js/mantis.js` (served at `/assets/*`), create `src/views/icons.rs`, rebuild [`src/views/layout.rs`](../src/views/layout.rs) to MantisBT `.skin-3` geometry (`#404040` navbar, searchable Project dropdown, User dropdown, `125px`/`43px` collapsible sidebar, `< 992px` mobile drawer, breadcrumbs + `Recently Visited` strip), fix `.btn-secondary` & outline buttons, add `@media print`, and restyle Login & Signup to Ace `.light-login` while keeping 1-step auth. |
+| **UI-M2** | `feat/ui-m2-my-view-and-view-issues` | Upgrade `My View` to MantisBT 2-column layout (collapsible `.widget-box` panels + Activity Timeline card + edit/priority SVG icons + strikethrough resolved IDs); upgrade `View Issues` with collapsed-by-default collapsible filter bar, `.table-responsive`, and MantisBT rich icon columns (edit pencil, priority SVG, notes/attachment count indicators, status + assignee). |
+| **UI-M3** | `feat/ui-m3-report-view-update-bug` | Upgrade `Report Issue` (`.widget-box`, left-aligned `.category` labels, red `*` markers, `Target Version`, `Assign To`, `Report Stay`, clarified `OS Build` vs `Product Build`); upgrade `View Bug` (collapsible `.widget-box` panels, jump links, card-based Activities/Bugnotes, remove duplicate flash banner, high-contrast outline toolbar); upgrade `Update Bug` (`<select>` version dropdowns preserving legacy text as fallback `<option>`, plus `Back To Issue`). |
+| **UI-M4** | `feat/ui-m4-planning-and-manage-pages` | Fix News card header `Edit`/`Delete` contrast & alignment; upgrade `Roadmap` & `Changelog` to `.widget-box` cards with `[Category]` badges and `View Issues` links (preserving `"Target Version: <version>"`); upgrade `Summary` to multi-column ratio tables (`open`/`resolved`/`closed`/`total`); unify Manage pages under `.nav-tabs` + add `/manage_overview_page`, uncheck `Released` by default on Add Version, show readable `CustomFieldType` label on edit, exclude ancestors in subproject dropdown, and add `A–Z` quick filter bar on Manage Users. |
+
+### 4.3. Execution Order & Parallelism
+1. Implement and merge **UI-M1** first (establishes `assets/css/mantis.css`, `assets/js/mantis.js`, `src/views/icons.rs`, and the `.widget-box`/button primitives shared by all pages).
+2. After **UI-M1** merges into `develop`, **UI-M2** (`My View` + `View Issues`) and **UI-M4** (`Planning` + `Manage`) touch disjoint view templates and can run in parallel, or run sequentially (`UI-M1 -> UI-M2 -> UI-M3 -> UI-M4`) for minimal rebase effort.
+3. Re-run `tests/backward_compat_test.rs` and the full `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test` gate on every milestone, keeping existing test assertions (`flash-error`, `btn-secondary`, `"Target Version: ..."`) intact.

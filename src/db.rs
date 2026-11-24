@@ -1880,8 +1880,10 @@ impl Db {
         rows.collect()
     }
 
-    pub fn list_effective_categories(&self, project_id: i64) -> rusqlite::Result<Vec<Category>> {
-        let conn = self.conn();
+    pub(crate) fn query_effective_categories(
+        conn: &Connection,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<Category>> {
         if project_id == 0 {
             let mut stmt = conn.prepare(
                 "SELECT id, project_id, user_id, name, status
@@ -1981,6 +1983,10 @@ impl Db {
 
         result.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(result)
+    }
+
+    pub fn list_effective_categories(&self, project_id: i64) -> rusqlite::Result<Vec<Category>> {
+        Self::query_effective_categories(&self.conn(), project_id)
     }
 
     pub fn add_version(
@@ -2094,8 +2100,10 @@ impl Db {
         Ok(())
     }
 
-    pub fn list_versions(&self, project_id: i64) -> rusqlite::Result<Vec<ProjectVersion>> {
-        let conn = self.conn();
+    pub(crate) fn query_versions(
+        conn: &Connection,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<ProjectVersion>> {
         let mut stmt = conn.prepare(
             "SELECT id, project_id, version, description, released, obsolete, date_order
              FROM mantis_project_version_table
@@ -2114,6 +2122,10 @@ impl Db {
             })
         })?;
         rows.collect()
+    }
+
+    pub fn list_versions(&self, project_id: i64) -> rusqlite::Result<Vec<ProjectVersion>> {
+        Self::query_versions(&self.conn(), project_id)
     }
 
     pub fn get_version_by_id(&self, id: i64) -> rusqlite::Result<Option<ProjectVersion>> {
@@ -3787,6 +3799,64 @@ impl Db {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn create_custom_field_full(
+        &self,
+        name: &str,
+        field_type: i32,
+        possible_values: &str,
+        default_value: &str,
+        valid_regexp: &str,
+        access_level_r: i32,
+        access_level_rw: i32,
+        length_min: i32,
+        length_max: i32,
+        require_report: bool,
+        require_update: bool,
+        display_report: bool,
+        display_update: bool,
+        require_resolved: bool,
+        display_resolved: bool,
+        display_closed: bool,
+        require_closed: bool,
+    ) -> Result<i64, String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Custom field name cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO mantis_custom_field_table (
+                name, type, possible_values, default_value, valid_regexp,
+                access_level_r, access_level_rw,
+                length_min, length_max, require_report, require_update,
+                display_report, display_update,
+                require_resolved, display_resolved, display_closed, require_closed
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                trimmed,
+                field_type,
+                possible_values,
+                default_value,
+                valid_regexp,
+                access_level_r,
+                access_level_rw,
+                length_min,
+                length_max,
+                if require_report { 1 } else { 0 },
+                if require_update { 1 } else { 0 },
+                if display_report { 1 } else { 0 },
+                if display_update { 1 } else { 0 },
+                if require_resolved { 1 } else { 0 },
+                if display_resolved { 1 } else { 0 },
+                if display_closed { 1 } else { 0 },
+                if require_closed { 1 } else { 0 },
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn create_custom_field(
         &self,
         name: &str,
@@ -3801,33 +3871,91 @@ impl Db {
         display_report: bool,
         display_update: bool,
     ) -> Result<i64, String> {
+        self.create_custom_field_full(
+            name,
+            field_type,
+            possible_values,
+            default_value,
+            valid_regexp,
+            10,
+            25,
+            length_min,
+            length_max,
+            require_report,
+            require_update,
+            display_report,
+            display_update,
+            false,
+            false,
+            false,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_custom_field_full(
+        &self,
+        id: i64,
+        name: &str,
+        field_type: i32,
+        possible_values: &str,
+        default_value: &str,
+        valid_regexp: &str,
+        access_level_r: i32,
+        access_level_rw: i32,
+        length_min: i32,
+        length_max: i32,
+        require_report: bool,
+        require_update: bool,
+        display_report: bool,
+        display_update: bool,
+        require_resolved: bool,
+        display_resolved: bool,
+        display_closed: bool,
+        require_closed: bool,
+    ) -> Result<(), String> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
             return Err("Custom field name cannot be empty".to_string());
         }
         let conn = self.conn();
-        conn.execute(
-            "INSERT INTO mantis_custom_field_table (
-                name, type, possible_values, default_value, valid_regexp,
-                length_min, length_max, require_report, require_update,
-                display_report, display_update
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                trimmed,
-                field_type,
-                possible_values,
-                default_value,
-                valid_regexp,
-                length_min,
-                length_max,
-                if require_report { 1 } else { 0 },
-                if require_update { 1 } else { 0 },
-                if display_report { 1 } else { 0 },
-                if display_update { 1 } else { 0 },
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-        Ok(conn.last_insert_rowid())
+        let rows = conn
+            .execute(
+                "UPDATE mantis_custom_field_table
+                 SET name = ?1, type = ?2, possible_values = ?3, default_value = ?4,
+                     valid_regexp = ?5, access_level_r = ?6, access_level_rw = ?7,
+                     length_min = ?8, length_max = ?9,
+                     require_report = ?10, require_update = ?11,
+                     display_report = ?12, display_update = ?13,
+                     require_resolved = ?14, display_resolved = ?15,
+                     display_closed = ?16, require_closed = ?17
+                 WHERE id = ?18",
+                params![
+                    trimmed,
+                    field_type,
+                    possible_values,
+                    default_value,
+                    valid_regexp,
+                    access_level_r,
+                    access_level_rw,
+                    length_min,
+                    length_max,
+                    if require_report { 1 } else { 0 },
+                    if require_update { 1 } else { 0 },
+                    if display_report { 1 } else { 0 },
+                    if display_update { 1 } else { 0 },
+                    if require_resolved { 1 } else { 0 },
+                    if display_resolved { 1 } else { 0 },
+                    if display_closed { 1 } else { 0 },
+                    if require_closed { 1 } else { 0 },
+                    id,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        if rows == 0 {
+            return Err(format!("Custom field {} not found", id));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3846,39 +3974,46 @@ impl Db {
         display_report: bool,
         display_update: bool,
     ) -> Result<(), String> {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            return Err("Custom field name cannot be empty".to_string());
-        }
-        let conn = self.conn();
-        let rows = conn
-            .execute(
-                "UPDATE mantis_custom_field_table
-                 SET name = ?1, type = ?2, possible_values = ?3, default_value = ?4,
-                     valid_regexp = ?5, length_min = ?6, length_max = ?7,
-                     require_report = ?8, require_update = ?9,
-                     display_report = ?10, display_update = ?11
-                 WHERE id = ?12",
-                params![
-                    trimmed,
-                    field_type,
-                    possible_values,
-                    default_value,
-                    valid_regexp,
-                    length_min,
-                    length_max,
-                    if require_report { 1 } else { 0 },
-                    if require_update { 1 } else { 0 },
-                    if display_report { 1 } else { 0 },
-                    if display_update { 1 } else { 0 },
-                    id,
-                ],
+        let (r, rw, req_res, disp_res, disp_close, req_close) = {
+            let conn = self.conn();
+            conn.query_row(
+                "SELECT access_level_r, access_level_rw, require_resolved, display_resolved, display_closed, require_closed
+                 FROM mantis_custom_field_table WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)?,
+                        row.get::<_, i32>(1)?,
+                        row.get::<_, i32>(2)? != 0,
+                        row.get::<_, i32>(3)? != 0,
+                        row.get::<_, i32>(4)? != 0,
+                        row.get::<_, i32>(5)? != 0,
+                    ))
+                },
             )
-            .map_err(|e| e.to_string())?;
-        if rows == 0 {
-            return Err(format!("Custom field {} not found", id));
-        }
-        Ok(())
+            .map_err(|e| format!("Custom field {} not found: {}", id, e))?
+        };
+
+        self.update_custom_field_full(
+            id,
+            name,
+            field_type,
+            possible_values,
+            default_value,
+            valid_regexp,
+            r,
+            rw,
+            length_min,
+            length_max,
+            require_report,
+            require_update,
+            display_report,
+            display_update,
+            req_res,
+            disp_res,
+            disp_close,
+            req_close,
+        )
     }
 
     pub fn delete_custom_field(&self, id: i64) -> rusqlite::Result<()> {
@@ -4022,19 +4157,17 @@ impl Db {
             )
             .map_err(|_| format!("Custom field {} not found", field_id))?;
 
-        let len = value.chars().count() as i32;
-        if cf.length_min > 0 && len < cf.length_min {
-            return Err(format!(
-                "Custom field '{}' requires at least {} characters",
-                cf.name, cf.length_min
-            ));
-        }
-        if cf.length_max > 0 && len > cf.length_max {
-            return Err(format!(
-                "Custom field '{}' allows at most {} characters",
-                cf.name, cf.length_max
-            ));
-        }
+        let bug = match Self::query_bug_by_id(&conn, bug_id).map_err(|e| e.to_string())? {
+            Some(b) => b,
+            None => return Err(format!("Bug {} not found", bug_id)),
+        };
+
+        let versions = Self::query_versions(&conn, bug.project_id).unwrap_or_default();
+        let cats = Self::query_effective_categories(&conn, bug.project_id).unwrap_or_default();
+        let resolved =
+            crate::models::resolve_possible_values(&cf.possible_values, &versions, &cats);
+
+        crate::models::validate_custom_field_value(&cf, value, &resolved, false)?;
 
         let old_val: String = conn
             .query_row(
@@ -4070,7 +4203,7 @@ impl Db {
         };
 
         let mut stmt = conn.prepare(
-            "SELECT cf.id, cf.name, cf.type, COALESCE(cfs.value, cf.default_value)
+            "SELECT cf.id, cf.name, cf.type, COALESCE(cfs.value, cf.default_value), cf.access_level_r, cf.access_level_rw
              FROM mantis_custom_field_table cf
              JOIN mantis_custom_field_project_table cfp ON cf.id = cfp.field_id
              LEFT JOIN mantis_custom_field_string_table cfs ON cf.id = cfs.field_id AND cfs.bug_id = ?1
@@ -4084,6 +4217,8 @@ impl Db {
                 field_type: row.get(2)?,
                 bug_id,
                 value: row.get(3)?,
+                access_level_r: row.get(4)?,
+                access_level_rw: row.get(5)?,
             })
         })?;
         rows.collect()

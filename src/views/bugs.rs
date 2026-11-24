@@ -1,7 +1,7 @@
 use crate::auth::AuthContext;
 use crate::models::{
     build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
-    BugHistory, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus,
+    BugHistory, BugPriority, BugReproducibility, BugResolution, BugSeverity, BugStatus, Category,
     CustomField, CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType,
     SavedFilter, Tag, User, ViewState,
 };
@@ -824,12 +824,14 @@ pub fn render_view_all_bug_page(
     render_layout("View Issues", ctx, flash_msg, &content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_bug_report_page(
     ctx: &AuthContext,
     project_opts: &[(i64, String, bool)],
     categories: &[(i64, String)],
     versions: &[ProjectVersion],
     custom_fields: &[CustomField],
+    effective_access: i32,
     flash_err: Option<&str>,
     flash_msg: Option<&str>,
 ) -> Html<String> {
@@ -862,27 +864,25 @@ pub fn render_bug_report_page(
         ));
     }
 
-    let mut cf_rows_html = String::new();
-    for cf in custom_fields {
-        if cf.display_report != 0 {
-            let req = if cf.require_report != 0 {
-                "required"
-            } else {
-                ""
-            };
-            cf_rows_html.push_str(&format!(
-                r#"<tr>
-                    <td class="label-col">{}{}</td>
-                    <td class="input-col"><input type="text" name="custom_field_{}" value="{}" {}></td>
-                </tr>"#,
-                html_escape(&cf.name),
-                if cf.require_report != 0 { " *" } else { "" },
-                cf.id,
-                html_escape(&cf.default_value),
-                req
-            ));
-        }
-    }
+    let dummy_cats: Vec<Category> = categories
+        .iter()
+        .map(|(id, name)| Category {
+            id: *id,
+            project_id: 0,
+            user_id: 0,
+            name: name.clone(),
+            status: 0,
+        })
+        .collect();
+    let empty_vals = HashMap::new();
+    let cf_rows_html = crate::views::custom_fields::render_custom_fields_form_rows(
+        custom_fields,
+        &empty_vals,
+        effective_access,
+        crate::views::custom_fields::CustomFieldFormMode::Report,
+        versions,
+        &dummy_cats,
+    );
 
     let err_banner = flash_err
         .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
@@ -1001,6 +1001,122 @@ pub fn render_bug_report_page(
     render_layout("Report Issue", ctx, flash_msg, &content)
 }
 
+pub fn render_status_change_form(
+    bug: &Bug,
+    effective_access: i32,
+    custom_fields: &[CustomField],
+    cf_values: &[CustomFieldValue],
+    versions: &[ProjectVersion],
+    categories: &[Category],
+) -> String {
+    let mut status_opts = String::new();
+    for (code, name) in [
+        (10, "new"),
+        (20, "feedback"),
+        (30, "acknowledged"),
+        (40, "confirmed"),
+        (50, "assigned"),
+        (80, "resolved"),
+        (90, "closed"),
+    ] {
+        if code == 80 && effective_access < 55 {
+            continue;
+        }
+        if code == 90 && effective_access < 70 {
+            continue;
+        }
+        let sel = if bug.status == code { "selected" } else { "" };
+        status_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code, sel, name
+        ));
+    }
+
+    let mut res_opts = String::new();
+    for (code, name) in [
+        (10, "open"),
+        (20, "fixed"),
+        (30, "reopened"),
+        (40, "unable to reproduce"),
+        (50, "not fixable"),
+        (60, "duplicate"),
+        (70, "not a bug"),
+        (80, "suspended"),
+        (90, "won't fix"),
+    ] {
+        let sel = if bug.resolution == code {
+            "selected"
+        } else {
+            ""
+        };
+        res_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code, sel, name
+        ));
+    }
+
+    let mut val_map = HashMap::new();
+    for v in cf_values {
+        val_map.insert(v.field_id, v.value.clone());
+    }
+
+    let mut cf_inputs = String::new();
+    for cf in custom_fields {
+        if effective_access < cf.access_level_r {
+            continue;
+        }
+        let is_resolve_disp = cf.display_resolved != 0 && effective_access >= 55;
+        let is_close_disp = cf.display_closed != 0 && effective_access >= 70;
+        let qualifies = if bug.status < 80 {
+            is_resolve_disp || is_close_disp
+        } else if bug.status < 90 {
+            is_close_disp
+        } else {
+            false
+        };
+
+        if qualifies {
+            let is_req = (is_resolve_disp && cf.require_resolved != 0)
+                || (is_close_disp && cf.require_closed != 0);
+            let can_write = effective_access >= cf.access_level_rw;
+            let current_val = val_map
+                .get(&cf.id)
+                .map(|s| s.as_str())
+                .unwrap_or(cf.default_value.as_str());
+            // Do not set HTML required attribute on the status form input: the status form handles
+            // multiple transition targets (e.g. assigning or resolving), so client-side required
+            // attributes would block intermediate non-resolve status changes. The server validates
+            // requirements based on the chosen target status.
+            let input_html = crate::views::custom_fields::render_custom_field_input(
+                cf,
+                current_val,
+                false,
+                !can_write,
+                versions,
+                categories,
+            );
+            let req_star = if is_req { " *" } else { "" };
+            cf_inputs.push_str(&format!(
+                r#"<label style="margin:0; font-size:12px; font-weight:bold; color:#555;">{}{}: {}</label>"#,
+                html_escape(&cf.name),
+                req_star,
+                input_html
+            ));
+        }
+    }
+
+    format!(
+        r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
+            <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
+            <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
+            <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
+            {}
+            <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
+        </form>"#,
+        bug.id, status_opts, res_opts, cf_inputs
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_view_bug_page(
     ctx: &AuthContext,
@@ -1045,13 +1161,23 @@ pub fn render_view_bug_page(
 
     let mut cf_rows_html = String::new();
     for cfv in cf_values {
+        let is_multi = matches!(
+            crate::models::CustomFieldType::from_i32(cfv.field_type),
+            Some(crate::models::CustomFieldType::Checkbox)
+                | Some(crate::models::CustomFieldType::Multilist)
+        );
+        let display_value = if is_multi && cfv.value.contains('|') {
+            cfv.value.replace('|', ", ")
+        } else {
+            cfv.value.clone()
+        };
         cf_rows_html.push_str(&format!(
             r#"<tr>
                 <td class="label-col">{}</td>
                 <td class="input-col" colspan="5">{}</td>
             </tr>"#,
             html_escape(&cfv.field_name),
-            html_escape(&cfv.value)
+            html_escape(&display_value)
         ));
     }
 
@@ -1266,13 +1392,30 @@ pub fn render_view_bug_page(
     render_layout(&format!("Issue #{:07}", bug.id), ctx, flash_msg, &content)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_update_bug_page(
     ctx: &AuthContext,
     full: &BugFull,
     cat_opts: &str,
-    cf_rows_html: &str,
+    custom_fields: &[CustomField],
+    cf_values: &[CustomFieldValue],
+    effective_access: i32,
+    versions: &[ProjectVersion],
+    categories: &[Category],
 ) -> Html<String> {
     let bug = &full.bug;
+    let mut val_map = HashMap::new();
+    for v in cf_values {
+        val_map.insert(v.field_id, v.value.clone());
+    }
+    let cf_rows_html = crate::views::custom_fields::render_custom_fields_form_rows(
+        custom_fields,
+        &val_map,
+        effective_access,
+        crate::views::custom_fields::CustomFieldFormMode::Update,
+        versions,
+        categories,
+    );
     let content = format!(
         r#"<div class="panel">
             <div class="panel-header">Update Issue #{:07}</div>

@@ -407,6 +407,7 @@ fn serialize_issue_json(db: &Db, bug_id: i64, user_access: i32) -> Option<Value>
         .get_custom_field_values_for_bug(b.id)
         .unwrap_or_default()
         .into_iter()
+        .filter(|cf| user_access >= cf.access_level_r)
         .map(|cf| {
             json!({
                 "field": { "id": cf.field_id, "name": cf.field_name },

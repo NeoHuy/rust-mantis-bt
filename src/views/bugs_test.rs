@@ -610,3 +610,103 @@ fn test_view_bug_page_build_due_date_overdue_and_sticky() {
     );
     assert!(view_all_html.0.contains("[Sticky]"));
 }
+
+#[test]
+fn test_render_status_change_form_with_resolve_close_custom_fields() {
+    let bug = Bug {
+        id: 42,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 50, // assigned (< 80)
+        resolution: 10,
+        os: String::new(),
+        os_build: String::new(),
+        platform: String::new(),
+        version: String::new(),
+        fixed_in_version: String::new(),
+        build: String::new(),
+        view_state: 10,
+        summary: "Status test".to_string(),
+        sticky: 0,
+        target_version: String::new(),
+        category_id: 1,
+        date_submitted: 1000,
+        due_date: 0,
+        last_updated: 1000,
+    };
+
+    let cf_res = CustomField {
+        id: 101,
+        name: "Root Cause".to_string(),
+        field_type: 0,
+        possible_values: "".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: "".to_string(),
+        access_level_r: 10,
+        access_level_rw: 55,
+        length_min: 0,
+        length_max: 255,
+        display_report: 0,
+        display_update: 0,
+        display_resolved: 1,
+        display_closed: 0,
+        require_report: 0,
+        require_update: 0,
+        require_resolved: 1,
+        require_closed: 0,
+        filter_by: 0,
+    };
+
+    let cf_close = CustomField {
+        id: 102,
+        name: "Close Signoff".to_string(),
+        field_type: 0,
+        possible_values: "".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: "".to_string(),
+        access_level_r: 10,
+        access_level_rw: 70,
+        length_min: 0,
+        length_max: 255,
+        display_report: 0,
+        display_update: 0,
+        display_resolved: 0,
+        display_closed: 1,
+        require_report: 0,
+        require_update: 0,
+        require_resolved: 0,
+        require_closed: 1,
+        filter_by: 0,
+    };
+
+    let custom_fields = vec![cf_res, cf_close];
+    let cf_values = vec![];
+    let versions = vec![];
+    let categories = vec![];
+
+    // Developer (eff 55) viewing unresolved bug:
+    // Can resolve (eff 55), so display_resolved field "Root Cause *" is rendered
+    // Cannot close (eff 55 < 70), so display_closed field is omitted
+    let form_dev =
+        render_status_change_form(&bug, 55, &custom_fields, &cf_values, &versions, &categories);
+    assert!(form_dev.contains(r#"action="/bug_change_status/42""#));
+    assert!(form_dev.contains("Root Cause *"));
+    assert!(form_dev.contains(r#"name="custom_field_101""#));
+    assert!(!form_dev.contains("Close Signoff"));
+    // Inputs must NOT have native 'required' attribute to avoid blocking intermediate status changes
+    assert!(!form_dev.contains(" required"));
+
+    // Manager (eff 70) viewing unresolved bug:
+    // Can resolve and close, so both fields are rendered
+    let form_mgr =
+        render_status_change_form(&bug, 70, &custom_fields, &cf_values, &versions, &categories);
+    assert!(form_mgr.contains("Root Cause *"));
+    assert!(form_mgr.contains("Close Signoff *"));
+    assert!(form_mgr.contains(r#"name="custom_field_102""#));
+    assert!(!form_mgr.contains(" required"));
+}

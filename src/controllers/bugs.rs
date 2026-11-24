@@ -176,6 +176,11 @@ pub fn router() -> Router<Db> {
         .route("/bug_report", post(bug_report))
         .route("/update_bug_page/:id", get(update_bug_page))
         .route("/update_bug/:id", post(update_bug))
+        .route("/bug_clone_page/:id", get(bug_clone_page))
+        .route("/bug_clone/:id", post(bug_clone))
+        .route("/bug_move_page/:id", get(bug_move_page))
+        .route("/bug_move/:id", post(bug_move))
+        .route("/bug_actiongroup", post(bug_actiongroup))
         .route("/bug_stick/:id", post(bug_stick))
         .route("/bug_delete/:id", post(bug_delete))
         .route("/bug_change_status/:id", post(bug_change_status))
@@ -869,6 +874,29 @@ pub async fn view_bug_page(
         bug.id
     ));
 
+    let can_clone = ctx.visible_projects.iter().any(|(p, _)| {
+        p.enabled == 1 && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
+    });
+    if can_clone {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-secondary btn-sm" href="/bug_clone_page/{}">Clone</a>"#,
+            bug.id
+        ));
+    }
+
+    let can_move = eff >= 55
+        && ctx.visible_projects.iter().any(|(p, _)| {
+            p.id != bug.project_id
+                && p.enabled == 1
+                && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
+        });
+    if can_move {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-secondary btn-sm" href="/bug_move_page/{}">Move</a>"#,
+            bug.id
+        ));
+    }
+
     if is_monitoring {
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
@@ -1416,6 +1444,709 @@ pub async fn update_bug(
         Err(_) => Redirect::to(&format!("/view_bug_page/{}?err=Failed+to+update+issue", id))
             .into_response(),
     }
+}
+
+pub async fn bug_clone_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(q): Query<FlashQuery>,
+) -> Response {
+    let full = match db.get_bug_full(id) {
+        Ok(Some(f)) => f,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let eff = db
+        .effective_access_level(&ctx.user, full.bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &full.bug) {
+        return forbidden(&ctx, "Insufficient access to view private issue.");
+    }
+
+    let mut target_projects = Vec::new();
+    for (p, _) in &ctx.visible_projects {
+        if p.enabled == 1 {
+            let p_eff = db.effective_access_level(&ctx.user, p.id).unwrap_or(0);
+            if p_eff >= 25 {
+                let is_sel = p.id == full.bug.project_id;
+                target_projects.push((p.id, p.name.clone(), is_sel));
+            }
+        }
+    }
+
+    if target_projects.is_empty() {
+        return forbidden(
+            &ctx,
+            "Reporter access required on at least one project to clone an issue.",
+        );
+    }
+
+    let proj_name = db
+        .get_project_by_id(full.bug.project_id)
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("Project #{}", full.bug.project_id));
+
+    views::bugs::render_bug_clone_page(
+        &ctx,
+        &full,
+        &proj_name,
+        &target_projects,
+        q.err.as_deref(),
+        q.msg.as_deref(),
+    )
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct BugCloneForm {
+    pub target_project_id: i64,
+    pub copy_relationships: Option<String>,
+    pub copy_files: Option<String>,
+}
+
+pub async fn bug_clone(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<BugCloneForm>,
+) -> Response {
+    let full = match db.get_bug_full(id) {
+        Ok(Some(f)) => f,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let eff = db
+        .effective_access_level(&ctx.user, full.bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &full.bug) {
+        return forbidden(&ctx, "Insufficient access to view private issue.");
+    }
+
+    let target_eff = db
+        .effective_access_level(&ctx.user, form.target_project_id)
+        .unwrap_or(0);
+    if target_eff < 25 {
+        return forbidden(
+            &ctx,
+            "Reporter access required on target project to clone an issue.",
+        );
+    }
+
+    let copy_rel = form.copy_relationships.as_deref() == Some("1")
+        || form.copy_relationships.as_deref() == Some("on");
+    let copy_files =
+        form.copy_files.as_deref() == Some("1") || form.copy_files.as_deref() == Some("on");
+
+    match db.clone_bug(
+        id,
+        ctx.user.id,
+        form.target_project_id,
+        copy_rel,
+        copy_files,
+        &upload_dir(),
+    ) {
+        Ok(new_id) => Redirect::to(&format!(
+            "/view_bug_page/{}?msg={}",
+            new_id,
+            url_encode("Issue cloned successfully.")
+        ))
+        .into_response(),
+        Err(e) => Redirect::to(&format!(
+            "/bug_clone_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response(),
+    }
+}
+
+pub async fn bug_move_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(q): Query<FlashQuery>,
+) -> Response {
+    let full = match db.get_bug_full(id) {
+        Ok(Some(f)) => f,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let source_eff = db
+        .effective_access_level(&ctx.user, full.bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, source_eff, &full.bug) || source_eff < 55 {
+        return forbidden(
+            &ctx,
+            "Developer access required on source project to move an issue.",
+        );
+    }
+
+    let mut target_projects = Vec::new();
+    for (p, _) in &ctx.visible_projects {
+        if p.enabled == 1 && p.id != full.bug.project_id {
+            let p_eff = db.effective_access_level(&ctx.user, p.id).unwrap_or(0);
+            if p_eff >= 25 {
+                target_projects.push((p.id, p.name.clone(), false));
+            }
+        }
+    }
+
+    if target_projects.is_empty() {
+        return forbidden(
+            &ctx,
+            "No accessible target projects with Reporter access found to move the issue.",
+        );
+    }
+
+    let proj_name = db
+        .get_project_by_id(full.bug.project_id)
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("Project #{}", full.bug.project_id));
+
+    views::bugs::render_bug_move_page(
+        &ctx,
+        &full,
+        &proj_name,
+        &target_projects,
+        q.err.as_deref(),
+        q.msg.as_deref(),
+    )
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct BugMoveForm {
+    pub target_project_id: i64,
+}
+
+pub async fn bug_move(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<BugMoveForm>,
+) -> Response {
+    let full = match db.get_bug_full(id) {
+        Ok(Some(f)) => f,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let source_eff = db
+        .effective_access_level(&ctx.user, full.bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, source_eff, &full.bug) || source_eff < 55 {
+        return forbidden(
+            &ctx,
+            "Developer access required on source project to move an issue.",
+        );
+    }
+
+    let target_eff = db
+        .effective_access_level(&ctx.user, form.target_project_id)
+        .unwrap_or(0);
+    if target_eff < 25 {
+        return forbidden(
+            &ctx,
+            "Reporter access required on target project to move an issue.",
+        );
+    }
+
+    match db.move_bug(id, ctx.user.id, form.target_project_id) {
+        Ok(_) => Redirect::to(&format!(
+            "/view_bug_page/{}?msg={}",
+            id,
+            url_encode("Issue moved successfully.")
+        ))
+        .into_response(),
+        Err(e) => Redirect::to(&format!(
+            "/bug_move_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response(),
+    }
+}
+
+pub async fn bug_actiongroup(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    axum::Form(form_data): axum::Form<Vec<(String, String)>>,
+) -> Response {
+    const MAX_BULK: usize = 500;
+    let mut bug_ids = Vec::new();
+    let mut ignored_excess = 0;
+    let mut form_map: HashMap<String, String> = HashMap::new();
+    for (k, v) in form_data {
+        if k == "bug_arr" {
+            if bug_ids.len() >= MAX_BULK {
+                ignored_excess += 1;
+                continue;
+            }
+            if let Ok(id) = v.trim().parse::<i64>() {
+                if !bug_ids.contains(&id) {
+                    bug_ids.push(id);
+                }
+            }
+        } else {
+            form_map.insert(k, v);
+        }
+    }
+
+    if bug_ids.is_empty() {
+        return Redirect::to("/view_all_bug_page?err=No+issues+selected").into_response();
+    }
+
+    let action = form_map.get("action").map(|s| s.trim()).unwrap_or("");
+    const KNOWN_ACTIONS: &[&str] = &[
+        "MOVE",
+        "COPY",
+        "ASSIGN",
+        "CLOSE",
+        "DELETE",
+        "RESOLVE",
+        "UP_STATUS",
+        "UP_PRIOR",
+        "UP_SEV",
+        "UP_CATEGORY",
+        "UP_TARGET_VERSION",
+        "UP_DUE_DATE",
+        "VIEW_STATUS",
+        "SET_STICKY",
+        "ADD_NOTE",
+        "ATTACH_TAGS",
+    ];
+    if !KNOWN_ACTIONS.contains(&action) {
+        return Redirect::to("/view_all_bug_page?err=Please+select+a+valid+action").into_response();
+    }
+
+    let mut succeeded = 0usize;
+    let mut skipped = 0usize;
+
+    for bug_id in bug_ids {
+        let bug = match db.get_bug(bug_id) {
+            Ok(Some(b)) => b,
+            _ => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let eff = db
+            .effective_access_level(&ctx.user, bug.project_id)
+            .unwrap_or(0);
+        if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+            skipped += 1;
+            continue;
+        }
+
+        let res = match action {
+            "CLOSE" => {
+                if eff >= 70 {
+                    let resolution = if bug.resolution > 10 {
+                        bug.resolution
+                    } else {
+                        20
+                    };
+                    db.change_bug_status(bug.id, ctx.user.id, 90, resolution, None)
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "RESOLVE" => {
+                if eff >= 55 {
+                    let resolution = form_map
+                        .get("resolution")
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .filter(|r| [10, 20, 30, 40, 50, 60, 70, 80, 90].contains(r))
+                        .unwrap_or(20);
+                    db.change_bug_status(bug.id, ctx.user.id, 80, resolution, None)
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "ASSIGN" => {
+                if eff >= 55 {
+                    let handler_id = form_map
+                        .get("handler_id")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    if handler_id > 0 {
+                        match db.get_user_by_id(handler_id) {
+                            Ok(Some(target_user)) => {
+                                if target_user.enabled != 1 {
+                                    Err("Assigned user is disabled".to_string())
+                                } else {
+                                    let target_eff = db
+                                        .effective_access_level(&target_user, bug.project_id)
+                                        .unwrap_or(0);
+                                    if target_eff < 55 {
+                                        Err("Assigned user does not have Developer access on this project".to_string())
+                                    } else {
+                                        db.assign_bug(bug.id, ctx.user.id, handler_id)
+                                    }
+                                }
+                            }
+                            Ok(None) => Err("Assigned user not found".to_string()),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    } else {
+                        db.assign_bug(bug.id, ctx.user.id, 0)
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "DELETE" => {
+                if eff >= 70 {
+                    db.delete_bug(bug.id).map_err(|e| e.to_string())
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "MOVE" => {
+                if eff >= 55 {
+                    let target_project_id = form_map
+                        .get("target_project_id")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let target_eff = db
+                        .effective_access_level(&ctx.user, target_project_id)
+                        .unwrap_or(0);
+                    if target_eff >= 25 {
+                        db.move_bug(bug.id, ctx.user.id, target_project_id)
+                    } else {
+                        Err("Permission denied on target project".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "COPY" => {
+                let target_project_id = form_map
+                    .get("target_project_id")
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(bug.project_id);
+                let target_eff = db
+                    .effective_access_level(&ctx.user, target_project_id)
+                    .unwrap_or(0);
+                if target_eff >= 25 {
+                    db.clone_bug(
+                        bug.id,
+                        ctx.user.id,
+                        target_project_id,
+                        true,
+                        true,
+                        &upload_dir(),
+                    )
+                    .map(|_| ())
+                } else {
+                    Err("Permission denied on target project".to_string())
+                }
+            }
+            "UP_PRIOR" => {
+                if eff >= 40 {
+                    let new_priority = form_map
+                        .get("priority")
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(0);
+                    if [10, 20, 30, 40, 50, 60].contains(&new_priority) {
+                        db.update_bug_fields(
+                            bug.id,
+                            ctx.user.id,
+                            BugUpdate {
+                                priority: Some(new_priority),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|_| ())
+                    } else {
+                        Err("Invalid priority".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "UP_SEV" => {
+                if eff >= 40 {
+                    let new_severity = form_map
+                        .get("severity")
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(0);
+                    if [10, 20, 30, 40, 50, 60, 70, 80].contains(&new_severity) {
+                        db.update_bug_fields(
+                            bug.id,
+                            ctx.user.id,
+                            BugUpdate {
+                                severity: Some(new_severity),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|_| ())
+                    } else {
+                        Err("Invalid severity".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "UP_STATUS" => {
+                let target_status = form_map
+                    .get("status")
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(0);
+                if ![10, 20, 30, 40, 50, 80, 90].contains(&target_status) {
+                    Err("Invalid status".to_string())
+                } else {
+                    // Moving to Closed (90) requires eff >= 70
+                    // Moving to Resolved (80) requires eff >= 55
+                    // Reopening a bug that is currently resolved or closed (status >= 80) to < 80 requires eff >= 55
+                    let allowed = if target_status == 90 {
+                        eff >= 70
+                    } else if target_status == 80 || (bug.status >= 80 && target_status < 80) {
+                        eff >= 55
+                    } else {
+                        eff >= 40
+                    };
+                    if allowed {
+                        let resolution = if target_status == 80 {
+                            form_map
+                                .get("resolution")
+                                .and_then(|s| s.parse::<i32>().ok())
+                                .filter(|r| [10, 20, 30, 40, 50, 60, 70, 80, 90].contains(r))
+                                .unwrap_or(20)
+                        } else if target_status == 90 {
+                            if bug.resolution > 10 {
+                                bug.resolution
+                            } else {
+                                20
+                            }
+                        } else if target_status < 80 && bug.status >= 80 {
+                            10
+                        } else {
+                            bug.resolution
+                        };
+                        db.change_bug_status(bug.id, ctx.user.id, target_status, resolution, None)
+                    } else {
+                        Err("Permission denied".to_string())
+                    }
+                }
+            }
+            "UP_CATEGORY" => {
+                if eff >= 40 {
+                    let new_cat_id = form_map
+                        .get("category_id")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    if new_cat_id > 0 {
+                        let eff_cats = db
+                            .list_effective_categories(bug.project_id)
+                            .unwrap_or_default();
+                        if eff_cats.iter().any(|c| c.id == new_cat_id) {
+                            db.update_bug_fields(
+                                bug.id,
+                                ctx.user.id,
+                                BugUpdate {
+                                    category_id: Some(new_cat_id),
+                                    ..Default::default()
+                                },
+                            )
+                            .map(|_| ())
+                        } else {
+                            Err("Category not valid for project".to_string())
+                        }
+                    } else {
+                        Err("Invalid category".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "UP_TARGET_VERSION" => {
+                if eff >= 55 {
+                    let target_ver = form_map
+                        .get("target_version")
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    db.update_bug_fields(
+                        bug.id,
+                        ctx.user.id,
+                        BugUpdate {
+                            target_version: Some(target_ver),
+                            ..Default::default()
+                        },
+                    )
+                    .map(|_| ())
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "UP_DUE_DATE" => {
+                if eff >= 55 {
+                    let due_date_str = form_map.get("due_date").map(|s| s.trim()).unwrap_or("");
+                    let due_date = views::parse_date_to_epoch(due_date_str);
+                    db.update_bug_fields(
+                        bug.id,
+                        ctx.user.id,
+                        BugUpdate {
+                            due_date: Some(due_date),
+                            ..Default::default()
+                        },
+                    )
+                    .map(|_| ())
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "VIEW_STATUS" => {
+                if eff >= 55 {
+                    let view_state = form_map
+                        .get("view_state")
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(10);
+                    if view_state == 10 || view_state == 50 {
+                        db.update_bug_fields(
+                            bug.id,
+                            ctx.user.id,
+                            BugUpdate {
+                                view_state: Some(view_state),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|_| ())
+                    } else {
+                        Err("Invalid view state".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "SET_STICKY" => {
+                if eff >= 70 {
+                    let sticky = form_map
+                        .get("sticky")
+                        .and_then(|s| s.parse::<i32>().ok())
+                        .unwrap_or(0);
+                    if sticky == 0 || sticky == 1 {
+                        db.update_bug_fields(
+                            bug.id,
+                            ctx.user.id,
+                            BugUpdate {
+                                sticky: Some(sticky),
+                                ..Default::default()
+                            },
+                        )
+                        .map(|_| ())
+                    } else {
+                        Err("Invalid sticky value".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "ADD_NOTE" => {
+                if eff >= 25 {
+                    let note_text = form_map.get("bugnote_text").map(|s| s.trim()).unwrap_or("");
+                    if !note_text.is_empty() {
+                        let view_state = form_map
+                            .get("note_view_state")
+                            .and_then(|s| s.parse::<i32>().ok())
+                            .unwrap_or(10);
+                        if view_state == 50 && eff < 55 {
+                            Err("Permission denied: private notes require developer access"
+                                .to_string())
+                        } else {
+                            let valid_vs = if view_state == 50 { 50 } else { 10 };
+                            db.add_bugnote(bug.id, ctx.user.id, note_text, valid_vs)
+                                .map(|_| ())
+                        }
+                    } else {
+                        Err("Empty note text".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            "ATTACH_TAGS" => {
+                if eff >= 25 {
+                    let tag_string = form_map.get("tag_string").map(|s| s.trim()).unwrap_or("");
+                    if !tag_string.is_empty() {
+                        let mut any_attached = false;
+                        for part in tag_string.split(',') {
+                            let tname = part.trim();
+                            if tname.is_empty() {
+                                continue;
+                            }
+                            let tag_id = match db.get_tag_by_name(tname) {
+                                Ok(Some(t)) => t.id,
+                                _ => match db.create_tag(ctx.user.id, tname, "") {
+                                    Ok(id) => id,
+                                    Err(_) => continue,
+                                },
+                            };
+                            if db.attach_tag_to_bug(bug.id, tag_id, ctx.user.id).is_ok() {
+                                any_attached = true;
+                            }
+                        }
+                        if any_attached {
+                            Ok(())
+                        } else {
+                            Err("Failed to attach tags".to_string())
+                        }
+                    } else {
+                        Err("Empty tag string".to_string())
+                    }
+                } else {
+                    Err("Permission denied".to_string())
+                }
+            }
+            _ => Err("Unknown action".to_string()),
+        };
+
+        if res.is_ok() {
+            succeeded += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    let msg = if skipped == 0 && ignored_excess == 0 {
+        format!(
+            "Operation '{}' succeeded on {} issue(s).",
+            action, succeeded
+        )
+    } else if ignored_excess > 0 {
+        format!(
+            "Operation '{}': {} issue(s) updated, {} skipped due to permissions or errors ({} ignored, limit {}).",
+            action, succeeded, skipped, ignored_excess, MAX_BULK
+        )
+    } else {
+        format!(
+            "Operation '{}': {} issue(s) updated, {} skipped due to permissions or errors.",
+            action, succeeded, skipped
+        )
+    };
+
+    let flash_key = if succeeded == 0 { "err" } else { "msg" };
+    let return_query = form_map.get("return_query").map(|s| s.trim()).unwrap_or("");
+    let safe_return_query: String = return_query
+        .chars()
+        .filter(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '&' | '=' | '_' | '-' | '%' | '+' | '.' | '~')
+        })
+        .collect();
+
+    let redirect_url = if safe_return_query.is_empty() {
+        format!("/view_all_bug_page?{}={}", flash_key, url_encode(&msg))
+    } else {
+        format!(
+            "/view_all_bug_page?{}&{}={}",
+            safe_return_query,
+            flash_key,
+            url_encode(&msg)
+        )
+    };
+
+    Redirect::to(&redirect_url).into_response()
 }
 
 pub async fn bug_stick(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i64>) -> Response {

@@ -3035,3 +3035,519 @@ fn test_revisions_and_bugnote_edits_db() {
     let revs_after_del = db.list_bug_revisions(bug_id, None).unwrap();
     assert!(revs_after_del.is_empty());
 }
+
+#[test]
+fn test_clone_bug_comprehensive() {
+    let db = Db::open_in_memory().unwrap();
+    let p1 = db.create_project("Project 1", 10, 10, "", true).unwrap();
+    let p2 = db.create_project("Project 2", 10, 10, "", false).unwrap();
+    let u1 = db
+        .create_user("rep1", "Reporter 1", "r1@test.com", "pw", 25, true, false)
+        .unwrap();
+    let u2 = db
+        .create_user("rep2", "Reporter 2", "r2@test.com", "pw", 25, true, false)
+        .unwrap();
+
+    // Create custom category in p1 and p2
+    let c1 = db.add_category(p1, "P1 Special", 0).unwrap();
+    let c2 = db.add_category(p2, "P2 Special", 0).unwrap();
+
+    // Create custom field linked to p1 and p2
+    let cf1 = db
+        .create_custom_field("Shared CF", 0, "", "", "", 0, 100, false, false, true, true)
+        .unwrap();
+    db.link_custom_field_to_project(cf1, p1, 1).unwrap();
+    db.link_custom_field_to_project(cf1, p2, 1).unwrap();
+
+    // Custom field only linked to p1
+    let cf2 = db
+        .create_custom_field(
+            "P1 Only CF",
+            0,
+            "",
+            "",
+            "",
+            0,
+            100,
+            false,
+            false,
+            true,
+            true,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf2, p1, 2).unwrap();
+
+    // Create source bug in p1
+    let source_id = db
+        .create_bug(
+            p1,
+            u1,
+            c1,
+            "Original Summary",
+            "Detailed Description",
+            "Step 1, Step 2",
+            "Additional Info",
+            40,
+            60,
+            20,
+            "1.0.0",
+            "macOS",
+            "23A344",
+            "arm64",
+            10,
+        )
+        .unwrap();
+
+    // Set additional fields on source bug
+    db.update_bug_fields(
+        source_id,
+        u1,
+        BugUpdate {
+            target_version: Some("1.1.0".to_string()),
+            fixed_in_version: Some("1.0.1".to_string()),
+            build: Some("Build-99".to_string()),
+            due_date: Some(1700000000),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Set custom field values on source bug
+    db.set_custom_field_value(cf1, source_id, u1, "Shared Value")
+        .unwrap();
+    db.set_custom_field_value(cf2, source_id, u1, "P1 Exclusive")
+        .unwrap();
+
+    // Add tags to source bug
+    let tag1 = db.create_tag(u1, "v2-feature", "").unwrap();
+    db.attach_tag_to_bug(source_id, tag1, u1).unwrap();
+
+    // Add relationships to source bug
+    let other_bug = db
+        .create_bug(
+            p1,
+            u1,
+            c1,
+            "Other Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bug_relationship(source_id, other_bug, 0).unwrap(); // RelatedTo
+
+    let dup_bug = db
+        .create_bug(
+            p1,
+            u1,
+            c1,
+            "Duplicate Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    // dup_bug is duplicate of source_id
+    db.add_bug_relationship(dup_bug, source_id, 1).unwrap();
+
+    // Add attachments to source bug: 1 blob and 1 disk file
+    let blob_file_id = db
+        .add_bug_file(
+            source_id,
+            u1,
+            "blob.txt",
+            "text/plain",
+            b"blob data".to_vec(),
+            "",
+        )
+        .unwrap();
+    assert!(blob_file_id > 0);
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("mantis_test_upload_{}", rand::random::<u64>()));
+    let disk_file_id = db
+        .add_bug_file(
+            source_id,
+            u1,
+            "disk.txt",
+            "text/plain",
+            b"disk file content".to_vec(),
+            temp_dir.to_str().unwrap(),
+        )
+        .unwrap();
+    assert!(disk_file_id > 0);
+
+    // 1. Clone within same project (p1)
+    let cloned_same = db
+        .clone_bug(source_id, u2, p1, true, true, temp_dir.to_str().unwrap())
+        .unwrap();
+    assert_ne!(source_id, cloned_same);
+
+    let full_clone = db.get_bug_full(cloned_same).unwrap().unwrap();
+    assert_eq!(full_clone.bug.project_id, p1);
+    assert_eq!(full_clone.bug.reporter_id, u2);
+    assert_eq!(full_clone.bug.category_id, c1);
+    assert_eq!(full_clone.bug.summary, "Original Summary");
+    assert_eq!(full_clone.description, "Detailed Description");
+    assert_eq!(full_clone.steps_to_reproduce, "Step 1, Step 2");
+    assert_eq!(full_clone.additional_information, "Additional Info");
+    assert_eq!(full_clone.bug.priority, 40);
+    assert_eq!(full_clone.bug.severity, 60);
+    assert_eq!(full_clone.bug.reproducibility, 20);
+    assert_eq!(full_clone.bug.os, "macOS");
+    assert_eq!(full_clone.bug.os_build, "23A344");
+    assert_eq!(full_clone.bug.platform, "arm64");
+    assert_eq!(full_clone.bug.version, "1.0.0");
+    assert_eq!(full_clone.bug.target_version, "1.1.0");
+    assert_eq!(full_clone.bug.fixed_in_version, "1.0.1");
+    assert_eq!(full_clone.bug.build, "Build-99");
+    assert_eq!(full_clone.bug.due_date, 1700000000);
+    assert_eq!(full_clone.bug.view_state, 10);
+    assert_eq!(full_clone.bug.status, 10);
+
+    // Verify custom fields copied (both cf1 and cf2 exist in p1)
+    let cf_vals_same = db.get_custom_field_values_for_bug(cloned_same).unwrap();
+    assert!(cf_vals_same
+        .iter()
+        .any(|v| v.field_id == cf1 && v.value == "Shared Value"));
+    assert!(cf_vals_same
+        .iter()
+        .any(|v| v.field_id == cf2 && v.value == "P1 Exclusive"));
+
+    // Verify tags copied
+    let tags_same = db.list_bug_tags(cloned_same).unwrap();
+    assert!(tags_same.iter().any(|t| t.tag_id == tag1));
+
+    // Verify relationships: RelatedTo source_id + copied relationship to other_bug
+    let rels_same = db.list_bug_relationships(cloned_same).unwrap();
+    assert!(rels_same
+        .iter()
+        .any(|r| r.destination_bug_id == source_id && r.relationship_type == 0));
+    assert!(rels_same
+        .iter()
+        .any(|r| r.destination_bug_id == other_bug && r.relationship_type == 0));
+
+    // Verify third issue (other_bug) is completely unchanged:
+    // It has no relationship row pointing at cloned_same, and its duplicate_id is 0
+    let other_rels = db.list_bug_relationships(other_bug).unwrap();
+    assert!(!other_rels
+        .iter()
+        .any(|r| r.destination_bug_id == cloned_same || r.source_bug_id == cloned_same));
+    let other_bug_full = db.get_bug(other_bug).unwrap().unwrap();
+    assert_eq!(other_bug_full.duplicate_id, 0);
+
+    // Verify dup_bug relationships and duplicate_id are completely unchanged:
+    // It has only 1 relationship pointing to source_id, not cloned_same
+    let dup_rels = db.list_bug_relationships(dup_bug).unwrap();
+    assert_eq!(dup_rels.len(), 1);
+    assert_eq!(dup_rels[0].destination_bug_id, source_id);
+    assert_eq!(dup_rels[0].relationship_type, 1);
+    let dup_bug_full = db.get_bug(dup_bug).unwrap().unwrap();
+    assert_eq!(dup_bug_full.duplicate_id, source_id);
+
+    // Verify attachments copied separately
+    let files_same = db.list_bug_files(cloned_same).unwrap();
+    assert_eq!(files_same.len(), 2);
+    let disk_clone_file = files_same
+        .iter()
+        .find(|f| f.filename == "disk.txt")
+        .unwrap();
+    let src_disk_file = db.get_bug_file_meta(disk_file_id).unwrap().unwrap();
+    assert_ne!(disk_clone_file.diskfile, src_disk_file.diskfile);
+
+    // Deleting file on cloned bug does NOT affect source bug file!
+    db.delete_bug_file(disk_clone_file.id, temp_dir.to_str().unwrap())
+        .unwrap();
+    assert!(db.get_bug_file_meta(disk_clone_file.id).unwrap().is_none());
+    assert!(db.get_bug_file_meta(disk_file_id).unwrap().is_some());
+    let src_content = db
+        .get_bug_file(disk_file_id, temp_dir.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(src_content.1, b"disk file content");
+
+    // 2. Clone to different project (p2):
+    // Category c1 is NOT effective in p2, should fall back to c2
+    // cf2 is NOT linked to p2, so only cf1 should be copied
+    let cloned_p2 = db
+        .clone_bug(source_id, u2, p2, false, false, temp_dir.to_str().unwrap())
+        .unwrap();
+    let full_p2 = db.get_bug_full(cloned_p2).unwrap().unwrap();
+    assert_eq!(full_p2.bug.project_id, p2);
+    assert_eq!(full_p2.bug.category_id, c2); // fell back to c2!
+
+    let cf_vals_p2 = db.get_custom_field_values_for_bug(cloned_p2).unwrap();
+    assert!(cf_vals_p2
+        .iter()
+        .any(|v| v.field_id == cf1 && v.value == "Shared Value"));
+    assert!(!cf_vals_p2.iter().any(|v| v.field_id == cf2)); // cf2 not linked to p2
+
+    // Since copy_relationships = false, only the automatic RelatedTo source is present
+    let rels_p2 = db.list_bug_relationships(cloned_p2).unwrap();
+    assert_eq!(rels_p2.len(), 1);
+    assert_eq!(rels_p2[0].destination_bug_id, source_id);
+    assert_eq!(rels_p2[0].relationship_type, 0);
+
+    // History check
+    let hist_new = db.list_bug_history(cloned_p2).unwrap();
+    assert!(hist_new.iter().any(|h| h.type_ == 1)); // new bug
+    assert!(hist_new
+        .iter()
+        .any(|h| h.type_ == 21 && h.new_value == source_id.to_string())); // created_from
+
+    let hist_src = db.list_bug_history(source_id).unwrap();
+    assert!(hist_src
+        .iter()
+        .any(|h| h.type_ == 20 && h.new_value == cloned_p2.to_string())); // cloned_to
+
+    // Clean up temp dir
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_move_bug_success_and_category_fallback() {
+    let db = Db::open_in_memory().unwrap();
+    let p1 = db.create_project("Source Proj", 10, 10, "", true).unwrap();
+    let p2 = db.create_project("Target Proj", 10, 10, "", false).unwrap();
+    let p_disabled = db
+        .create_project("Disabled Proj", 10, 10, "", true)
+        .unwrap();
+    db.update_project(p_disabled, "Disabled Proj", 10, false, 10, "", true)
+        .unwrap();
+    let u = db
+        .create_user("dev", "Developer", "d@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let c1 = db.add_category(p1, "Source Category", 0).unwrap();
+    let c2 = db.add_category(p2, "Target Category", 0).unwrap();
+
+    let bug_id = db
+        .create_bug(
+            p1,
+            u,
+            c1,
+            "Move Test Bug",
+            "Description",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Fails on non-existent project
+    assert!(db.move_bug(bug_id, u, 9999).is_err());
+    // Fails on disabled project
+    assert!(db.move_bug(bug_id, u, p_disabled).is_err());
+
+    // Move to p2: c1 is not valid in p2 -> falls back to c2
+    db.move_bug(bug_id, u, p2).unwrap();
+
+    let moved_bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(moved_bug.project_id, p2);
+    assert_eq!(moved_bug.category_id, c2);
+
+    let history = db.list_bug_history(bug_id).unwrap();
+    assert!(history.iter().any(|h| h.field_name == "project_id"
+        && h.old_value == p1.to_string()
+        && h.new_value == p2.to_string()));
+    assert!(history.iter().any(|h| h.field_name == "category_id"
+        && h.old_value == c1.to_string()
+        && h.new_value == c2.to_string()));
+
+    // Move when already in target project is a no-op Ok(())
+    assert!(db.move_bug(bug_id, u, p2).is_ok());
+}
+
+#[test]
+fn test_clone_bug_outgoing_duplicate_relationship() {
+    let db = Db::open_in_memory().unwrap();
+    let p = db.create_project("Test Proj", 10, 10, "", true).unwrap();
+    let u = db
+        .create_user("dev", "Dev", "d@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let parent_bug = db
+        .create_bug(
+            p,
+            u,
+            1,
+            "Parent Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let dup_source = db
+        .create_bug(
+            p,
+            u,
+            1,
+            "Dup Source",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // dup_source is duplicate_of parent_bug
+    db.add_bug_relationship(dup_source, parent_bug, 1).unwrap();
+    assert_eq!(
+        db.get_bug(dup_source).unwrap().unwrap().duplicate_id,
+        parent_bug
+    );
+
+    // Clone dup_source
+    let cloned = db.clone_bug(dup_source, u, p, true, false, "").unwrap();
+
+    // Verify cloned issue inherits duplicate_of relationship to parent_bug (matching MantisBT relationship_copy_all)
+    let cloned_bug = db.get_bug(cloned).unwrap().unwrap();
+    assert_eq!(cloned_bug.duplicate_id, parent_bug);
+
+    let cloned_rels = db.list_bug_relationships(cloned).unwrap();
+    assert!(cloned_rels
+        .iter()
+        .any(|r| r.destination_bug_id == parent_bug && r.relationship_type == 1));
+
+    // Verify parent_bug has reciprocal has_duplicate relationship pointing to cloned
+    let parent_rels = db.list_bug_relationships(parent_bug).unwrap();
+    assert!(parent_rels
+        .iter()
+        .any(|r| r.destination_bug_id == cloned && r.relationship_type == 2));
+}
+
+#[test]
+fn test_clone_bug_cleanup_guard_removes_partial_writes_on_failure() {
+    let db = Db::open_in_memory().unwrap();
+    let p = db
+        .create_project("Disk Cleanup Proj", 10, 10, "", true)
+        .unwrap();
+    let u = db
+        .create_user("dev_disk", "Dev Disk", "dd@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mantis_test_cleanup_guard_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let temp_dir_str = temp_dir.to_str().unwrap();
+
+    let bug_id = db
+        .create_bug(
+            p,
+            u,
+            0,
+            "Bug with disk attachments",
+            "desc",
+            "",
+            "",
+            50,
+            10,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Add first attachment with file on disk
+    let file1_bytes = b"First attachment content";
+    let _f1_id = db
+        .add_bug_file(
+            bug_id,
+            u,
+            "file1.txt",
+            "text/plain",
+            file1_bytes.to_vec(),
+            temp_dir_str,
+        )
+        .unwrap();
+
+    // Add second attachment with file on disk
+    let file2_bytes = b"Second attachment content";
+    let _f2_id = db
+        .add_bug_file(
+            bug_id,
+            u,
+            "file2.txt",
+            "text/plain",
+            file2_bytes.to_vec(),
+            temp_dir_str,
+        )
+        .unwrap();
+
+    // Now find the disk path of attachment 2 and delete it from disk to trigger read failure during clone
+    let files = db.list_bug_files(bug_id).unwrap();
+    assert_eq!(files.len(), 2);
+    let disk_file1 = temp_dir.join(&files[0].diskfile);
+    let disk_file2 = temp_dir.join(&files[1].diskfile);
+    assert!(disk_file2.exists());
+    std::fs::remove_file(&disk_file2).unwrap();
+    assert!(!disk_file2.exists());
+
+    // Call clone_bug with copy_files = true
+    let clone_res = db.clone_bug(bug_id, u, p, false, true, temp_dir_str);
+    assert!(
+        clone_res.is_err(),
+        "Clone should fail due to missing attachment file on disk"
+    );
+
+    // Verify cleanup guard removed the copied file for attachment 1
+    // The only remaining file in temp_dir should be the original file1.txt
+    let remaining_files: Vec<_> = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(
+        remaining_files.len(),
+        1,
+        "Only original file1 should remain; cloned partial files must be cleaned up"
+    );
+    assert_eq!(remaining_files[0].path(), disk_file1);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

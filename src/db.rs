@@ -16,6 +16,22 @@ pub struct Db {
     base_url: Arc<String>,
 }
 
+struct DiskFileCleanupGuard(Vec<std::path::PathBuf>);
+
+impl DiskFileCleanupGuard {
+    fn dismiss(mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for DiskFileCleanupGuard {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 impl Db {
     pub(crate) fn from_connection(conn: Connection) -> Self {
         Self {
@@ -3023,6 +3039,502 @@ impl Db {
 
         if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, None) {
             self.notify_bug_event_filtered(&conn, bug_id, 0, &extra_recipients, &subject, &body);
+        }
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn clone_bug(
+        &self,
+        source_bug_id: i64,
+        reporter_id: i64,
+        target_project_id: i64,
+        copy_relationships: bool,
+        copy_files: bool,
+        upload_dir: &str,
+    ) -> Result<i64, String> {
+        let mut cleanup_guard = DiskFileCleanupGuard(Vec::new());
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let source_bug = Self::query_bug_by_id(&tx, source_bug_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Source issue {} not found", source_bug_id))?;
+
+        let (description, steps_to_reproduce, additional_information) = match tx.query_row(
+            "SELECT description, steps_to_reproduce, additional_information
+             FROM mantis_bug_text_table
+             WHERE id = ?1",
+            params![source_bug_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        ) {
+            Ok(t) => t,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                (String::new(), String::new(), String::new())
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+
+        let target_enabled: Option<i32> = tx
+            .query_row(
+                "SELECT enabled FROM mantis_project_table WHERE id = ?1",
+                params![target_project_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if target_enabled != Some(1) {
+            return Err("Target project not found or disabled".to_string());
+        }
+
+        let effective_cats =
+            Self::query_effective_categories(&tx, target_project_id).map_err(|e| e.to_string())?;
+        let target_category_id = if effective_cats
+            .iter()
+            .any(|c| c.id == source_bug.category_id)
+        {
+            source_bug.category_id
+        } else if let Some(first_cat) = effective_cats.first() {
+            first_cat.id
+        } else {
+            1
+        };
+
+        let mut initial_handler_id = 0i64;
+        let mut initial_status = 10i32;
+        if target_category_id > 0 {
+            let cat_user_id: Option<i64> = tx
+                .query_row(
+                    "SELECT user_id FROM mantis_category_table WHERE id = ?1",
+                    params![target_category_id],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            if let Some(uid) = cat_user_id {
+                if uid > 0 {
+                    if let Ok(Some(u)) = Self::query_user_by_id(&tx, uid) {
+                        if u.enabled == 1 {
+                            let eff =
+                                Self::query_effective_access_level(&tx, &u, target_project_id)
+                                    .unwrap_or(0);
+                            if eff >= 55 {
+                                initial_handler_id = uid;
+                                initial_status = 50;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        tx.execute(
+            "INSERT INTO mantis_bug_table (
+                project_id, reporter_id, handler_id, duplicate_id,
+                priority, severity, reproducibility, status, resolution,
+                category_id, date_submitted, last_updated, os, os_build,
+                platform, version, fixed_in_version, target_version, build,
+                summary, view_state, sticky, due_date
+            ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, 10, ?8, ?9, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0, ?19)",
+            params![
+                target_project_id,
+                reporter_id,
+                initial_handler_id,
+                source_bug.priority,
+                source_bug.severity,
+                source_bug.reproducibility,
+                initial_status,
+                target_category_id,
+                now,
+                source_bug.os,
+                source_bug.os_build,
+                source_bug.platform,
+                source_bug.version,
+                source_bug.fixed_in_version,
+                source_bug.target_version,
+                source_bug.build,
+                source_bug.summary,
+                source_bug.view_state,
+                source_bug.due_date,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let new_bug_id = tx.last_insert_rowid();
+
+        tx.execute(
+            "INSERT INTO mantis_bug_text_table (
+                id, description, steps_to_reproduce, additional_information
+            ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                new_bug_id,
+                description,
+                steps_to_reproduce,
+                additional_information,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Copy custom field values (for fields linked to target_project_id)
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT cfs.field_id, cfs.value, cfs.text
+                     FROM mantis_custom_field_string_table cfs
+                     JOIN mantis_custom_field_project_table cfp ON cfs.field_id = cfp.field_id
+                     WHERE cfs.bug_id = ?1 AND cfp.project_id = ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            let cfs_rows = stmt
+                .query_map(params![source_bug_id, target_project_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut field_values = Vec::new();
+            for val in cfs_rows.flatten() {
+                field_values.push(val);
+            }
+            for (fid, val, txt) in field_values {
+                tx.execute(
+                    "INSERT INTO mantis_custom_field_string_table (field_id, bug_id, value, text)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (field_id, bug_id) DO UPDATE SET value = excluded.value, text = excluded.text",
+                    params![fid, new_bug_id, val, txt],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        // Copy tags (mantis_bug_tag_table)
+        {
+            let mut stmt = tx
+                .prepare("SELECT tag_id, user_id FROM mantis_bug_tag_table WHERE bug_id = ?1")
+                .map_err(|e| e.to_string())?;
+            let tag_rows = stmt
+                .query_map(params![source_bug_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut tags = Vec::new();
+            for t in tag_rows.flatten() {
+                tags.push(t);
+            }
+            for (tid, uid) in tags {
+                tx.execute(
+                    "INSERT OR IGNORE INTO mantis_bug_tag_table (bug_id, tag_id, user_id, date_attached)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![new_bug_id, tid, uid, now],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        // Always create RelatedTo relationship between cloned issue and source issue
+        tx.execute(
+            "INSERT INTO mantis_bug_relationship_table (
+                source_bug_id, destination_bug_id, relationship_type
+            ) VALUES (?1, ?2, 0)",
+            params![new_bug_id, source_bug_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // If copy_relationships is true, copy existing source relationships cleanly
+        if copy_relationships {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT destination_bug_id, relationship_type
+                     FROM mantis_bug_relationship_table
+                     WHERE source_bug_id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let rel_rows = stmt
+                .query_map(params![source_bug_id], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut rels = Vec::new();
+            for rel in rel_rows.flatten() {
+                rels.push(rel);
+            }
+            for (dest_id, rel_type) in rels {
+                if dest_id == new_bug_id || dest_id == source_bug_id {
+                    continue;
+                }
+                if rel_type == 2 {
+                    // An issue can only be a duplicate of one issue.
+                    // If source issue has a duplicate (type 2), the clone itself should NOT claim
+                    // the other issue as its duplicate. Skip type 2 entirely.
+                    continue;
+                }
+
+                tx.execute(
+                    "INSERT INTO mantis_bug_relationship_table (
+                        source_bug_id, destination_bug_id, relationship_type
+                    ) VALUES (?1, ?2, ?3)",
+                    params![new_bug_id, dest_id, rel_type],
+                )
+                .map_err(|e| e.to_string())?;
+
+                if rel_type == 1 {
+                    // Cloned issue is duplicate of dest_id (matching add_bug_relationship)
+                    tx.execute(
+                        "UPDATE mantis_bug_table SET duplicate_id = ?1 WHERE id = ?2",
+                        params![dest_id, new_bug_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    tx.execute(
+                        "INSERT INTO mantis_bug_relationship_table (
+                            source_bug_id, destination_bug_id, relationship_type
+                        ) VALUES (?1, ?2, 2)",
+                        params![dest_id, new_bug_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                // For type 0 (RelatedTo): only new_bug_id -> dest_id is inserted.
+                // Do not create reciprocal reverse row on dest_id, consistent with MantisBT design.
+            }
+        }
+
+        // If copy_files is true, duplicate attachments (separate copies)
+        if copy_files {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT title, description, diskfile, filename, folder,
+                            filesize, file_type, content
+                     FROM mantis_bug_file_table
+                     WHERE bug_id = ?1",
+                )
+                .map_err(|e| e.to_string())?;
+            let file_rows = stmt
+                .query_map(params![source_bug_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, Option<Vec<u8>>>(7)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let mut files = Vec::new();
+            for f in file_rows.flatten() {
+                files.push(f);
+            }
+            for (title, description, diskfile, filename, folder, filesize, file_type, blob_opt) in
+                files
+            {
+                let (new_diskfile, new_folder, new_blob_opt): (String, String, Option<Vec<u8>>) =
+                    if let Some(bytes) = blob_opt {
+                        (String::new(), String::new(), Some(bytes))
+                    } else if !diskfile.is_empty() {
+                        let source_dir = if !upload_dir.trim().is_empty() {
+                            upload_dir
+                        } else if !folder.trim().is_empty() {
+                            &folder
+                        } else {
+                            "."
+                        };
+                        let src_path = std::path::Path::new(source_dir).join(&diskfile);
+                        if !src_path.exists() {
+                            return Err(format!(
+                                "Source attachment file not found on disk: {}",
+                                diskfile
+                            ));
+                        }
+                        let bytes = std::fs::read(&src_path).map_err(|e| {
+                            format!("Failed to read attachment file {}: {}", diskfile, e)
+                        })?;
+                        let target_dir = if !upload_dir.trim().is_empty() {
+                            upload_dir
+                        } else if !folder.trim().is_empty() {
+                            &folder
+                        } else {
+                            "."
+                        };
+                        std::fs::create_dir_all(target_dir).map_err(|e| e.to_string())?;
+                        let fresh_name = format!(
+                            "{:016x}{:016x}",
+                            rand::random::<u64>(),
+                            rand::random::<u64>()
+                        );
+                        let dst_path = std::path::Path::new(target_dir).join(&fresh_name);
+                        cleanup_guard.0.push(dst_path.clone());
+                        std::fs::write(&dst_path, &bytes).map_err(|e| e.to_string())?;
+                        (fresh_name, target_dir.to_string(), None)
+                    } else {
+                        (String::new(), String::new(), None)
+                    };
+
+                tx.execute(
+                    "INSERT INTO mantis_bug_file_table (
+                        bug_id, title, description, diskfile, filename, folder,
+                        filesize, file_type, content, date_added, user_id
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    params![
+                        new_bug_id,
+                        title,
+                        description,
+                        new_diskfile,
+                        filename,
+                        new_folder,
+                        filesize,
+                        file_type,
+                        new_blob_opt,
+                        now,
+                        reporter_id,
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+
+        // Record creation + clone history entry
+        self.record_history(&tx, new_bug_id, reporter_id, "", "", "", 1)
+            .map_err(|e| e.to_string())?;
+        self.record_history(
+            &tx,
+            new_bug_id,
+            reporter_id,
+            "created_from",
+            "",
+            &source_bug_id.to_string(),
+            21,
+        )
+        .map_err(|e| e.to_string())?;
+        self.record_history(
+            &tx,
+            source_bug_id,
+            reporter_id,
+            "cloned_to",
+            "",
+            &new_bug_id.to_string(),
+            20,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Commit transaction before sending notification
+        tx.commit().map_err(|e| e.to_string())?;
+        cleanup_guard.dismiss();
+
+        // Queue notification email
+        let project_name = Self::helper_project_name(&conn, target_project_id);
+        let action_header = "The following issue has been SUBMITTED.";
+        if let Ok(body) = self.build_mantis_email_body(&conn, new_bug_id, action_header, None) {
+            let subject = format!(
+                "[{} {:07}] New: {}",
+                project_name,
+                new_bug_id,
+                source_bug.summary.trim()
+            );
+            self.notify_bug_event(&conn, new_bug_id, &subject, &body);
+        }
+
+        Ok(new_bug_id)
+    }
+
+    pub fn move_bug(
+        &self,
+        bug_id: i64,
+        mover_id: i64,
+        target_project_id: i64,
+    ) -> Result<(), String> {
+        let mut conn = self.conn();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let bug = Self::query_bug_by_id(&tx, bug_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Bug {} not found", bug_id))?;
+
+        if bug.project_id == target_project_id {
+            return Ok(());
+        }
+
+        let target_enabled: Option<i32> = tx
+            .query_row(
+                "SELECT enabled FROM mantis_project_table WHERE id = ?1",
+                params![target_project_id],
+                |row| row.get(0),
+            )
+            .ok();
+        if target_enabled != Some(1) {
+            return Err("Target project not found or disabled".to_string());
+        }
+
+        let effective_cats =
+            Self::query_effective_categories(&tx, target_project_id).map_err(|e| e.to_string())?;
+        let cat_effective = effective_cats.iter().any(|c| c.id == bug.category_id);
+        let (new_cat_id, cat_changed) = if cat_effective {
+            (bug.category_id, false)
+        } else if let Some(first_cat) = effective_cats.first() {
+            (first_cat.id, true)
+        } else {
+            (1, true)
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        tx.execute(
+            "UPDATE mantis_bug_table
+             SET project_id = ?1, category_id = ?2, last_updated = ?3
+             WHERE id = ?4",
+            params![target_project_id, new_cat_id, now, bug_id],
+        )
+        .map_err(|e| e.to_string())?;
+
+        self.record_history(
+            &tx,
+            bug_id,
+            mover_id,
+            "project_id",
+            &bug.project_id.to_string(),
+            &target_project_id.to_string(),
+            0,
+        )
+        .map_err(|e| e.to_string())?;
+
+        if cat_changed {
+            self.record_history(
+                &tx,
+                bug_id,
+                mover_id,
+                "category_id",
+                &bug.category_id.to_string(),
+                &new_cat_id.to_string(),
+                0,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+
+        let target_project_name = Self::helper_project_name(&conn, target_project_id);
+        let action_header = "The following issue has been MOVED.";
+        if let Ok(body) = self.build_mantis_email_body(&conn, bug_id, action_header, None) {
+            let subject = format!(
+                "[{} {:07}] Moved to {}: {}",
+                target_project_name, bug_id, target_project_name, bug.summary
+            );
+            self.notify_bug_event(&conn, bug_id, &subject, &body);
         }
 
         Ok(())

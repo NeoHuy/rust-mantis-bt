@@ -373,7 +373,7 @@ pub fn render_view_all_bug_page(
     let mut rows_html = String::new();
     if bugs.is_empty() {
         rows_html.push_str(
-            r#"<tr><td colspan="8" style="text-align:center; padding:16px;">No issues found.</td></tr>"#,
+            r#"<tr><td colspan="9" style="text-align:center; padding:16px;">No issues found.</td></tr>"#,
         );
     } else {
         for (idx, b) in bugs.iter().enumerate() {
@@ -417,6 +417,7 @@ pub fn render_view_all_bug_page(
 
             rows_html.push_str(&format!(
                 r#"<tr class="{}">
+                    <td style="text-align:center;"><input type="checkbox" name="bug_arr" value="{}"></td>
                     <td style="border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a>{}</td>
                     <td>{}</td>
                     <td>{}</td>
@@ -427,6 +428,7 @@ pub fn render_view_all_bug_page(
                     <td style="white-space:nowrap;">{}</td>
                 </tr>"#,
                 row_class,
+                b.id,
                 status_color(b.status),
                 b.id,
                 b.id,
@@ -664,6 +666,41 @@ pub fn render_view_all_bug_page(
     let cur_dir = query.dir.as_deref().unwrap_or("");
     let cur_per_page_str = active_per_page.to_string();
 
+    let mut bulk_proj_opts = String::new();
+    for (p, _) in &ctx.visible_projects {
+        if p.enabled == 1 {
+            bulk_proj_opts.push_str(&format!(
+                r#"<option value="{}">{}</option>"#,
+                p.id,
+                html_escape(&p.name)
+            ));
+        }
+    }
+
+    let mut bulk_handler_opts = String::from(r#"<option value="0">(Unassigned)</option>"#);
+    for u in all_users {
+        bulk_handler_opts.push_str(&format!(
+            r#"<option value="{}">{}</option>"#,
+            u.id,
+            html_escape(&u.username)
+        ));
+    }
+
+    let mut bulk_cat_opts = String::new();
+    for (cid, cname) in all_categories {
+        bulk_cat_opts.push_str(&format!(
+            r#"<option value="{}">{}</option>"#,
+            cid,
+            html_escape(cname)
+        ));
+    }
+
+    let current_page_url = build_view_all_bug_page_url(query, page);
+    let return_query = current_page_url
+        .split_once('?')
+        .map(|(_, qs)| qs)
+        .unwrap_or("");
+
     let th_id = render_sortable_th(query, "id", "ID");
     let th_project = "<th>Project</th>";
     let th_category = "<th>Category</th>";
@@ -775,31 +812,187 @@ pub fn render_view_all_bug_page(
                 </div>
             </div>
             <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
+                <form method="POST" action="/bug_actiongroup" onsubmit="return handleBulkSubmit();">
+                    <input type="hidden" name="return_query" value="{}">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th style="width:28px; text-align:center;"><input type="checkbox" id="select_all_bugs" onclick="var c=document.querySelectorAll('input[name=\'bug_arr\']');for(var i=0;i<c.length;i++)c[i].checked=this.checked;" title="Select All"></th>
+                                {}
+                                {}
+                                {}
+                                {}
+                                {}
+                                {}
+                                {}
+                                {}
+                            </tr>
+                        </thead>
+                        <tbody>
                             {}
+                        </tbody>
+                    </table>
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+                        <div style="display:flex; align-items:center;">
                             {}
-                            {}
-                            {}
-                            {}
-                            {}
-                            {}
-                            {}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-                    <div style="display:flex; align-items:center;">
-                        {}
+                        </div>
+                        <div style="display:flex; gap:8px;">
+                            {} {}
+                        </div>
                     </div>
-                    <div style="display:flex; gap:8px;">
-                        {} {}
+                    <div class="bulk-action-bar" style="margin-top:12px; padding:10px 12px; background:#f5f5f5; border:1px solid #ddd; border-radius:3px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+                        <span style="font-weight:bold; font-size:12px;">Action:</span>
+                        <select name="action" id="bulk_action_select" onchange="updateBulkActionInputs(this.value)" style="width:auto; font-weight:600;">
+                            <option value="" selected disabled>-- Select Action --</option>
+                            <option value="MOVE">Move</option>
+                            <option value="COPY">Copy</option>
+                            <option value="ASSIGN">Assign</option>
+                            <option value="CLOSE">Close</option>
+                            <option value="DELETE">Delete</option>
+                            <option value="RESOLVE">Resolve</option>
+                            <option value="UP_STATUS">Update Status</option>
+                            <option value="UP_PRIOR">Update Priority</option>
+                            <option value="UP_SEV">Update Severity</option>
+                            <option value="UP_CATEGORY">Update Category</option>
+                            <option value="UP_TARGET_VERSION">Update Target Version</option>
+                            <option value="UP_DUE_DATE">Update Due Date</option>
+                            <option value="VIEW_STATUS">Update View Status</option>
+                            <option value="SET_STICKY">Set Sticky</option>
+                            <option value="ADD_NOTE">Add Note</option>
+                            <option value="ATTACH_TAGS">Attach Tags</option>
+                        </select>
+                        <div class="bulk-input-group" data-actions="MOVE,COPY" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Project:</span>
+                            <select name="target_project_id" style="width:auto;">{}</select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="ASSIGN" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Assign To:</span>
+                            <select name="handler_id" style="width:auto;">{}</select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="UP_STATUS" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Status:</span>
+                            <select name="status" style="width:auto;">
+                                <option value="10">new</option>
+                                <option value="20">feedback</option>
+                                <option value="30">acknowledged</option>
+                                <option value="40">confirmed</option>
+                                <option value="50">assigned</option>
+                                <option value="80">resolved</option>
+                                <option value="90">closed</option>
+                            </select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="RESOLVE,UP_STATUS" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Resolution:</span>
+                            <select name="resolution" style="width:auto;">
+                                <option value="20" selected>fixed</option>
+                                <option value="10">open</option>
+                                <option value="30">reopened</option>
+                                <option value="40">unable to reproduce</option>
+                                <option value="50">not fixable</option>
+                                <option value="60">duplicate</option>
+                                <option value="70">not a bug</option>
+                                <option value="80">suspended</option>
+                                <option value="90">won't fix</option>
+                            </select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="UP_PRIOR" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Priority:</span>
+                            <select name="priority" style="width:auto;">
+                                <option value="10">none</option>
+                                <option value="20">low</option>
+                                <option value="30" selected>normal</option>
+                                <option value="40">high</option>
+                                <option value="50">urgent</option>
+                                <option value="60">immediate</option>
+                            </select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="UP_SEV" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Severity:</span>
+                            <select name="severity" style="width:auto;">
+                                <option value="10">feature</option>
+                                <option value="20">trivial</option>
+                                <option value="30">text</option>
+                                <option value="40">tweak</option>
+                                <option value="50" selected>minor</option>
+                                <option value="60">major</option>
+                                <option value="70">crash</option>
+                                <option value="80">block</option>
+                            </select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="UP_CATEGORY" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Category:</span>
+                            <select name="category_id" style="width:auto;">{}</select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="UP_TARGET_VERSION" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Target Version:</span>
+                            <input type="text" name="target_version" placeholder="Version string" style="width:140px;">
+                        </div>
+                        <div class="bulk-input-group" data-actions="UP_DUE_DATE" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Due Date:</span>
+                            <input type="date" name="due_date" style="width:140px;">
+                        </div>
+                        <div class="bulk-input-group" data-actions="VIEW_STATUS" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">View Status:</span>
+                            <select name="view_state" style="width:auto;">
+                                <option value="10">public</option>
+                                <option value="50">private</option>
+                            </select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="SET_STICKY" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Sticky:</span>
+                            <select name="sticky" style="width:auto;">
+                                <option value="0">no</option>
+                                <option value="1">yes</option>
+                            </select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="ADD_NOTE" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Note:</span>
+                            <input type="text" name="bugnote_text" placeholder="Enter note text..." style="width:200px;">
+                            <select name="note_view_state" style="width:auto;">
+                                <option value="10">public</option>
+                                <option value="50">private</option>
+                            </select>
+                        </div>
+                        <div class="bulk-input-group" data-actions="ATTACH_TAGS" style="display:none; align-items:center; gap:6px;">
+                            <span style="font-size:12px;">Tags:</span>
+                            <input type="text" name="tag_string" placeholder="Comma-separated tags" style="width:180px;">
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-sm">Apply</button>
                     </div>
-                </div>
+                </form>
+                <script>
+                function updateBulkActionInputs(act) {{
+                    var groups = document.querySelectorAll('.bulk-input-group');
+                    for (var i = 0; i < groups.length; i++) {{
+                        var grp = groups[i];
+                        var acts = grp.getAttribute('data-actions') || '';
+                        if (acts.split(',').indexOf(act) !== -1) {{
+                            grp.style.display = 'inline-flex';
+                        }} else {{
+                            grp.style.display = 'none';
+                        }}
+                    }}
+                }}
+                function handleBulkSubmit() {{
+                    var sel = document.getElementById('bulk_action_select');
+                    if (!sel || !sel.value) {{
+                        alert('Please select an action.');
+                        return false;
+                    }}
+                    var checked = document.querySelectorAll('input[name=\'bug_arr\']:checked');
+                    if (checked.length === 0) {{
+                        alert('Please select at least one issue.');
+                        return false;
+                    }}
+                    if (sel.value === 'DELETE') {{
+                        return confirm('Are you sure you want to permanently delete ' + checked.length + ' selected issue(s)?');
+                    }}
+                    return true;
+                }}
+                if (document.getElementById('bulk_action_select')) {{
+                    updateBulkActionInputs(document.getElementById('bulk_action_select').value);
+                }}
+                </script>
             </div>
         </div>
         {}"#,
@@ -821,6 +1014,7 @@ pub fn render_view_all_bug_page(
         save_filter_form,
         total,
         build_csv_export_url(query),
+        html_escape(return_query),
         th_id,
         th_project,
         th_category,
@@ -833,6 +1027,9 @@ pub fn render_view_all_bug_page(
         per_page_html,
         prev_link,
         next_link,
+        bulk_proj_opts,
+        bulk_handler_opts,
+        bulk_cat_opts,
         render_status_legend()
     );
 
@@ -1853,6 +2050,180 @@ pub fn render_conflict_page(ctx: &AuthContext, bug_id: i64, message: &str) -> Ht
         &format!("Conflict - Issue {:07}", bug_id),
         ctx,
         None,
+        &content,
+    )
+}
+
+pub fn render_bug_clone_page(
+    ctx: &AuthContext,
+    full: &BugFull,
+    source_proj_name: &str,
+    target_projects: &[(i64, String, bool)],
+    flash_err: Option<&str>,
+    flash_msg: Option<&str>,
+) -> Html<String> {
+    let bug = &full.bug;
+    let mut proj_options = String::new();
+    for (pid, pname, is_sel) in target_projects {
+        let sel = if *is_sel { "selected" } else { "" };
+        proj_options.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            pid,
+            sel,
+            html_escape(pname)
+        ));
+    }
+
+    let err_banner = flash_err
+        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
+
+    let content = format!(
+        r#"{}
+        <div class="panel">
+            <div class="panel-header">Clone Issue #{:07}: {}</div>
+            <div class="panel-body">
+                <form method="POST" action="/bug_clone/{}">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Source Project</td>
+                            <td>{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Target Project <span class="required">*</span></td>
+                            <td>
+                                <select name="target_project_id" style="max-width:320px;" required>
+                                    {}
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Summary</td>
+                            <td>{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Priority / Severity</td>
+                            <td>{} / {}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Copy Options</td>
+                            <td>
+                                <div style="display:flex; flex-direction:column; gap:6px;">
+                                    <label style="display:inline-flex; align-items:center; gap:6px;">
+                                        <input type="checkbox" name="copy_relationships" value="1" checked> Copy Relationships
+                                    </label>
+                                    <label style="display:inline-flex; align-items:center; gap:6px;">
+                                        <input type="checkbox" name="copy_files" value="1" checked> Copy File Attachments
+                                    </label>
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td></td>
+                            <td>
+                                <button type="submit" class="btn btn-primary btn-sm">Clone Issue</button>
+                                <a class="btn btn-secondary btn-sm" href="/view_bug_page/{}" style="margin-left:8px;">Cancel</a>
+                            </td>
+                        </tr>
+                    </table>
+                </form>
+            </div>
+        </div>"#,
+        err_banner,
+        bug.id,
+        html_escape(&bug.summary),
+        bug.id,
+        html_escape(source_proj_name),
+        proj_options,
+        html_escape(&bug.summary),
+        html_escape(priority_label(bug.priority)),
+        html_escape(severity_label(bug.severity)),
+        bug.id
+    );
+
+    render_layout(
+        &format!("Clone Issue #{:07}", bug.id),
+        ctx,
+        flash_msg,
+        &content,
+    )
+}
+
+pub fn render_bug_move_page(
+    ctx: &AuthContext,
+    full: &BugFull,
+    source_proj_name: &str,
+    target_projects: &[(i64, String, bool)],
+    flash_err: Option<&str>,
+    flash_msg: Option<&str>,
+) -> Html<String> {
+    let bug = &full.bug;
+    let mut proj_options = String::new();
+    for (pid, pname, is_sel) in target_projects {
+        let sel = if *is_sel { "selected" } else { "" };
+        proj_options.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            pid,
+            sel,
+            html_escape(pname)
+        ));
+    }
+
+    let err_banner = flash_err
+        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
+
+    let content = format!(
+        r#"{}
+        <div class="panel">
+            <div class="panel-header">Move Issue #{:07}: {}</div>
+            <div class="panel-body">
+                <form method="POST" action="/bug_move/{}">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Current Project</td>
+                            <td>{}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Target Project <span class="required">*</span></td>
+                            <td>
+                                <select name="target_project_id" style="max-width:320px;" required>
+                                    {}
+                                </select>
+                                <div style="margin-top:6px; color:#666; font-size:12px;">
+                                    If the issue's current category is not available in the target project, it will be automatically reset to the target project's default category.
+                                </div>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Summary</td>
+                            <td>{}</td>
+                        </tr>
+                        <tr>
+                            <td></td>
+                            <td>
+                                <button type="submit" class="btn btn-primary btn-sm">Move Issue</button>
+                                <a class="btn btn-secondary btn-sm" href="/view_bug_page/{}" style="margin-left:8px;">Cancel</a>
+                            </td>
+                        </tr>
+                    </table>
+                </form>
+            </div>
+        </div>"#,
+        err_banner,
+        bug.id,
+        html_escape(&bug.summary),
+        bug.id,
+        html_escape(source_proj_name),
+        proj_options,
+        html_escape(&bug.summary),
+        bug.id
+    );
+
+    render_layout(
+        &format!("Move Issue #{:07}", bug.id),
+        ctx,
+        flash_msg,
         &content,
     )
 }

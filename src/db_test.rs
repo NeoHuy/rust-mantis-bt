@@ -2893,3 +2893,384 @@ fn test_custom_field_regex_validation_in_db() {
     assert_eq!(cf_vals_cleared.len(), 1);
     assert_eq!(cf_vals_cleared[0].value, "");
 }
+
+#[test]
+fn test_get_bugs_by_ids() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("BatchBugProj", 10, 10, "", true).unwrap();
+    let uid = db
+        .create_user("batch_user", "Batch", "b@x.com", "pw", 25, true, false)
+        .unwrap();
+
+    // 1. Empty slice returns empty map
+    let empty_res = db.get_bugs_by_ids(&[]).unwrap();
+    assert!(empty_res.is_empty());
+
+    // 2. Non-existent IDs return empty map
+    let non_existent = db.get_bugs_by_ids(&[9999, 10000]).unwrap();
+    assert!(non_existent.is_empty());
+
+    // 3. Create bugs
+    let bug1_id = db
+        .create_bug(
+            proj_id,
+            uid,
+            1,
+            "Bug 1 Summary",
+            "Desc 1",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let bug2_id = db
+        .create_bug(
+            proj_id,
+            uid,
+            1,
+            "Bug 2 Summary",
+            "Desc 2",
+            "",
+            "",
+            40,
+            60,
+            20,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Query mix of valid and non-existent IDs
+    let map = db.get_bugs_by_ids(&[bug1_id, bug2_id, 99999]).unwrap();
+    assert_eq!(map.len(), 2);
+    assert!(map.contains_key(&bug1_id));
+    assert!(map.contains_key(&bug2_id));
+
+    let b1 = &map[&bug1_id];
+    assert_eq!(b1.id, bug1_id);
+    assert_eq!(b1.project_id, proj_id);
+    assert_eq!(b1.summary, "Bug 1 Summary");
+    assert_eq!(b1.priority, 30);
+    assert_eq!(b1.severity, 50);
+
+    let b2 = &map[&bug2_id];
+    assert_eq!(b2.id, bug2_id);
+    assert_eq!(b2.project_id, proj_id);
+    assert_eq!(b2.summary, "Bug 2 Summary");
+    assert_eq!(b2.priority, 40);
+    assert_eq!(b2.severity, 60);
+}
+
+#[test]
+fn test_get_bugnotes_by_ids() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("BatchNoteProj", 10, 10, "", true)
+        .unwrap();
+    let uid = db
+        .create_user("note_user", "Note", "n@x.com", "pw", 25, true, false)
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id, uid, 1, "Note Bug", "Desc", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    // 1. Empty slice returns empty map
+    assert!(db.get_bugnotes_by_ids(&[]).unwrap().is_empty());
+
+    // 2. Non-existent IDs return empty map
+    assert!(db.get_bugnotes_by_ids(&[8888, 9999]).unwrap().is_empty());
+
+    // 3. Create notes
+    let n1_id = db.add_bugnote(bug_id, uid, "First test note", 10).unwrap();
+    let n2_id = db
+        .add_bugnote(bug_id, uid, "Second private note", 50)
+        .unwrap();
+
+    let map = db.get_bugnotes_by_ids(&[n1_id, n2_id, 77777]).unwrap();
+    assert_eq!(map.len(), 2);
+    assert!(map.contains_key(&n1_id));
+    assert!(map.contains_key(&n2_id));
+
+    let note1 = &map[&n1_id];
+    assert_eq!(note1.id, n1_id);
+    assert_eq!(note1.bug_id, bug_id);
+    assert_eq!(note1.reporter_id, uid);
+    assert_eq!(note1.view_state, 10);
+    assert_eq!(note1.note, "First test note");
+
+    let note2 = &map[&n2_id];
+    assert_eq!(note2.id, n2_id);
+    assert_eq!(note2.bug_id, bug_id);
+    assert_eq!(note2.reporter_id, uid);
+    assert_eq!(note2.view_state, 50);
+    assert_eq!(note2.note, "Second private note");
+}
+
+#[test]
+fn test_set_plugin_enabled_admin() {
+    let db = Db::open_in_memory().unwrap();
+
+    // 1. Non-existent plugin fails
+    let err_not_found = db
+        .set_plugin_enabled_admin("NoSuchPlugin", false)
+        .unwrap_err();
+    assert!(err_not_found.contains("Plugin 'NoSuchPlugin' not found"));
+
+    // 2. Create another protected plugin not in TOGGLEABLE_CORE_PLUGINS
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO mantis_plugin_table (basename, enabled, protected, priority) VALUES ('OtherProtected', 1, 1, 10)",
+            [],
+        ).unwrap();
+    }
+    let err_protected = db
+        .set_plugin_enabled_admin("OtherProtected", false)
+        .unwrap_err();
+    assert!(err_protected.contains("Protected plugin 'OtherProtected' cannot be disabled"));
+
+    // 3. MantisCoreFormatting is in TOGGLEABLE_CORE_PLUGINS: can be toggled
+    assert!(db.is_plugin_enabled("MantisCoreFormatting"));
+    db.set_plugin_enabled_admin("MantisCoreFormatting", false)
+        .unwrap();
+    assert!(!db.is_plugin_enabled("MantisCoreFormatting"));
+
+    // Re-enable
+    db.set_plugin_enabled_admin("MantisCoreFormatting", true)
+        .unwrap();
+    assert!(db.is_plugin_enabled("MantisCoreFormatting"));
+}
+
+#[test]
+fn test_notify_bug_mentions() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("MentionProj", 10, 10, "", true).unwrap();
+    let actor_id = db
+        .create_user("actor", "Actor", "actor@x.com", "pw", 55, true, false)
+        .unwrap();
+    let _dev_id = db
+        .create_user("dev_alice", "Alice", "alice@x.com", "pw", 55, true, false)
+        .unwrap();
+    let _rep_id = db
+        .create_user("rep_bob", "Bob", "bob@x.com", "pw", 25, true, false)
+        .unwrap();
+    let disabled_id = db
+        .create_user(
+            "charlie",
+            "Charlie",
+            "charlie@x.com",
+            "pw",
+            25,
+            false,
+            false,
+        )
+        .unwrap();
+    assert!(disabled_id > 0);
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            actor_id,
+            1,
+            "Mention Issue",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Clear any notification emails created during bug creation
+    {
+        let conn = db.conn();
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    // 1. Public mention of dev_alice, rep_bob, actor himself, and non-existent user
+    let mentions = vec![
+        "dev_alice".to_string(),
+        "rep_bob".to_string(),
+        "actor".to_string(), // Self mention should be ignored
+        "non_existent".to_string(),
+        "charlie".to_string(),   // Disabled user should be ignored
+        "DEV_ALICE".to_string(), // Case-insensitive duplicate should be deduplicated
+    ];
+
+    db.notify_bug_mentions(
+        bug_id,
+        actor_id,
+        &mentions,
+        false,
+        "Public note referencing team",
+    )
+    .unwrap();
+
+    let queued = db.list_queued_emails().unwrap();
+    assert_eq!(
+        queued.len(),
+        2,
+        "Should only enqueue 2 emails: dev_alice and rep_bob"
+    );
+    let recipients: Vec<String> = queued.iter().map(|e| e.email.clone()).collect();
+    assert!(recipients.contains(&"alice@x.com".to_string()));
+    assert!(recipients.contains(&"bob@x.com".to_string()));
+    assert!(!recipients.contains(&"actor@x.com".to_string()));
+    assert!(!recipients.contains(&"charlie@x.com".to_string()));
+
+    // Verify email subject & body
+    let alice_email = queued.iter().find(|e| e.email == "alice@x.com").unwrap();
+    assert!(alice_email
+        .subject
+        .contains("Mentioned by actor: Mention Issue"));
+    assert!(alice_email.body.contains("You were mentioned by actor"));
+    assert!(alice_email.body.contains("Public note referencing team"));
+
+    // 2. Clear emails and test private note mentions
+    // For a private note, reporter (rep_bob with access 25 < 55) should NOT be notified
+    {
+        let conn = db.conn();
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    let private_mentions = vec!["dev_alice".to_string(), "rep_bob".to_string()];
+    db.notify_bug_mentions(
+        bug_id,
+        actor_id,
+        &private_mentions,
+        true, // is_private_note = true
+        "Confidential security note",
+    )
+    .unwrap();
+
+    let queued_private = db.list_queued_emails().unwrap();
+    assert_eq!(
+        queued_private.len(),
+        1,
+        "Only developer with access >= 55 should be notified of private notes"
+    );
+    assert_eq!(queued_private[0].email, "alice@x.com");
+}
+
+#[test]
+fn test_add_bugnote_mention_deduplication() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("DedupProj", 10, 10, "", true).unwrap();
+    let rep_alice = db
+        .create_user("alice", "Alice", "alice@test.com", "pw", 25, true, false)
+        .unwrap();
+    let handler_bob = db
+        .create_user("bob", "Bob", "bob@test.com", "pw", 55, true, false)
+        .unwrap();
+    let actor = db
+        .create_user(
+            "charlie",
+            "Charlie",
+            "charlie@test.com",
+            "pw",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            rep_alice,
+            1,
+            "Issue for dedup testing",
+            "Description",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Assign bob as handler
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_bug_table SET handler_id = ?1 WHERE id = ?2",
+            rusqlite::params![handler_bob, bug_id],
+        )
+        .unwrap();
+        // Clear creation emails
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    // Charlie adds a bugnote mentioning Bob (@bob)
+    let note_text = "Please check this @bob";
+    let mentions = vec!["bob".to_string()];
+
+    // Add note with mentions excluded from standard note notification
+    db.add_bugnote_with_time_and_mentions(bug_id, actor, note_text, 10, 0, &mentions)
+        .unwrap();
+
+    // Notify mentions
+    db.notify_bug_mentions(bug_id, actor, &mentions, false, note_text)
+        .unwrap();
+
+    let queued = db.list_queued_emails().unwrap();
+    // Alice (reporter) gets "Note added by charlie"
+    // Bob (handler, mentioned) gets "Mentioned by charlie"
+    // Bob MUST NOT receive a second duplicate "Note added" email!
+    assert_eq!(
+        queued.len(),
+        2,
+        "Total queued emails must be exactly 2 (no duplicate email for mentioned handler)"
+    );
+
+    let bob_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "bob@test.com")
+        .collect();
+    assert_eq!(
+        bob_emails.len(),
+        1,
+        "Mentioned handler bob should receive exactly 1 email"
+    );
+    assert!(
+        bob_emails[0].subject.contains("Mentioned by charlie"),
+        "Bob should receive the mention email"
+    );
+
+    let alice_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "alice@test.com")
+        .collect();
+    assert_eq!(
+        alice_emails.len(),
+        1,
+        "Reporter alice should receive the standard note notification"
+    );
+    assert!(
+        alice_emails[0].subject.contains("Note added by charlie"),
+        "Alice should receive the note notification"
+    );
+}

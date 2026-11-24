@@ -580,6 +580,7 @@ fn test_view_bug_page_build_due_date_overdue_and_sticky() {
         "",
         None,
         None,
+        &crate::views::formatting::FormatContext::default(),
     );
 
     let html_str = html.0;

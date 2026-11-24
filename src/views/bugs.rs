@@ -1139,6 +1139,7 @@ pub fn render_view_bug_page(
     jira_section_html: &str,
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
+    format_ctx: &crate::views::formatting::FormatContext,
 ) -> Html<String> {
     let bug = &full.bug;
     let banner = if let Some(m) = flash_msg {
@@ -1373,9 +1374,9 @@ pub fn render_view_bug_page(
         bug.id,
         html_escape(&bug.summary),
         sticky_badge,
-        html_escape(&full.description),
-        html_escape(&full.steps_to_reproduce),
-        html_escape(&full.additional_information),
+        crate::views::formatting::format_text(&full.description, format_ctx),
+        crate::views::formatting::format_text(&full.steps_to_reproduce, format_ctx),
+        crate::views::formatting::format_text(&full.additional_information, format_ctx),
         cf_rows_html,
         actions_html,
         tags_html,

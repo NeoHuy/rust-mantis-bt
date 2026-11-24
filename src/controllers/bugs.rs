@@ -783,9 +783,49 @@ pub async fn view_bug_page(
     let custom_fields = db
         .list_custom_fields_for_project(bug.project_id)
         .unwrap_or_default();
+    const CORE_HISTORY_FIELDS: &[&str] = &[
+        "status",
+        "resolution",
+        "handler_id",
+        "priority",
+        "severity",
+        "reproducibility",
+        "summary",
+        "description",
+        "steps_to_reproduce",
+        "additional_information",
+        "category",
+        "category_id",
+        "project",
+        "project_id",
+        "version",
+        "target_version",
+        "fixed_in_version",
+        "os",
+        "os_build",
+        "platform",
+        "build",
+        "due_date",
+        "sticky",
+        "view_state",
+        "bugnote_added",
+        "bugnote_deleted",
+        "bugnote_updated",
+        "relationship_added",
+        "relationship_deleted",
+        "file_added",
+        "file_deleted",
+        "monitor_added",
+        "monitor_deleted",
+        "tag_attached",
+        "tag_detached",
+    ];
     let hidden_cf_names: std::collections::HashSet<&str> = custom_fields
         .iter()
-        .filter(|cf| eff < cf.access_level_r)
+        .filter(|cf| {
+            eff < cf.access_level_r
+                && !CORE_HISTORY_FIELDS.contains(&cf.name.trim().to_lowercase().as_str())
+        })
         .map(|cf| cf.name.as_str())
         .collect();
     history.retain(|h| !hidden_cf_names.contains(h.field_name.as_str()));

@@ -1083,10 +1083,14 @@ pub fn render_status_change_form(
                 .get(&cf.id)
                 .map(|s| s.as_str())
                 .unwrap_or(cf.default_value.as_str());
+            // Do not set HTML required attribute on the status form input: the status form handles
+            // multiple transition targets (e.g. assigning or resolving), so client-side required
+            // attributes would block intermediate non-resolve status changes. The server validates
+            // requirements based on the chosen target status.
             let input_html = crate::views::custom_fields::render_custom_field_input(
                 cf,
                 current_val,
-                is_req,
+                false,
                 !can_write,
                 versions,
                 categories,

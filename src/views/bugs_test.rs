@@ -698,6 +698,8 @@ fn test_render_status_change_form_with_resolve_close_custom_fields() {
     assert!(form_dev.contains("Root Cause *"));
     assert!(form_dev.contains(r#"name="custom_field_101""#));
     assert!(!form_dev.contains("Close Signoff"));
+    // Inputs must NOT have native 'required' attribute to avoid blocking intermediate status changes
+    assert!(!form_dev.contains(" required"));
 
     // Manager (eff 70) viewing unresolved bug:
     // Can resolve and close, so both fields are rendered
@@ -706,4 +708,5 @@ fn test_render_status_change_form_with_resolve_close_custom_fields() {
     assert!(form_mgr.contains("Root Cause *"));
     assert!(form_mgr.contains("Close Signoff *"));
     assert!(form_mgr.contains(r#"name="custom_field_102""#));
+    assert!(!form_mgr.contains(" required"));
 }

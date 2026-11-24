@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::{Bug, RevisionType};
+use crate::models::{Bug, Project, RevisionType};
 
 #[test]
 fn test_labels() {
@@ -997,4 +997,208 @@ fn test_render_conflict_page() {
     assert!(html.contains(r#"href="/view_bug_page/42""#));
     assert!(html.contains(r#"href="/update_bug_page/42""#));
     assert!(!html.contains("javascript:"));
+}
+
+#[test]
+fn test_render_bug_clone_and_move_pages_and_no_nested_forms() {
+    let mut ctx = dummy_ctx(1, 55);
+    ctx.active_project_id = 1;
+    ctx.visible_projects = vec![
+        (
+            Project {
+                id: 1,
+                name: "Project A".to_string(),
+                status: 10,
+                enabled: 1,
+                view_state: 10,
+                access_min: 10,
+                description: "".to_string(),
+                category_id: 1,
+                inherit_global: 1,
+            },
+            55,
+        ),
+        (
+            Project {
+                id: 2,
+                name: "Project B".to_string(),
+                status: 10,
+                enabled: 1,
+                view_state: 10,
+                access_min: 10,
+                description: "".to_string(),
+                category_id: 1,
+                inherit_global: 1,
+            },
+            55,
+        ),
+    ];
+
+    let full = BugFull {
+        bug: Bug {
+            id: 42,
+            project_id: 1,
+            reporter_id: 1,
+            handler_id: 1,
+            duplicate_id: 0,
+            priority: 30,
+            severity: 50,
+            reproducibility: 10,
+            status: 10,
+            resolution: 10,
+            category_id: 1,
+            date_submitted: 1700000000,
+            last_updated: 1700000000,
+            os: "Linux".to_string(),
+            os_build: "".to_string(),
+            platform: "x86_64".to_string(),
+            version: "1.0".to_string(),
+            fixed_in_version: "".to_string(),
+            target_version: "".to_string(),
+            build: "".to_string(),
+            summary: "Clone and Move Test Bug".to_string(),
+            view_state: 10,
+            sticky: 0,
+            due_date: 0,
+        },
+        description: "Test description".to_string(),
+        steps_to_reproduce: "".to_string(),
+        additional_information: "".to_string(),
+    };
+
+    let target_projects = vec![
+        (1, "Project A".to_string(), true),
+        (2, "Project B".to_string(), false),
+    ];
+
+    // 1. Clone page
+    let Html(clone_html) = render_bug_clone_page(
+        &ctx,
+        &full,
+        "Project A",
+        &target_projects,
+        None,
+        Some("Ready to clone"),
+    );
+    assert!(clone_html.contains("Clone Issue #0000042"));
+    assert!(clone_html.contains(r#"action="/bug_clone/42""#));
+    assert!(clone_html.contains(r#"name="target_project_id""#));
+    assert!(clone_html.contains(r#"name="copy_relationships""#));
+    assert!(clone_html.contains(r#"name="copy_files""#));
+    assert_no_nested_forms(&clone_html);
+
+    // 2. Move page
+    let Html(move_html) =
+        render_bug_move_page(&ctx, &full, "Project A", &target_projects[1..], None, None);
+    assert!(move_html.contains("Move Issue #0000042"));
+    assert!(move_html.contains(r#"action="/bug_move/42""#));
+    assert!(move_html.contains(r#"name="target_project_id""#));
+    assert_no_nested_forms(&move_html);
+}
+
+#[test]
+fn test_render_view_all_bug_page_bulk_action_bar_and_no_nested_forms() {
+    let mut ctx = dummy_ctx(1, 90);
+    ctx.active_project_id = 1;
+    ctx.visible_projects = vec![(
+        Project {
+            id: 1,
+            name: "Project A".to_string(),
+            status: 10,
+            enabled: 1,
+            view_state: 10,
+            access_min: 10,
+            description: "".to_string(),
+            category_id: 1,
+            inherit_global: 1,
+        },
+        90,
+    )];
+
+    let sample_bug = Bug {
+        id: 100,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 10,
+        resolution: 10,
+        category_id: 1,
+        date_submitted: 1700000000,
+        last_updated: 1700000000,
+        os: "".to_string(),
+        os_build: "".to_string(),
+        platform: "".to_string(),
+        version: "".to_string(),
+        fixed_in_version: "".to_string(),
+        target_version: "".to_string(),
+        build: "".to_string(),
+        summary: "Sample Issue for Bulk Action".to_string(),
+        view_state: 10,
+        sticky: 0,
+        due_date: 0,
+    };
+
+    let q = ListBugsQuery::default();
+    let filter = BugFilter::default();
+
+    let saved_filters = vec![SavedFilter {
+        id: 5,
+        user_id: 1,
+        project_id: 1,
+        name: "My Filter".to_string(),
+        filter_string: "".to_string(),
+        is_public: 0,
+    }];
+
+    let Html(html) = render_view_all_bug_page(
+        &ctx,
+        &[sample_bug],
+        1,
+        1,
+        10,
+        &filter,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &saved_filters,
+        None,
+        None,
+        &q,
+    );
+
+    // Verify checkbox column and select all checkbox
+    assert!(html.contains(r#"id="select_all_bugs""#));
+    assert!(html.contains(r#"name="bug_arr" value="100""#));
+
+    // Verify bulk action bar
+    assert!(html.contains(r#"action="/bug_actiongroup""#));
+    assert!(html.contains(r#"name="action" id="bulk_action_select""#));
+    assert!(html.contains(r#"value="MOVE">Move</option>"#));
+    assert!(html.contains(r#"value="COPY">Copy</option>"#));
+    assert!(html.contains(r#"value="ASSIGN">Assign</option>"#));
+    assert!(html.contains(r#"value="CLOSE">Close</option>"#));
+    assert!(html.contains(r#"value="DELETE">Delete</option>"#));
+    assert!(html.contains(r#"value="RESOLVE">Resolve</option>"#));
+    assert!(html.contains(r#"value="UP_STATUS">Update Status</option>"#));
+    assert!(html.contains(r#"value="UP_PRIOR">Update Priority</option>"#));
+    assert!(html.contains(r#"value="UP_SEV">Update Severity</option>"#));
+    assert!(html.contains(r#"value="UP_CATEGORY">Update Category</option>"#));
+    assert!(html.contains(r#"value="UP_TARGET_VERSION">Update Target Version</option>"#));
+    assert!(html.contains(r#"value="UP_DUE_DATE">Update Due Date</option>"#));
+    assert!(html.contains(r#"value="VIEW_STATUS">Update View Status</option>"#));
+    assert!(html.contains(r#"value="SET_STICKY">Set Sticky</option>"#));
+    assert!(html.contains(r#"value="ADD_NOTE">Add Note</option>"#));
+    assert!(html.contains(r#"value="ATTACH_TAGS">Attach Tags</option>"#));
+
+    // Critical check: Ensure NO nested forms exist!
+    assert_no_nested_forms(&html);
+}
 }

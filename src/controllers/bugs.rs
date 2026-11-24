@@ -2,7 +2,7 @@ use super::{sanitize_error_message, url_encode};
 use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::models::{
-    clamp_per_page, sort_bugs, BugFilter, BugUpdate, CustomFieldType, ListBugsQuery,
+    clamp_per_page, sort_bugs, BugFilter, BugUpdate, CustomFieldType, ListBugsQuery, User,
 };
 use crate::views;
 use axum::body::Bytes;
@@ -13,6 +13,55 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+
+pub fn url_decode(s: &str) -> String {
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut chars = s.bytes();
+    while let Some(b) = chars.next() {
+        match b {
+            b'+' => bytes.push(b' '),
+            b'%' => {
+                let h1 = chars.next();
+                let h2 = chars.next();
+                if let (Some(c1), Some(c2)) = (h1, h2) {
+                    let hex = [c1, c2];
+                    if let Ok(s_hex) = std::str::from_utf8(&hex) {
+                        if let Ok(val) = u8::from_str_radix(s_hex, 16) {
+                            bytes.push(val);
+                            continue;
+                        }
+                    }
+                    bytes.push(b'%');
+                    bytes.push(c1);
+                    bytes.push(c2);
+                } else {
+                    bytes.push(b'%');
+                    if let Some(c) = h1 {
+                        bytes.push(c);
+                    }
+                }
+            }
+            _ => bytes.push(b),
+        }
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+pub fn parse_urlencoded_form(body: &[u8]) -> Vec<(String, String)> {
+    let s = String::from_utf8_lossy(body);
+    let mut pairs = Vec::new();
+    for part in s.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = part.split_once('=') {
+            pairs.push((url_decode(k), url_decode(v)));
+        } else {
+            pairs.push((url_decode(part), String::new()));
+        }
+    }
+    pairs
+}
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
@@ -167,13 +216,19 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
 
 pub fn router() -> Router<Db> {
     let upload_limit = max_file_size()
+        .saturating_mul(10)
         .saturating_add(2 * 1024 * 1024)
-        .max(10 * 1024 * 1024);
+        .max(25 * 1024 * 1024);
     Router::new()
         .route("/view_all_bug_page", get(view_all_bug_page))
         .route("/view_bug_page/:id", get(view_bug_page))
         .route("/bug_report_page", get(bug_report_page))
-        .route("/bug_report", post(bug_report))
+        .route(
+            "/bug_report",
+            post(bug_report).layer(DefaultBodyLimit::max(upload_limit)),
+        )
+        .route("/bug_reminder_page/:id", get(bug_reminder_page))
+        .route("/bug_reminder/:id", post(bug_reminder))
         .route("/update_bug_page/:id", get(update_bug_page))
         .route("/update_bug/:id", post(update_bug))
         .route("/bug_clone_page/:id", get(bug_clone_page))
@@ -595,14 +650,56 @@ pub async fn bug_report_page(
 pub async fn bug_report(
     State(db): State<Db>,
     ctx: AuthContext,
-    axum::Form(form_data): axum::Form<Vec<(String, String)>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
+    let is_multipart = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("multipart/form-data"))
+        .unwrap_or(false);
+
+    let (form_data, uploaded_files) = if is_multipart {
+        parse_multipart_data(&headers, &body)
+    } else {
+        (parse_urlencoded_form(&body), Vec::new())
+    };
+
+    if uploaded_files.len() > 10 {
+        return Redirect::to(&format!(
+            "/bug_report_page?err={}",
+            url_encode("Maximum 10 files allowed per upload.")
+        ))
+        .into_response();
+    }
+
+    let max_bytes = max_file_size();
+
+    for f in &uploaded_files {
+        if f.data.len() > max_bytes {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Html("File exceeds maximum allowed size".to_string()),
+            )
+                .into_response();
+        }
+        if let Err(e) = validate_attachment_filename(&f.filename) {
+            return Redirect::to(&format!(
+                "/bug_report_page?err={}",
+                url_encode(&sanitize_error_message(&e))
+            ))
+            .into_response();
+        }
+    }
+
     let mut form_map: HashMap<String, Vec<String>> = HashMap::new();
     for (k, v) in form_data {
         form_map.entry(k).or_default().push(v);
     }
 
-    let project_id: i64 = match get_single_val(&form_map, "project_id").and_then(|v| v.parse().ok())
+    let project_id: i64 = match get_single_val(&form_map, "project_id")
+        .and_then(|v| v.parse().ok())
+        .or((ctx.active_project_id > 0).then_some(ctx.active_project_id))
     {
         Some(pid) => pid,
         None => return Redirect::to("/bug_report_page?err=Invalid+project").into_response(),
@@ -745,7 +842,35 @@ pub async fn bug_report(
         }
     }
 
-    Redirect::to(&format!("/view_bug_page/{}", bug_id)).into_response()
+    let dir = upload_dir();
+    let mut attach_errors = Vec::new();
+    for f in uploaded_files {
+        if let Err(e) = db.add_bug_file(
+            bug_id,
+            ctx.user.id,
+            &f.filename,
+            &f.content_type,
+            f.data,
+            &dir,
+        ) {
+            attach_errors.push(format!("{}: {}", f.filename, e));
+        }
+    }
+
+    if !attach_errors.is_empty() {
+        let err_msg = format!(
+            "Issue created, but file errors: {}",
+            attach_errors.join("; ")
+        );
+        Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            bug_id,
+            url_encode(&sanitize_error_message(&err_msg))
+        ))
+        .into_response()
+    } else {
+        Redirect::to(&format!("/view_bug_page/{}", bug_id)).into_response()
+    }
 }
 
 pub async fn view_bug_page(
@@ -857,7 +982,7 @@ pub async fn view_bug_page(
     let cats = db
         .list_effective_categories(bug.project_id)
         .unwrap_or_default();
-    let monitors = db.list_bug_monitors(id).unwrap_or_default();
+    let monitors = db.list_bug_monitor_users(id).unwrap_or_default();
     let is_monitoring = monitors.iter().any(|u| u.id == ctx.user.id);
 
     // Quick Action Toolbar
@@ -893,6 +1018,13 @@ pub async fn view_bug_page(
     if can_move {
         actions_html.push_str(&format!(
             r#"<a class="btn btn-secondary btn-sm" href="/bug_move_page/{}">Move</a>"#,
+            bug.id
+        ));
+    }
+
+    if eff >= 55 {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-secondary btn-sm" href="/bug_reminder_page/{}">Send a Reminder</a>"#,
             bug.id
         ));
     }
@@ -1058,6 +1190,7 @@ pub async fn view_bug_page(
     }
 
     let mut files_html = String::new();
+    let dir = upload_dir();
     if files.is_empty() {
         files_html.push_str("<p>No attachments.</p>");
     } else {
@@ -1071,9 +1204,48 @@ pub async fn view_bug_page(
             } else {
                 String::new()
             };
+
+            let ext = std::path::Path::new(&f.filename)
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+
+            let is_safe_image =
+                matches!(
+                    f.file_type.to_ascii_lowercase().as_str(),
+                    "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                ) && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp");
+
+            let is_preview_text = matches!(
+                ext.as_str(),
+                "txt" | "log" | "diff" | "patch" | "json" | "md" | "csv" | "toml" | "yaml" | "yml"
+            ) && f.filesize <= 65536;
+
+            let text_bytes = if is_preview_text {
+                db.get_bug_file(f.id, &dir)
+                    .ok()
+                    .flatten()
+                    .map(|(_, bytes)| bytes)
+            } else {
+                None
+            };
+            let text_content = text_bytes
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok());
+            let preview_html = views::bugs::render_file_preview_html(
+                f.id,
+                &f.filename,
+                is_safe_image,
+                text_content,
+            );
+
             files_html.push_str(&format!(
                 r#"<tr>
-                    <td><a href="/file/bug/{}/{}">{}</a></td>
+                    <td>
+                        <a href="/file/bug/{}/{}">{}</a>
+                        {}
+                    </td>
                     <td>{} bytes</td>
                     <td>{}</td>
                     <td>{}</td>
@@ -1081,6 +1253,7 @@ pub async fn view_bug_page(
                 f.id,
                 views::html_escape(&f.filename),
                 views::html_escape(&f.filename),
+                preview_html,
                 f.filesize,
                 views::html_escape(&f.file_type),
                 del_btn
@@ -1090,13 +1263,7 @@ pub async fn view_bug_page(
     }
 
     let upload_form_html = if eff >= 25 {
-        format!(
-            r#"<form method="POST" action="/bug_file_add/{}" enctype="multipart/form-data" style="margin-top:10px; display:flex; gap:8px; align-items:center;">
-                <input type="file" name="file" required>
-                <button type="submit" class="btn btn-secondary btn-sm">Upload File</button>
-            </form>"#,
-            bug.id
-        )
+        views::bugs::render_upload_form_html(bug.id)
     } else {
         String::new()
     };
@@ -1211,6 +1378,18 @@ pub async fn view_bug_page(
         String::new()
     };
 
+    let monitors_html = if eff >= 55 {
+        views::bugs::render_monitors_html(&monitors, bug.id)
+    } else {
+        String::new()
+    };
+
+    let monitor_form_html = if eff >= 55 {
+        views::bugs::render_monitor_form_html(bug.id)
+    } else {
+        String::new()
+    };
+
     let mut categories_map: HashMap<i64, String> = HashMap::new();
     if let Ok(cats) = db.list_all_categories() {
         for (cid, cname) in cats {
@@ -1235,6 +1414,8 @@ pub async fn view_bug_page(
         &upload_form_html,
         &notes_html,
         &note_form_html,
+        &monitors_html,
+        &monitor_form_html,
         &history_html,
         jira_link.as_ref(),
         &jira_section_html,
@@ -2180,10 +2361,69 @@ pub async fn bug_stick(State(db): State<Db>, ctx: AuthContext, Path(id): Path<i6
     Redirect::to(&format!("/view_bug_page/{}", id)).into_response()
 }
 
+enum ResolveMonitorTargetError {
+    Forbidden(&'static str),
+    RedirectError(String),
+}
+
+fn resolve_monitor_target(
+    db: &Db,
+    ctx: &AuthContext,
+    eff: i32,
+    body: &[u8],
+) -> Result<User, ResolveMonitorTargetError> {
+    let form: Vec<(String, String)> = parse_urlencoded_form(body);
+    let target_username = form
+        .iter()
+        .find(|(k, _)| k == "username")
+        .map(|(_, v)| v.trim())
+        .filter(|s| !s.is_empty());
+    let target_user_id = form
+        .iter()
+        .find(|(k, _)| k == "user_id")
+        .and_then(|(_, v)| v.trim().parse::<i64>().ok());
+
+    let is_targeting_other = match (target_username, target_user_id) {
+        (Some(uname), _) if uname != ctx.user.username => true,
+        (None, Some(uid)) if uid != ctx.user.id => true,
+        _ => false,
+    };
+
+    if is_targeting_other && eff < 55 {
+        return Err(ResolveMonitorTargetError::Forbidden(
+            "Developer access required to manage monitors for other users.",
+        ));
+    }
+
+    match (target_username, target_user_id) {
+        (Some(uname), _) => match db.get_user_by_username(uname) {
+            Ok(Some(u)) => Ok(u),
+            _ => Err(ResolveMonitorTargetError::RedirectError(
+                "User not found".to_string(),
+            )),
+        },
+        (None, Some(uid)) => match db.get_user_by_id(uid) {
+            Ok(Some(u)) => Ok(u),
+            _ => Err(ResolveMonitorTargetError::RedirectError(
+                "User not found".to_string(),
+            )),
+        },
+        (None, None) => {
+            if eff < 10 {
+                return Err(ResolveMonitorTargetError::Forbidden(
+                    "Insufficient access to monitor this issue.",
+                ));
+            }
+            Ok(ctx.user.clone())
+        }
+    }
+}
+
 pub async fn bug_monitor_add(
     State(db): State<Db>,
     ctx: AuthContext,
     Path(bug_id): Path<i64>,
+    body: Bytes,
 ) -> Response {
     let bug = match db.get_bug(bug_id) {
         Ok(Some(b)) => b,
@@ -2195,7 +2435,52 @@ pub async fn bug_monitor_add(
     if !Db::can_view_bug(ctx.user.id, eff, &bug) {
         return forbidden(&ctx, "Insufficient access to monitor this issue.");
     }
-    let _ = db.add_bug_monitor(bug_id, ctx.user.id);
+
+    let target = match resolve_monitor_target(&db, &ctx, eff, &body) {
+        Ok(t) => t,
+        Err(ResolveMonitorTargetError::Forbidden(msg)) => return forbidden(&ctx, msg),
+        Err(ResolveMonitorTargetError::RedirectError(msg)) => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err={}",
+                bug_id,
+                url_encode(&sanitize_error_message(&msg))
+            ))
+            .into_response()
+        }
+    };
+
+    if target.id != ctx.user.id {
+        if target.enabled == 0 {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err={}",
+                bug_id,
+                url_encode(&sanitize_error_message("User is disabled"))
+            ))
+            .into_response();
+        }
+        let target_eff = db
+            .effective_access_level(&target, bug.project_id)
+            .unwrap_or(0);
+        if !Db::can_view_bug(target.id, target_eff, &bug) {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err={}",
+                bug_id,
+                url_encode(&sanitize_error_message(
+                    "Target user does not have access to this issue"
+                ))
+            ))
+            .into_response();
+        }
+    }
+
+    if let Err(e) = db.add_bug_monitor_with_actor(bug_id, target.id, ctx.user.id) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            bug_id,
+            url_encode(&sanitize_error_message(&e.to_string()))
+        ))
+        .into_response();
+    }
     Redirect::to(&format!("/view_bug_page/{}?msg=Issue+monitored", bug_id)).into_response()
 }
 
@@ -2203,8 +2488,40 @@ pub async fn bug_monitor_delete(
     State(db): State<Db>,
     ctx: AuthContext,
     Path(bug_id): Path<i64>,
+    body: Bytes,
 ) -> Response {
-    let _ = db.remove_bug_monitor(bug_id, ctx.user.id);
+    let bug = match db.get_bug(bug_id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Insufficient access to view this issue.");
+    }
+
+    let target = match resolve_monitor_target(&db, &ctx, eff, &body) {
+        Ok(t) => t,
+        Err(ResolveMonitorTargetError::Forbidden(msg)) => return forbidden(&ctx, msg),
+        Err(ResolveMonitorTargetError::RedirectError(msg)) => {
+            return Redirect::to(&format!(
+                "/view_bug_page/{}?err={}",
+                bug_id,
+                url_encode(&sanitize_error_message(&msg))
+            ))
+            .into_response()
+        }
+    };
+
+    if let Err(e) = db.remove_bug_monitor_with_actor(bug_id, target.id, ctx.user.id) {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            bug_id,
+            url_encode(&sanitize_error_message(&e.to_string()))
+        ))
+        .into_response();
+    }
     Redirect::to(&format!(
         "/view_bug_page/{}?msg=Stopped+monitoring+issue",
         bug_id
@@ -2847,64 +3164,192 @@ pub async fn bug_relationship_delete(
     .into_response()
 }
 
-fn parse_multipart_file(headers: &HeaderMap, body: &[u8]) -> Option<(String, String, Vec<u8>)> {
-    let ct = headers.get(header::CONTENT_TYPE)?.to_str().ok()?;
-    let boundary = ct.split(';').find_map(|part| {
+pub fn validate_attachment_filename(filename: &str) -> Result<(), String> {
+    let raw_name = filename.trim().trim_end_matches('.');
+    if raw_name.is_empty() {
+        return Err("Filename cannot be empty".to_string());
+    }
+
+    let ext = std::path::Path::new(raw_name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if let Ok(allowed_env) = std::env::var("MANTIS_ALLOWED_FILES") {
+        let allowed_list: Vec<String> = allowed_env
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !allowed_list.is_empty() {
+            if ext.is_empty() || !allowed_list.iter().any(|allowed| allowed == &ext) {
+                return Err(format!("File extension '{}' is not allowed", ext));
+            }
+            return Ok(());
+        }
+    }
+
+    let disallowed_list: Vec<String> = match std::env::var("MANTIS_DISALLOWED_FILES") {
+        Ok(disallowed_env) => disallowed_env
+            .split(',')
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Err(_) => vec![
+            "svg", "svgz", "html", "htm", "xhtml", "js", "mjs", "exe", "bat", "cmd", "sh", "ps1",
+            "php", "phtml", "xml", "xht", "shtml", "hta", "vbs", "jar", "msi", "dll", "scr", "com",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect(),
+    };
+
+    if !ext.is_empty() && disallowed_list.iter().any(|disallowed| disallowed == &ext) {
+        return Err(format!(
+            "File extension '{}' is not allowed for security reasons",
+            ext
+        ));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadedFile {
+    pub filename: String,
+    pub content_type: String,
+    pub data: Vec<u8>,
+}
+
+pub fn parse_multipart_data(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> (Vec<(String, String)>, Vec<UploadedFile>) {
+    let mut fields = Vec::new();
+    let mut files = Vec::new();
+
+    let ct = match headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(ct) => ct,
+        None => return (fields, files),
+    };
+
+    let boundary = match ct.split(';').find_map(|part| {
         let p = part.trim();
         p.strip_prefix("boundary=")
-            .map(|b| b.trim_matches('"').to_string())
-    })?;
+            .map(|b| b.trim_matches('"').trim_matches('\'').to_string())
+    }) {
+        Some(b) => b,
+        None => return (fields, files),
+    };
 
     let delimiter = format!("--{}", boundary);
     let delim_bytes = delimiter.as_bytes();
 
-    let start_idx = body
+    let mut cursor = 0;
+    while let Some(start_offset) = body[cursor..]
         .windows(delim_bytes.len())
-        .position(|w| w == delim_bytes)?;
-    let after_boundary = &body[start_idx + delim_bytes.len()..];
-    let after_boundary = after_boundary
-        .strip_prefix(b"\r\n")
-        .or_else(|| after_boundary.strip_prefix(b"\n"))?;
+        .position(|w| w == delim_bytes)
+    {
+        let part_start = cursor + start_offset + delim_bytes.len();
+        cursor = part_start;
 
-    let (part_headers_bytes, rest) =
-        if let Some(pos) = after_boundary.windows(4).position(|w| w == b"\r\n\r\n") {
-            (&after_boundary[..pos], &after_boundary[pos + 4..])
-        } else {
-            let pos = after_boundary.windows(2).position(|w| w == b"\n\n")?;
-            (&after_boundary[..pos], &after_boundary[pos + 2..])
+        if body[cursor..].starts_with(b"--") {
+            break;
+        }
+
+        if body[cursor..].starts_with(b"\r\n") {
+            cursor += 2;
+        } else if body[cursor..].starts_with(b"\n") {
+            cursor += 1;
+        }
+
+        let next_boundary_offset = match body[cursor..]
+            .windows(delim_bytes.len())
+            .position(|w| w == delim_bytes)
+        {
+            Some(pos) => pos,
+            None => break,
         };
 
-    let part_headers = String::from_utf8_lossy(part_headers_bytes);
-    let mut filename = "attachment.bin".to_string();
-    let mut file_type = "application/octet-stream".to_string();
+        let part_data = &body[cursor..cursor + next_boundary_offset];
+        cursor += next_boundary_offset;
 
-    for line in part_headers.lines() {
-        let lower = line.to_ascii_lowercase();
-        if lower.starts_with("content-disposition:") {
-            for param in line.split(';') {
-                let p = param.trim();
-                if let Some(fname) = p.strip_prefix("filename=") {
-                    filename = fname.trim_matches('"').to_string();
+        let (header_bytes, mut content_bytes) =
+            if let Some(pos) = part_data.windows(4).position(|w| w == b"\r\n\r\n") {
+                (&part_data[..pos], &part_data[pos + 4..])
+            } else if let Some(pos) = part_data.windows(2).position(|w| w == b"\n\n") {
+                (&part_data[..pos], &part_data[pos + 2..])
+            } else {
+                continue;
+            };
+
+        if let Some(stripped) = content_bytes.strip_suffix(b"\r\n") {
+            content_bytes = stripped;
+        } else if let Some(stripped) = content_bytes.strip_suffix(b"\n") {
+            content_bytes = stripped;
+        }
+
+        let header_str = String::from_utf8_lossy(header_bytes);
+        let mut name: Option<String> = None;
+        let mut filename: Option<String> = None;
+        let mut content_type = "application/octet-stream".to_string();
+
+        for line in header_str.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("content-disposition:") {
+                for param in line.split(';') {
+                    let p = param.trim();
+                    if let Some(n) = p.strip_prefix("name=") {
+                        name = Some(n.trim_matches('"').trim_matches('\'').to_string());
+                    } else if let Some(f) = p.strip_prefix("filename=") {
+                        filename = Some(f.trim_matches('"').trim_matches('\'').to_string());
+                    }
+                }
+            } else if lower.starts_with("content-type:") {
+                if let Some((_, val)) = line.split_once(':') {
+                    content_type = val.trim().to_string();
                 }
             }
-        } else if let Some(val) = line.split_once(':').map(|(_, v)| v.trim()) {
-            if lower.starts_with("content-type:") {
-                file_type = val.to_string();
+        }
+
+        if let Some(fname) = filename {
+            let trimmed_fname = fname.trim();
+            if trimmed_fname.is_empty() && content_bytes.is_empty() {
+                continue;
             }
+            let safe_name = if trimmed_fname.is_empty() {
+                "attachment".to_string()
+            } else {
+                trimmed_fname.to_string()
+            };
+            files.push(UploadedFile {
+                filename: safe_name,
+                content_type,
+                data: content_bytes.to_vec(),
+            });
+        } else if let Some(n) = name {
+            let val = String::from_utf8_lossy(content_bytes).to_string();
+            fields.push((n, val));
         }
     }
 
-    let end_idx = rest
-        .windows(delim_bytes.len())
-        .position(|w| w == delim_bytes)?;
-    let mut content = &rest[..end_idx];
-    if let Some(stripped) = content.strip_suffix(b"\r\n") {
-        content = stripped;
-    } else if let Some(stripped) = content.strip_suffix(b"\n") {
-        content = stripped;
-    }
+    (fields, files)
+}
 
-    Some((filename, file_type, content.to_vec()))
+#[cfg(test)]
+pub(crate) fn parse_multipart_file(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<(String, String, Vec<u8>)> {
+    let (_, files) = parse_multipart_data(headers, body);
+    files
+        .into_iter()
+        .next()
+        .map(|f| (f.filename, f.content_type, f.data))
 }
 
 pub async fn bug_file_add(
@@ -2929,28 +3374,96 @@ pub async fn bug_file_add(
     let max_bytes = max_file_size();
     let dir = upload_dir();
 
-    if let Some((filename, content_type, data)) = parse_multipart_file(&headers, &body) {
-        if data.len() > max_bytes {
+    let (_, files) = parse_multipart_data(&headers, &body);
+
+    if files.is_empty() {
+        if body.len() > max_bytes {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Html("File exceeds maximum allowed size".to_string()),
             )
                 .into_response();
         }
-        let _ = db.add_bug_file(bug_id, ctx.user.id, &filename, &content_type, data, &dir);
-    } else if body.len() > max_bytes {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Html("File exceeds maximum allowed size".to_string()),
-        )
-            .into_response();
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            bug_id,
+            url_encode(&sanitize_error_message("No valid files uploaded"))
+        ))
+        .into_response();
     }
 
-    Redirect::to(&format!(
-        "/view_bug_page/{}?msg=Attachment+uploaded",
-        bug_id
-    ))
-    .into_response()
+    if files.len() > 10 {
+        return Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            bug_id,
+            url_encode("Maximum 10 files allowed per upload.")
+        ))
+        .into_response();
+    }
+
+    for f in &files {
+        if f.data.len() > max_bytes {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Html("File exceeds maximum allowed size".to_string()),
+            )
+                .into_response();
+        }
+    }
+
+    let mut saved_count = 0;
+    let mut errors = Vec::new();
+    for f in files {
+        if let Err(e) = validate_attachment_filename(&f.filename) {
+            errors.push(format!("{}: {}", f.filename, e));
+            continue;
+        }
+        match db.add_bug_file(
+            bug_id,
+            ctx.user.id,
+            &f.filename,
+            &f.content_type,
+            f.data,
+            &dir,
+        ) {
+            Ok(_) => saved_count += 1,
+            Err(e) => errors.push(format!("{}: {}", f.filename, e)),
+        }
+    }
+
+    if saved_count > 0 && errors.is_empty() {
+        let msg = if saved_count == 1 {
+            "Attachment uploaded".to_string()
+        } else {
+            format!("{} attachments uploaded", saved_count)
+        };
+        Redirect::to(&format!(
+            "/view_bug_page/{}?msg={}",
+            bug_id,
+            url_encode(&msg)
+        ))
+        .into_response()
+    } else if saved_count > 0 {
+        let msg = format!("{} uploaded, errors: {}", saved_count, errors.join("; "));
+        Redirect::to(&format!(
+            "/view_bug_page/{}?msg={}",
+            bug_id,
+            url_encode(&sanitize_error_message(&msg))
+        ))
+        .into_response()
+    } else {
+        let err = if errors.is_empty() {
+            "No files attached".to_string()
+        } else {
+            errors.join("; ")
+        };
+        Redirect::to(&format!(
+            "/view_bug_page/{}?err={}",
+            bug_id,
+            url_encode(&sanitize_error_message(&err))
+        ))
+        .into_response()
+    }
 }
 
 pub(crate) fn sanitize_download_filename(raw: &str) -> String {
@@ -2989,6 +3502,7 @@ pub async fn bug_file_download(
     State(db): State<Db>,
     ctx: AuthContext,
     Path((file_id, _filename)): Path<(i64, String)>,
+    Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let dir = upload_dir();
     let (meta, bytes) = match db.get_bug_file(file_id, &dir) {
@@ -3010,17 +3524,226 @@ pub async fn bug_file_download(
 
     let content_type = sanitize_content_type(&meta.file_type);
     let safe_filename = sanitize_download_filename(&meta.filename);
-    let disp = format!("attachment; filename=\"{}\"", safe_filename);
+
+    let ext = std::path::Path::new(&safe_filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let is_inline = query.get("inline").map(|v| v == "1").unwrap_or(false);
+    let safe_raster_mime = matches!(
+        content_type.to_ascii_lowercase().as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    ) && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp");
+
+    let disp = if is_inline && safe_raster_mime {
+        format!("inline; filename=\"{}\"", safe_filename)
+    } else {
+        format!("attachment; filename=\"{}\"", safe_filename)
+    };
 
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, content_type),
             (header::CONTENT_DISPOSITION, disp),
+            (
+                header::HeaderName::from_static("x-content-type-options"),
+                "nosniff".to_string(),
+            ),
         ],
         bytes,
     )
         .into_response()
+}
+
+pub async fn bug_reminder_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(query): Query<FlashQuery>,
+) -> Response {
+    let bug = match db.get_bug(id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if eff < 55 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Developer access required to send reminders.");
+    }
+
+    let all_users = db.list_users(None, true).unwrap_or_default();
+    let eligible_users: Vec<crate::models::User> = all_users
+        .into_iter()
+        .filter(|u| {
+            if u.enabled == 0 {
+                return false;
+            }
+            let u_eff = db.effective_access_level(u, bug.project_id).unwrap_or(0);
+            Db::can_view_bug(u.id, u_eff, &bug)
+        })
+        .collect();
+
+    views::bugs::render_bug_reminder_page(
+        &ctx,
+        &bug,
+        &eligible_users,
+        query.err.as_deref(),
+        query.msg.as_deref(),
+    )
+    .into_response()
+}
+
+pub async fn bug_reminder(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    axum::Form(form_data): axum::Form<Vec<(String, String)>>,
+) -> Response {
+    let bug = match db.get_bug(id) {
+        Ok(Some(b)) => b,
+        _ => return not_found(&ctx, "Issue not found."),
+    };
+    let eff = db
+        .effective_access_level(&ctx.user, bug.project_id)
+        .unwrap_or(0);
+    if eff < 55 || !Db::can_view_bug(ctx.user.id, eff, &bug) {
+        return forbidden(&ctx, "Developer access required to send reminders.");
+    }
+
+    let mut to_ids = Vec::new();
+    let mut body = String::new();
+    let mut store_as_note_opt = None;
+    let mut view_state = 10;
+    let mut add_monitors_opt = None;
+
+    for (k, v) in form_data {
+        match k.as_str() {
+            "to" | "to[]" => {
+                if let Ok(uid) = v.parse::<i64>() {
+                    to_ids.push(uid);
+                }
+            }
+            "body" | "bugnote_text" => {
+                body = v;
+            }
+            "store_as_note" => {
+                store_as_note_opt = Some(v == "1" || v == "true" || v == "on");
+            }
+            "view_state" => {
+                if let Ok(vs) = v.parse::<i32>() {
+                    view_state = if vs == 50 { 50 } else { 10 };
+                }
+            }
+            "private" => {
+                if v == "1" || v == "true" || v == "on" {
+                    view_state = 50;
+                }
+            }
+            "add_monitors" => {
+                add_monitors_opt = Some(v == "1" || v == "true" || v == "on");
+            }
+            _ => {}
+        }
+    }
+
+    let store_as_note = store_as_note_opt.unwrap_or(true);
+    let add_monitors = add_monitors_opt.unwrap_or(true);
+
+    to_ids.sort_unstable();
+    to_ids.dedup();
+
+    let trimmed_body = body.trim();
+    if trimmed_body.is_empty() {
+        return Redirect::to(&format!(
+            "/bug_reminder_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message("Reminder message cannot be empty"))
+        ))
+        .into_response();
+    }
+    if to_ids.is_empty() {
+        return Redirect::to(&format!(
+            "/bug_reminder_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message(
+                "At least one recipient must be selected"
+            ))
+        ))
+        .into_response();
+    }
+
+    let mut valid_recipients = Vec::new();
+    for uid in to_ids {
+        if let Ok(Some(u)) = db.get_user_by_id(uid) {
+            if u.enabled == 0 {
+                continue;
+            }
+            let u_eff = db.effective_access_level(&u, bug.project_id).unwrap_or(0);
+            if !Db::can_view_bug(u.id, u_eff, &bug) {
+                continue;
+            }
+            if view_state == 50 && u_eff < 55 {
+                continue;
+            }
+            valid_recipients.push(u);
+        }
+    }
+
+    if valid_recipients.is_empty() {
+        return Redirect::to(&format!(
+            "/bug_reminder_page/{}?err={}",
+            id,
+            url_encode(&sanitize_error_message("No eligible recipients selected"))
+        ))
+        .into_response();
+    }
+
+    let recipient_ids: Vec<i64> = valid_recipients.iter().map(|u| u.id).collect();
+
+    let proj_name = db
+        .get_project_by_id(bug.project_id)
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_default();
+    let subject = format!("[{} {:07}] Reminder: {}", proj_name, bug.id, bug.summary);
+    let recipients_str = valid_recipients
+        .iter()
+        .map(|u| u.username.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    {
+        let conn = db.conn();
+        let email_body = format!(
+            "The following reminder has been sent by {} to {}:\n\n{}\n\n{}",
+            ctx.user.username,
+            recipients_str,
+            trimmed_body,
+            db.build_mantis_email_body(&conn, id, "REMINDER", None)
+                .unwrap_or_default()
+        );
+
+        let min_access = if view_state == 50 { 55 } else { 10 };
+        db.notify_users(&conn, id, &recipient_ids, min_access, &subject, &email_body);
+    }
+
+    if store_as_note {
+        let note_text = format!("Reminder sent to {}:\n\n{}", recipients_str, trimmed_body);
+        let _ = db.add_bugnote_with_type(id, ctx.user.id, &note_text, view_state, 0, 1);
+    }
+
+    if add_monitors {
+        for u in &valid_recipients {
+            let _ = db.add_bug_monitor_with_actor(id, u.id, ctx.user.id);
+        }
+    }
+
+    Redirect::to(&format!("/view_bug_page/{}?msg=Reminder+sent", id)).into_response()
 }
 
 pub async fn bug_file_delete(

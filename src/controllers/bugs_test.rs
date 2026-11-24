@@ -316,3 +316,203 @@ fn test_bug_move_form_deserialize() {
     let form: BugMoveForm = serde_json::from_str(r#"{"target_project_id": 99}"#).unwrap();
     assert_eq!(form.target_project_id, 99);
 }
+
+#[test]
+fn test_validate_attachment_filename_default_rules() {
+    // Allowed file extensions
+    assert!(validate_attachment_filename("document.pdf").is_ok());
+    assert!(validate_attachment_filename("photo.png").is_ok());
+    assert!(validate_attachment_filename("archive.tar.gz").is_ok());
+    assert!(validate_attachment_filename("code.rs").is_ok());
+    assert!(validate_attachment_filename("README").is_ok());
+    assert!(validate_attachment_filename(".gitignore").is_ok());
+
+    // Disallowed file extensions (default dangerous extensions)
+    let dangerous = [
+        "image.svg",
+        "vector.svgz",
+        "index.html",
+        "page.htm",
+        "app.xhtml",
+        "script.js",
+        "module.mjs",
+        "malware.exe",
+        "run.bat",
+        "cmd.cmd",
+        "script.sh",
+        "payload.ps1",
+        "backdoor.php",
+        "shell.phtml",
+        "config.xml",
+        "doc.xht",
+        "include.shtml",
+        "app.hta",
+        "script.vbs",
+        "plugin.jar",
+        "setup.msi",
+        "driver.dll",
+        "screensaver.scr",
+        "command.com",
+    ];
+    for filename in &dangerous {
+        assert!(
+            validate_attachment_filename(filename).is_err(),
+            "Expected {} to be blocked",
+            filename
+        );
+    }
+
+    // Trailing dot bypass attempt
+    assert!(validate_attachment_filename("attack.html.").is_err());
+    assert!(validate_attachment_filename("malware.exe...").is_err());
+
+    // Case insensitivity
+    assert!(validate_attachment_filename("EVIL.EXE").is_err());
+    assert!(validate_attachment_filename("danger.SvG").is_err());
+    assert!(validate_attachment_filename("test.HTML").is_err());
+    assert!(validate_attachment_filename("photo.PNG").is_ok());
+
+    // Empty filename check
+    assert!(validate_attachment_filename("").is_err());
+    assert!(validate_attachment_filename("   ").is_err());
+}
+
+#[test]
+fn test_parse_urlencoded_form_and_decode() {
+    let raw = b"summary=Issue+title&desc=Hello%20World%21&flag=&special=%2B%26%3D";
+    let parsed = parse_urlencoded_form(raw);
+    assert_eq!(
+        parsed,
+        vec![
+            ("summary".to_string(), "Issue title".to_string()),
+            ("desc".to_string(), "Hello World!".to_string()),
+            ("flag".to_string(), "".to_string()),
+            ("special".to_string(), "+&=".to_string()),
+        ]
+    );
+
+    // Empty and malformed sequences
+    assert_eq!(parse_urlencoded_form(b""), Vec::<(String, String)>::new());
+    assert_eq!(url_decode("%2"), "%2");
+    assert_eq!(url_decode("%ZZ"), "%ZZ");
+    assert_eq!(url_decode("pure+text"), "pure text");
+}
+
+#[test]
+fn test_parse_multipart_data_multi_file_and_fields() {
+    let boundary = "---------------------------123456789012345";
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        format!("multipart/form-data; boundary={}", boundary)
+            .parse()
+            .unwrap(),
+    );
+
+    let body = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"summary\"\r\n\r\n\
+         Bug summary here\r\n\
+         --{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"notes.txt\"\r\n\
+         Content-Type: text/plain\r\n\r\n\
+         File 1 contents\r\n\
+         --{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"photo.png\"\r\n\
+         Content-Type: image/png\r\n\r\n\
+         PNG_MOCK_BYTES\r\n\
+         --{boundary}\r\n\
+         Content-Disposition: form-data; name=\"category_id\"\r\n\r\n\
+         1\r\n\
+         --{boundary}--\r\n",
+        boundary = boundary
+    );
+
+    let (fields, files) = parse_multipart_data(&headers, body.as_bytes());
+    assert_eq!(fields.len(), 2);
+    assert_eq!(
+        fields,
+        vec![
+            ("summary".to_string(), "Bug summary here".to_string()),
+            ("category_id".to_string(), "1".to_string()),
+        ]
+    );
+
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].filename, "notes.txt");
+    assert_eq!(files[0].content_type, "text/plain");
+    assert_eq!(files[0].data, b"File 1 contents");
+
+    assert_eq!(files[1].filename, "photo.png");
+    assert_eq!(files[1].content_type, "image/png");
+    assert_eq!(files[1].data, b"PNG_MOCK_BYTES");
+}
+
+#[test]
+fn test_parse_multipart_data_ignores_empty_files_and_missing_boundary() {
+    let boundary = "---------------------------9876543210";
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        format!("multipart/form-data; boundary={}", boundary)
+            .parse()
+            .unwrap(),
+    );
+
+    // Empty filename AND empty file data (unselected file input) should be ignored
+    let body = format!(
+        "--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"\"\r\n\
+         Content-Type: text/plain\r\n\r\n\
+         --{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"empty.txt\"\r\n\
+         Content-Type: text/plain\r\n\r\n\
+         --{boundary}--\r\n",
+        boundary = boundary
+    );
+
+    let (fields, files) = parse_multipart_data(&headers, body.as_bytes());
+    assert!(fields.is_empty());
+    // empty.txt is a real selected 0-byte file and must not be silently dropped
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].filename, "empty.txt");
+    assert!(files[0].data.is_empty());
+
+    // Missing header
+    let empty_headers = HeaderMap::new();
+    let (f, fl) = parse_multipart_data(&empty_headers, b"dummy");
+    assert!(f.is_empty());
+    assert!(fl.is_empty());
+}
+
+#[test]
+fn test_parse_multipart_data_preserves_more_than_ten_files_for_controller_validation() {
+    let boundary = "---------------------------1122334455";
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        format!("multipart/form-data; boundary={}", boundary)
+            .parse()
+            .unwrap(),
+    );
+
+    let mut body = String::new();
+    for i in 1..=12 {
+        body.push_str(&format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"file{i}.txt\"\r\n\
+             Content-Type: text/plain\r\n\r\n\
+             Content of file {i}\r\n",
+            boundary = boundary,
+            i = i
+        ));
+    }
+    body.push_str(&format!("--{boundary}--\r\n", boundary = boundary));
+
+    let (_, files) = parse_multipart_data(&headers, body.as_bytes());
+    assert_eq!(
+        files.len(),
+        12,
+        "parse_multipart_data must not truncate files, letting controllers validate limit"
+    );
+}

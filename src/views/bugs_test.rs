@@ -576,6 +576,8 @@ fn test_view_bug_page_build_due_date_overdue_and_sticky() {
         "",
         "",
         "",
+        "",
+        "",
         None,
         "",
         None,
@@ -1203,4 +1205,67 @@ fn test_render_view_all_bug_page_bulk_action_bar_and_no_nested_forms() {
 
     // Critical check: Ensure NO nested forms exist!
     assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_dropzone_and_upload_form_html() {
+    let dz = render_dropzone_html("test_suffix", "Drop your files here");
+    assert!(dz.contains("dropzone-test_suffix"));
+    assert!(dz.contains("file-input-test_suffix"));
+    assert!(dz.contains("file-list-test_suffix"));
+    assert!(dz.contains("Drop your files here"));
+
+    let upload_form = render_upload_form_html(123);
+    assert!(upload_form.contains(r#"action="/bug_file_add/123""#));
+    assert!(upload_form.contains(r#"enctype="multipart/form-data""#));
+    assert!(upload_form.contains("dropzone-view"));
+}
+
+#[test]
+fn test_render_monitors_and_monitor_form_html() {
+    let empty_monitors = render_monitors_html(&[], 42);
+    assert!(empty_monitors.contains("No users monitoring this issue."));
+
+    let user = User {
+        id: 7,
+        username: "mon_user".to_string(),
+        realname: "Monitor User".to_string(),
+        email: "mon@example.com".to_string(),
+        password: "hash".to_string(),
+        access_level: 55,
+        enabled: 1,
+        protected: 0,
+        login_count: 0,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: "".to_string(),
+        last_visit: 0,
+        date_created: 0,
+    };
+    let monitors_html = render_monitors_html(&[user], 42);
+    assert!(monitors_html.contains("mon_user"));
+    assert!(monitors_html.contains("Monitor User"));
+    assert!(monitors_html.contains(r#"action="/bug_monitor_delete/42""#));
+    assert!(monitors_html.contains(r#"value="7""#));
+
+    let form_html = render_monitor_form_html(42);
+    assert!(form_html.contains(r#"action="/bug_monitor_add/42""#));
+    assert!(form_html.contains(r#"name="username""#));
+}
+
+#[test]
+fn test_render_file_preview_html_and_reminder_badge() {
+    let img_preview = render_file_preview_html(99, "screenshot.png", true, None);
+    assert!(img_preview.contains(r#"src="/file/bug/99/screenshot.png?inline=1""#));
+
+    let text_preview =
+        render_file_preview_html(100, "build.log", false, Some("Line 1: Build started"));
+    assert!(text_preview.contains("<details"));
+    assert!(text_preview.contains("Line 1: Build started"));
+
+    let empty_preview = render_file_preview_html(101, "archive.zip", false, None);
+    assert!(empty_preview.is_empty());
+
+    assert_eq!(render_reminder_badge(0), "");
+    assert!(render_reminder_badge(1).contains("Reminder"));
 }

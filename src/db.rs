@@ -2882,8 +2882,10 @@ impl Db {
             let trimmed = note_text.trim();
             if !trimmed.is_empty() {
                 Some(
-                    Self::insert_bugnote_inner(&conn, self, bug_id, user_id, trimmed, 10, 0, false)
-                        .map_err(|e| e.to_string())?,
+                    Self::insert_bugnote_inner(
+                        &conn, self, bug_id, user_id, trimmed, 10, 0, 0, false,
+                    )
+                    .map_err(|e| e.to_string())?,
                 )
             } else {
                 None
@@ -3549,6 +3551,7 @@ impl Db {
         note: &str,
         view_state: i32,
         time_tracking: i32,
+        note_type: i32,
         notify: bool,
     ) -> rusqlite::Result<i64> {
         let now = std::time::SystemTime::now()
@@ -3567,8 +3570,16 @@ impl Db {
             "INSERT INTO mantis_bugnote_table (
                 bug_id, reporter_id, bugnote_text_id, view_state,
                 date_submitted, last_modified, note_type, note_attr, time_tracking
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, '', ?6)",
-            params![bug_id, reporter_id, text_id, view_state, now, safe_time],
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, '', ?7)",
+            params![
+                bug_id,
+                reporter_id,
+                text_id,
+                view_state,
+                now,
+                note_type,
+                safe_time
+            ],
         )?;
         let note_id = conn.last_insert_rowid();
 
@@ -3646,13 +3657,14 @@ impl Db {
         self.add_bugnote_with_time(bug_id, reporter_id, note, view_state, 0)
     }
 
-    pub fn add_bugnote_with_time(
+    pub fn add_bugnote_with_type(
         &self,
         bug_id: i64,
         reporter_id: i64,
         note: &str,
         view_state: i32,
         time_tracking: i32,
+        note_type: i32,
     ) -> Result<i64, String> {
         let trimmed = note.trim();
         if trimmed.is_empty() {
@@ -3667,6 +3679,7 @@ impl Db {
             return Err(format!("Bug {} not found", bug_id));
         }
 
+        let notify = note_type != 1;
         Self::insert_bugnote_inner(
             &conn,
             self,
@@ -3675,9 +3688,21 @@ impl Db {
             trimmed,
             view_state,
             time_tracking,
-            true,
+            note_type,
+            notify,
         )
         .map_err(|e| e.to_string())
+    }
+
+    pub fn add_bugnote_with_time(
+        &self,
+        bug_id: i64,
+        reporter_id: i64,
+        note: &str,
+        view_state: i32,
+        time_tracking: i32,
+    ) -> Result<i64, String> {
+        self.add_bugnote_with_type(bug_id, reporter_id, note, view_state, time_tracking, 0)
     }
 
     pub fn get_bugnote_by_id(&self, note_id: i64) -> rusqlite::Result<Option<Bugnote>> {
@@ -5234,7 +5259,12 @@ impl Db {
         Ok(())
     }
 
-    pub fn add_bug_monitor(&self, bug_id: i64, user_id: i64) -> Result<(), String> {
+    pub fn add_bug_monitor_with_actor(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        actor_id: i64,
+    ) -> Result<(), String> {
         let conn = self.conn();
         if Self::query_bug_by_id(&conn, bug_id)
             .map_err(|e| e.to_string())?
@@ -5242,24 +5272,87 @@ impl Db {
         {
             return Err(format!("Bug {} not found", bug_id));
         }
-        conn.execute(
-            "INSERT OR IGNORE INTO mantis_bug_monitor_table (user_id, bug_id) VALUES (?1, ?2)",
+        let target_user = Self::query_user_by_id(&conn, user_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("User {} not found", user_id))?;
+
+        let rows = conn
+            .execute(
+                "INSERT OR IGNORE INTO mantis_bug_monitor_table (user_id, bug_id) VALUES (?1, ?2)",
+                params![user_id, bug_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if rows > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let _ = conn.execute(
+                "UPDATE mantis_bug_table SET last_updated = ?1 WHERE id = ?2",
+                params![now, bug_id],
+            );
+            let _ = self.record_history(
+                &conn,
+                bug_id,
+                actor_id,
+                "monitor_added",
+                "",
+                &target_user.username,
+                12,
+            );
+        }
+        Ok(())
+    }
+
+    pub fn add_bug_monitor(&self, bug_id: i64, user_id: i64) -> Result<(), String> {
+        self.add_bug_monitor_with_actor(bug_id, user_id, user_id)
+    }
+
+    pub fn remove_bug_monitor_with_actor(
+        &self,
+        bug_id: i64,
+        user_id: i64,
+        actor_id: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        let target_user = Self::query_user_by_id(&conn, user_id).ok().flatten();
+        let username = target_user
+            .map(|u| u.username)
+            .unwrap_or_else(|| user_id.to_string());
+
+        let rows = conn.execute(
+            "DELETE FROM mantis_bug_monitor_table WHERE user_id = ?1 AND bug_id = ?2",
             params![user_id, bug_id],
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
+
+        if rows > 0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let _ = conn.execute(
+                "UPDATE mantis_bug_table SET last_updated = ?1 WHERE id = ?2",
+                params![now, bug_id],
+            );
+            let _ = self.record_history(
+                &conn,
+                bug_id,
+                actor_id,
+                "monitor_removed",
+                &username,
+                "",
+                13,
+            );
+        }
         Ok(())
     }
 
     pub fn remove_bug_monitor(&self, bug_id: i64, user_id: i64) -> rusqlite::Result<()> {
-        let conn = self.conn();
-        conn.execute(
-            "DELETE FROM mantis_bug_monitor_table WHERE user_id = ?1 AND bug_id = ?2",
-            params![user_id, bug_id],
-        )?;
-        Ok(())
+        self.remove_bug_monitor_with_actor(bug_id, user_id, user_id)
     }
 
-    pub fn list_bug_monitors(&self, bug_id: i64) -> rusqlite::Result<Vec<User>> {
+    pub fn list_bug_monitor_users(&self, bug_id: i64) -> rusqlite::Result<Vec<User>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected,
@@ -5360,7 +5453,7 @@ impl Db {
             }
             if let Some(mid) = filter.monitored_by {
                 if mid > 0 {
-                    let monitors = self.list_bug_monitors(b.id)?;
+                    let monitors = self.list_bug_monitor_users(b.id)?;
                     if !monitors.iter().any(|u| u.id == mid) {
                         continue;
                     }
@@ -5874,6 +5967,56 @@ impl Db {
             params![trimmed, clean_subject, body, now],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn notify_users(
+        &self,
+        conn: &Connection,
+        bug_id: i64,
+        user_ids: &[i64],
+        min_access: i32,
+        event_subject: &str,
+        event_body: &str,
+    ) {
+        let bug = match Self::query_bug_by_id(conn, bug_id) {
+            Ok(Some(b)) => b,
+            _ => return,
+        };
+
+        let needs_access_check = bug.view_state == 50 || min_access > 10;
+        let can_receive = |u: &User| -> bool {
+            if u.enabled == 0 || u.email.trim().is_empty() {
+                return false;
+            }
+            if needs_access_check {
+                let eff_access =
+                    Self::query_effective_access_level(conn, u, bug.project_id).unwrap_or(0);
+                if !Self::can_view_bug(u.id, eff_access, &bug) {
+                    return false;
+                }
+                if min_access > 10 && eff_access < min_access {
+                    return false;
+                }
+            }
+            true
+        };
+
+        let mut recipients = HashSet::new();
+        for &uid in user_ids {
+            if uid > 0 {
+                if let Ok(Some(u)) = Self::query_user_by_id(conn, uid) {
+                    if can_receive(&u) {
+                        recipients.insert(u.email.trim().to_string());
+                    }
+                }
+            }
+        }
+
+        let mut sorted: Vec<String> = recipients.into_iter().collect();
+        sorted.sort();
+        for addr in sorted {
+            let _ = self.enqueue_email(conn, &addr, event_subject, event_body);
+        }
     }
 
     pub fn notify_bug_event(

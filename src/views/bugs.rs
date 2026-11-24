@@ -156,6 +156,24 @@ pub fn render_bug_history_html(
             .unwrap_or_else(|| format!("user#{}", h.user_id));
         let change_desc = if h.type_ == 1 && h.field_name.is_empty() {
             "New Issue".to_string()
+        } else if h.field_name == "monitor_added" || (h.type_ == 12 && h.field_name.is_empty()) {
+            let target = if !h.new_value.is_empty() {
+                h.new_value.clone()
+            } else if let Ok(uid) = h.old_value.parse::<i64>() {
+                users_map.get(&uid).cloned().unwrap_or(h.old_value.clone())
+            } else {
+                h.old_value.clone()
+            };
+            format!("Monitor Added: {}", html_escape(&target))
+        } else if h.field_name == "monitor_removed" || (h.type_ == 13 && h.field_name.is_empty()) {
+            let target = if !h.old_value.is_empty() {
+                h.old_value.clone()
+            } else if let Ok(uid) = h.new_value.parse::<i64>() {
+                users_map.get(&uid).cloned().unwrap_or(h.new_value.clone())
+            } else {
+                h.new_value.clone()
+            };
+            format!("Monitor Removed: {}", html_escape(&target))
         } else {
             let formatted_old =
                 format_history_value(&h.field_name, &h.old_value, users_map, categories_map);
@@ -1100,12 +1118,14 @@ pub fn render_bug_report_page(
         .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
         .unwrap_or_default();
 
+    let dropzone_html = render_dropzone_html("report", "Drag and drop files here, or");
+
     let content = format!(
         r#"{}
         <div class="panel">
             <div class="panel-header">Enter Issue Details</div>
             <div class="panel-body">
-                <form method="POST" action="/bug_report">
+                <form method="POST" action="/bug_report" enctype="multipart/form-data">
                     <table class="form-table">
                         <tr>
                             <td class="label-col">Project</td>
@@ -1194,6 +1214,12 @@ pub fn render_bug_report_page(
                         </tr>
                         {}
                         <tr>
+                            <td class="label-col">Attach Files</td>
+                            <td class="input-col">
+                                {}
+                            </td>
+                        </tr>
+                        <tr>
                             <td class="label-col">View Status</td>
                             <td class="input-col">
                                 <select name="view_state">
@@ -1207,7 +1233,7 @@ pub fn render_bug_report_page(
                 </form>
             </div>
         </div>"#,
-        err_banner, proj_opts, cat_opts, ver_opts, cf_rows_html
+        err_banner, proj_opts, cat_opts, ver_opts, cf_rows_html, dropzone_html
     );
 
     render_layout("Report Issue", ctx, flash_msg, &content)
@@ -1329,6 +1355,142 @@ pub fn render_status_change_form(
     )
 }
 
+pub fn render_dropzone_html(id_suffix: &str, prompt: &str) -> String {
+    format!(
+        r#"<div id="dropzone-{id}" style="border:2px dashed #bbb; border-radius:4px; padding:12px; text-align:center; background:#fafafa; cursor:pointer;">
+            <input type="file" name="file" id="file-input-{id}" multiple style="display:none;">
+            <p style="margin:0; font-size:13px; color:#555;">{prompt} <span style="color:#0052cc; text-decoration:underline;">browse</span></p>
+            <div id="file-list-{id}" style="margin-top:6px; font-size:12px; color:#333;"></div>
+        </div>
+        <script>
+        (function() {{
+            var dz = document.getElementById('dropzone-{id}');
+            var inp = document.getElementById('file-input-{id}');
+            var fl = document.getElementById('file-list-{id}');
+            if (!dz || !inp) return;
+            dz.addEventListener('click', function(e) {{ if (e.target !== inp) inp.click(); }});
+            dz.addEventListener('dragover', function(e) {{ e.preventDefault(); dz.style.borderColor = '#0052cc'; dz.style.background = '#f0f5ff'; }});
+            dz.addEventListener('dragleave', function(e) {{ e.preventDefault(); dz.style.borderColor = '#bbb'; dz.style.background = '#fafafa'; }});
+            dz.addEventListener('drop', function(e) {{
+                e.preventDefault();
+                dz.style.borderColor = '#bbb';
+                dz.style.background = '#fafafa';
+                if (e.dataTransfer && e.dataTransfer.files.length > 0) {{
+                    inp.files = e.dataTransfer.files;
+                    updateList();
+                }}
+            }});
+            inp.addEventListener('change', updateList);
+            function updateList() {{
+                if (!fl) return;
+                var files = inp.files;
+                if (!files || files.length === 0) {{ fl.textContent = ''; return; }}
+                var names = [];
+                for (var i = 0; i < files.length; i++) {{
+                    names.push(files[i].name + ' (' + Math.round(files[i].size / 1024) + ' KB)');
+                }}
+                fl.textContent = 'Selected: ' + names.join(', ');
+            }}
+        }})();
+        </script>"#,
+        id = id_suffix,
+        prompt = prompt
+    )
+}
+
+pub fn render_upload_form_html(bug_id: i64) -> String {
+    let dropzone = render_dropzone_html("view", "Drag and drop files here to attach, or");
+    format!(
+        r#"<form method="POST" action="/bug_file_add/{}" enctype="multipart/form-data" style="margin-top:10px;">
+            {}
+            <div style="margin-top:8px;">
+                <button type="submit" class="btn btn-secondary btn-sm">Upload Files</button>
+            </div>
+        </form>"#,
+        bug_id, dropzone
+    )
+}
+
+pub fn render_monitors_html(monitors: &[User], bug_id: i64) -> String {
+    if monitors.is_empty() {
+        return "<p>No users monitoring this issue.</p>".to_string();
+    }
+    let mut out = String::from(
+        r#"<table class="data-table"><thead><tr><th>Username</th><th>Real Name</th><th>Actions</th></tr></thead><tbody>"#,
+    );
+    for m in monitors {
+        let remove_btn = format!(
+            r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
+                <input type="hidden" name="user_id" value="{}">
+                <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+            </form>"#,
+            bug_id, m.id
+        );
+        out.push_str(&format!(
+            r#"<tr>
+                <td>{}</td>
+                <td>{}</td>
+                <td>{}</td>
+            </tr>"#,
+            html_escape(&m.username),
+            html_escape(&m.realname),
+            remove_btn
+        ));
+    }
+    out.push_str("</tbody></table>");
+    out
+}
+
+pub fn render_monitor_form_html(bug_id: i64) -> String {
+    format!(
+        r#"<form method="POST" action="/bug_monitor_add/{}" style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+            <input type="text" name="username" placeholder="Username" style="max-width:200px;" required>
+            <button type="submit" class="btn btn-secondary btn-sm">Add Monitor</button>
+        </form>"#,
+        bug_id
+    )
+}
+
+pub fn render_file_preview_html(
+    file_id: i64,
+    filename: &str,
+    is_safe_image: bool,
+    text_content: Option<&str>,
+) -> String {
+    if is_safe_image {
+        format!(
+            r#"<div style="margin-top:6px;">
+                <a href="/file/bug/{}/{}">
+                    <img src="/file/bug/{}/{}?inline=1" alt="{}" style="max-width:150px; max-height:150px; object-fit:contain; border:1px solid #ddd; border-radius:4px; display:block;">
+                </a>
+            </div>"#,
+            file_id,
+            html_escape(filename),
+            file_id,
+            html_escape(filename),
+            html_escape(filename)
+        )
+    } else if let Some(text) = text_content {
+        format!(
+            r#"<details style="margin-top:6px;">
+                <summary style="cursor:pointer; color:#0052cc; font-size:12px;">Preview</summary>
+                <pre style="background:#f8f9fa; border:1px solid #e9ecef; border-radius:4px; padding:8px; margin-top:4px; max-height:200px; overflow:auto; font-size:12px; font-family:monospace; white-space:pre-wrap; word-break:break-all;">{}</pre>
+            </details>"#,
+            html_escape(text)
+        )
+    } else {
+        String::new()
+    }
+}
+
+pub fn render_reminder_badge(note_type: i32) -> &'static str {
+    if note_type == 1 {
+        r#" <span class="badge" style="background:#17a2b8; color:#fff; font-size:10px; font-weight:bold; padding:2px 5px; border-radius:3px;">Reminder</span>"#
+    } else {
+        ""
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_view_bug_page(
     ctx: &AuthContext,
@@ -1346,6 +1508,8 @@ pub fn render_view_bug_page(
     upload_form_html: &str,
     notes_html: &str,
     note_form_html: &str,
+    monitors_html: &str,
+    monitor_form_html: &str,
     history_html: &str,
     jira_link: Option<&JiraLink>,
     jira_section_html: &str,
@@ -1550,6 +1714,14 @@ pub fn render_view_bug_page(
         </div>
 
         <div class="panel">
+            <div class="panel-header">Users Monitoring This Issue</div>
+            <div class="panel-body">
+                {}
+                {}
+            </div>
+        </div>
+
+        <div class="panel">
             <div class="panel-header">Issue History</div>
             <div class="panel-body">
                 {}
@@ -1597,6 +1769,8 @@ pub fn render_view_bug_page(
         upload_form_html,
         notes_html,
         note_form_html,
+        monitors_html,
+        monitor_form_html,
         history_html,
         jira_section_html
     );
@@ -1876,11 +2050,12 @@ pub fn render_bugnotes_table(
         }
 
         let actions_html = actions.join(" ");
+        let reminder_badge = render_reminder_badge(n.note_type);
 
         html.push_str(&format!(
             r#"<tr>
                 <td style="width:180px; background:#f2f5f8;">
-                    <strong>{}</strong><br>
+                    <strong>{}</strong>{}<br>
                     <span style="font-size:11px; color:#666;">{}</span>
                 </td>
                 <td style="white-space:pre-wrap;">{}</td>
@@ -1889,6 +2064,7 @@ pub fn render_bugnotes_table(
                 <td style="width:260px;">{}</td>
             </tr>"#,
             html_escape(&author),
+            reminder_badge,
             format_timestamp(n.date_submitted),
             html_escape(&n.note),
             time_str,
@@ -1942,6 +2118,106 @@ pub fn render_bugnote_edit_page(
         &format!("Edit Bugnote #{:07}", note.id),
         ctx,
         None,
+        &content,
+    )
+}
+
+pub fn render_bug_reminder_page(
+    ctx: &AuthContext,
+    bug: &Bug,
+    eligible_users: &[User],
+    flash_err: Option<&str>,
+    flash_msg: Option<&str>,
+) -> Html<String> {
+    let err_banner = flash_err
+        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
+
+    let mut user_options = String::new();
+    for u in eligible_users {
+        let display = if !u.realname.trim().is_empty() {
+            format!("{} ({})", u.username, u.realname)
+        } else {
+            u.username.clone()
+        };
+        user_options.push_str(&format!(
+            r#"<option value="{}">{}</option>"#,
+            u.id,
+            html_escape(&display)
+        ));
+    }
+
+    let content = format!(
+        r#"{}
+        <div class="panel">
+            <div class="panel-header">Send a Reminder for Issue #{:07}: {}</div>
+            <div class="panel-body">
+                <form method="POST" action="/bug_reminder/{}">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Recipient(s) *</td>
+                            <td class="input-col">
+                                <select name="to" multiple size="8" style="min-width:280px; width:100%;" required>
+                                    {}
+                                </select>
+                                <span style="font-size:11px; color:#666; display:block; margin-top:4px;">Hold Ctrl/Cmd to select multiple recipients.</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Reminder Message *</td>
+                            <td class="input-col">
+                                <textarea name="body" rows="6" style="width:100%;" required placeholder="Enter reminder message here..."></textarea>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Store as Note</td>
+                            <td class="input-col">
+                                <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+                                    <input type="hidden" name="store_as_note" value="0">
+                                    <input type="checkbox" name="store_as_note" value="1" checked>
+                                    <span>Store reminder as an issue note</span>
+                                </label>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">View Status</td>
+                            <td class="input-col">
+                                <select name="view_state" style="width:auto;">
+                                    <option value="10" selected>public</option>
+                                    <option value="50">private</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Add to Monitors</td>
+                            <td class="input-col">
+                                <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+                                    <input type="hidden" name="add_monitors" value="0">
+                                    <input type="checkbox" name="add_monitors" value="1" checked>
+                                    <span>Add recipients to monitoring list</span>
+                                </label>
+                            </td>
+                        </tr>
+                    </table>
+                    <div style="margin-top:12px; display:flex; gap:8px;">
+                        <button type="submit" class="btn">Send Reminder</button>
+                        <a href="/view_bug_page/{}" class="btn btn-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>"#,
+        err_banner,
+        bug.id,
+        html_escape(&bug.summary),
+        bug.id,
+        user_options,
+        bug.id
+    );
+
+    render_layout(
+        &format!("Send Reminder for Issue #{:07}", bug.id),
+        ctx,
+        flash_msg,
         &content,
     )
 }

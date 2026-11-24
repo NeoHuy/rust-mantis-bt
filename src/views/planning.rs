@@ -1,7 +1,7 @@
 use crate::auth::AuthContext;
 use crate::models::{
     Bug, BugPriority, BugResolution, BugSeverity, BugStatus, EmailMessage, NewsItem,
-    TimeTrackingEntry, ViewState,
+    RoadmapVersionGroup, TimeTrackingEntry, ViewState,
 };
 use crate::views::layout::render_layout;
 use crate::views::{format_timestamp, html_escape, render_status_badge};
@@ -32,49 +32,60 @@ fn resolution_label(v: i32) -> &'static str {
 
 pub fn render_roadmap_page(
     ctx: &AuthContext,
-    by_target: &BTreeMap<String, Vec<Bug>>,
+    version_groups: &[RoadmapVersionGroup],
     users_map: &HashMap<i64, String>,
 ) -> Html<String> {
     let mut sections_html = String::new();
-    if by_target.is_empty() {
+    if version_groups.is_empty() {
         sections_html.push_str("<p>No roadmap items with a Target Version found.</p>");
     } else {
-        for (ver, items) in by_target {
-            let total = items.len();
-            let resolved = items.iter().filter(|b| b.status >= 80).count();
+        for group in version_groups {
+            let total = group.bugs.len();
+            let resolved = group.bugs.iter().filter(|b| b.status >= 80).count();
             let pct = (resolved * 100).checked_div(total).unwrap_or(0);
+            let badge = if group.released {
+                r#" <span class="badge badge-success" style="margin-left:8px;">Released</span>"#
+            } else {
+                r#" <span class="badge badge-warning" style="margin-left:8px;">Planned</span>"#
+            };
 
             let mut list_html = String::new();
-            for b in items {
-                let handler_str = if b.handler_id > 0 {
-                    format!(
-                        " ({})",
-                        html_escape(
-                            users_map
-                                .get(&b.handler_id)
-                                .map(|s| s.as_str())
-                                .unwrap_or("assigned")
+            if group.bugs.is_empty() {
+                list_html.push_str(
+                    r#"<li style="list-style:none; color:#888;">No issues targeted for this version.</li>"#,
+                );
+            } else {
+                for b in &group.bugs {
+                    let handler_str = if b.handler_id > 0 {
+                        format!(
+                            " ({})",
+                            html_escape(
+                                users_map
+                                    .get(&b.handler_id)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("assigned")
+                            )
                         )
-                    )
-                } else {
-                    String::new()
-                };
-                let strike_open = if b.status >= 80 { "<s>" } else { "" };
-                let strike_close = if b.status >= 80 { "</s>" } else { "" };
-                list_html.push_str(&format!(
-                    r#"<li style="margin-bottom:4px;">{strike_open}<a href="/view_bug_page/{id}">{id:07}</a>: <strong>{summary}</strong>{strike_close} - [{status}]{handler}</li>"#,
-                    strike_open = strike_open,
-                    strike_close = strike_close,
-                    id = b.id,
-                    summary = html_escape(&b.summary),
-                    status = html_escape(status_label(b.status)),
-                    handler = handler_str
-                ));
+                    } else {
+                        String::new()
+                    };
+                    let strike_open = if b.status >= 80 { "<s>" } else { "" };
+                    let strike_close = if b.status >= 80 { "</s>" } else { "" };
+                    list_html.push_str(&format!(
+                        r#"<li style="margin-bottom:4px;">{strike_open}<a href="/view_bug_page/{id}">{id:07}</a>: <strong>{summary}</strong>{strike_close} - [{status}]{handler}</li>"#,
+                        strike_open = strike_open,
+                        strike_close = strike_close,
+                        id = b.id,
+                        summary = html_escape(&b.summary),
+                        status = html_escape(status_label(b.status)),
+                        handler = handler_str
+                    ));
+                }
             }
 
             sections_html.push_str(&format!(
                 r#"<div class="panel">
-                    <div class="panel-header">Target Version: {} — {} / {} resolved ({}%)</div>
+                    <div class="panel-header">Target Version: {} — {} / {} resolved ({}%){}</div>
                     <div class="panel-body">
                         <div style="background:#e0e6ed; height:12px; border-radius:6px; overflow:hidden; margin-bottom:12px; max-width:400px;">
                             <div style="background:#5cb85c; width:{}%; height:100%;"></div>
@@ -84,10 +95,11 @@ pub fn render_roadmap_page(
                         </ul>
                     </div>
                 </div>"#,
-                html_escape(ver),
+                html_escape(&group.version),
                 resolved,
                 total,
                 pct,
+                badge,
                 pct,
                 list_html
             ));
@@ -365,10 +377,15 @@ pub fn render_news_page(
             } else {
                 ""
             };
-            let del_form = if eff >= 70 {
+            let actions = if eff >= 70 {
                 format!(
-                    r#"<form method="POST" action="/news_delete/{}" style="display:inline; float:right;"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
-                    n.id
+                    r#"<div style="float:right; display:flex; gap:6px; align-items:center;">
+                        <a href="/news_edit_page/{}" class="btn btn-secondary btn-sm" style="text-decoration:none;">Edit</a>
+                        <form method="POST" action="/news_delete/{}" style="display:inline;" onsubmit="return confirm('Delete news item?');">
+                            <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        </form>
+                    </div>"#,
+                    n.id, n.id
                 )
             } else {
                 String::new()
@@ -386,7 +403,7 @@ pub fn render_news_page(
                 html_escape(&poster),
                 format_timestamp(n.date_posted),
                 vs_str,
-                del_form,
+                actions,
                 html_escape(&n.body)
             ));
         }
@@ -510,6 +527,80 @@ pub fn render_manage_email_queue_page(
     );
 
     render_layout("Email Queue", ctx, msg, &content)
+}
+
+pub fn render_news_edit_page(
+    ctx: &AuthContext,
+    item: &NewsItem,
+    msg: Option<&str>,
+    err: Option<&str>,
+) -> Html<String> {
+    let err_banner = err
+        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
+
+    let ann_checked = if item.announcement != 0 {
+        "checked"
+    } else {
+        ""
+    };
+    let public_selected = if item.view_state == 10 {
+        "selected"
+    } else {
+        ""
+    };
+    let private_selected = if item.view_state == 50 {
+        "selected"
+    } else {
+        ""
+    };
+
+    let content = format!(
+        r#"{err_banner}
+        <div class="panel">
+            <div class="panel-header">Edit News Item</div>
+            <div class="panel-body">
+                <form method="POST" action="/news_update/{id}">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Headline *</td>
+                            <td class="input-col"><input type="text" name="headline" value="{headline}" required style="width:100%; max-width:500px;"></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Body *</td>
+                            <td class="input-col"><textarea name="body" required style="width:100%; max-width:600px; height:140px;">{body}</textarea></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Announcement</td>
+                            <td class="input-col"><label style="cursor:pointer;"><input type="checkbox" name="announcement" value="1" {ann_checked}> Pin to top</label></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">View Status</td>
+                            <td class="input-col">
+                                <select name="view_state" style="width:auto;">
+                                    <option value="10" {public_selected}>public</option>
+                                    <option value="50" {private_selected}>private</option>
+                                </select>
+                            </td>
+                        </tr>
+                    </table>
+                    <div style="margin-top:14px; display:flex; gap:8px;">
+                        <button type="submit" class="btn">Update News</button>
+                        <a href="/news_page" class="btn btn-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>"#,
+        err_banner = err_banner,
+        id = item.id,
+        headline = html_escape(&item.headline),
+        body = html_escape(&item.body),
+        ann_checked = ann_checked,
+        public_selected = public_selected,
+        private_selected = private_selected,
+    );
+
+    render_layout("Edit News", ctx, msg, &content)
 }
 
 #[cfg(test)]

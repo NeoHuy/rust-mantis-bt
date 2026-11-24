@@ -502,6 +502,45 @@ fn test_version_crud_and_ordering() {
 }
 
 #[test]
+fn test_version_date_order_and_backward_compatibility() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db.create_project("OrderProj", 10, 10, "", true).unwrap();
+
+    // 1. Backward-compatible add_version uses current timestamp (date_order > 0)
+    let v1 = db
+        .add_version(pid, "1.0.0", "Release 1", true, false)
+        .unwrap();
+    let ver1 = db.get_version_by_id(v1).unwrap().unwrap();
+    assert!(ver1.date_order > 0);
+
+    // 2. add_version_with_order with custom date_order
+    let custom_order = 1700000000;
+    let v2 = db
+        .add_version_with_order(pid, "2.0.0", "Release 2", false, false, Some(custom_order))
+        .unwrap();
+    let ver2 = db.get_version_by_id(v2).unwrap().unwrap();
+    assert_eq!(ver2.date_order, custom_order);
+
+    // 3. Backward-compatible update_version preserves existing date_order
+    assert!(db
+        .update_version(v2, "2.0.0-rc2", "Updated RC", false, false)
+        .is_ok());
+    let ver2_after = db.get_version_by_id(v2).unwrap().unwrap();
+    assert_eq!(ver2_after.version, "2.0.0-rc2");
+    assert_eq!(ver2_after.date_order, custom_order);
+
+    // 4. update_version_with_order updates date_order
+    let new_order = 1800000000;
+    assert!(db
+        .update_version_with_order(v2, "2.0.0-final", "Final", true, false, Some(new_order))
+        .is_ok());
+    let ver2_final = db.get_version_by_id(v2).unwrap().unwrap();
+    assert_eq!(ver2_final.version, "2.0.0-final");
+    assert_eq!(ver2_final.date_order, new_order);
+    assert_eq!(ver2_final.released, 1);
+}
+
+#[test]
 fn test_bug_schema_bootstrap_and_crud() {
     let db = Db::open_in_memory().unwrap();
     let proj_id = db.create_project("TestProj", 10, 10, "", true).unwrap();
@@ -974,6 +1013,29 @@ fn test_email_queue_time_tracking_and_news() {
     // Developer (55) sees both public and private news
     let dev_news = db.list_news(proj_id, 55).unwrap();
     assert_eq!(dev_news.len(), 2);
+
+    // Test get_news and update_news
+    let item = db.get_news(n_pub).unwrap().unwrap();
+    assert_eq!(item.headline, "v1.0 Released");
+    assert_eq!(item.body, "Release notes here");
+    assert_eq!(item.announcement, 1);
+    assert_eq!(item.view_state, 10);
+
+    let old_modified = item.last_modified;
+    assert!(db
+        .update_news(n_pub, "v1.0.1 Released", "Updated patch notes", 10, 0)
+        .is_ok());
+    let updated = db.get_news(n_pub).unwrap().unwrap();
+    assert_eq!(updated.headline, "v1.0.1 Released");
+    assert_eq!(updated.body, "Updated patch notes");
+    assert_eq!(updated.announcement, 0);
+    assert!(updated.last_modified >= old_modified);
+
+    // Empty headline or body fails
+    assert!(db.update_news(n_pub, "   ", "body", 10, 0).is_err());
+    assert!(db.update_news(n_pub, "head", "   ", 10, 0).is_err());
+    assert!(db.update_news(99999, "head", "body", 10, 0).is_err());
+    assert!(db.get_news(99999).unwrap().is_none());
 }
 
 #[test]
@@ -2646,4 +2708,46 @@ fn test_db_subproject_descendants_and_bug_rollup() {
     assert!(rep_result_ids.contains(&bug_b));
     assert!(rep_result_ids.contains(&bug_c));
     assert!(!rep_result_ids.contains(&bug_d)); // Private subproject isolated!
+}
+
+#[test]
+fn test_tag_usage_counts_and_helpers() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user("tagadmin", "Admin", "a@t.com", "pass", 90, true, false)
+        .unwrap();
+    let pid = db.create_project("TagProj", 10, 10, "", true).unwrap();
+    let b1 = db
+        .create_bug(
+            pid, uid, 1, "Bug 1", "Desc", "", "", 10, 10, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug(
+            pid, uid, 1, "Bug 2", "Desc", "", "", 10, 10, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    let t1 = db.create_tag(uid, "alpha", "Alpha tag").unwrap();
+    let t2 = db.create_tag(uid, "beta", "Beta tag").unwrap();
+
+    db.attach_tag_to_bug(b1, t1, uid).unwrap();
+    db.attach_tag_to_bug(b2, t1, uid).unwrap();
+
+    let counts = db.list_tags_with_counts().unwrap();
+    assert_eq!(counts.len(), 2);
+    let alpha = counts.iter().find(|(t, _)| t.name == "alpha").unwrap();
+    assert_eq!(alpha.1, 2);
+    let beta = counts.iter().find(|(t, _)| t.name == "beta").unwrap();
+    assert_eq!(beta.1, 0);
+
+    let (t1_fetched, t1_count) = db.get_tag_with_count_by_id(t1).unwrap().unwrap();
+    assert_eq!(t1_fetched.name, "alpha");
+    assert_eq!(t1_count, 2);
+
+    let (t2_fetched, t2_count) = db.get_tag_with_count_by_id(t2).unwrap().unwrap();
+    assert_eq!(t2_fetched.name, "beta");
+    assert_eq!(t2_count, 0);
+
+    assert!(db.get_tag_with_count_by_id(9999).unwrap().is_none());
 }

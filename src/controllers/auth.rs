@@ -13,6 +13,7 @@ use serde::Deserialize;
 pub struct LoginForm {
     pub username: String,
     pub password: String,
+    pub perm_login: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -78,12 +79,12 @@ pub async fn login_submit(State(db): State<Db>, Form(form): Form<LoginForm>) -> 
 
     match auth_res {
         Ok(Some(user)) => {
-            let cookie_val = make_cookie_header(
-                "MANTIS_STRING_COOKIE",
-                &user.cookie_string,
-                true,
-                Some(crate::auth::session_ttl_secs()),
-            );
+            let max_age = match form.perm_login {
+                Some(ref v) if !v.trim().is_empty() => Some(crate::auth::session_ttl_secs()),
+                _ => None,
+            };
+            let cookie_val =
+                make_cookie_header("MANTIS_STRING_COOKIE", &user.cookie_string, true, max_age);
             let target_url = "/my_view_page";
             let mut res = Redirect::to(target_url).into_response();
             if let Ok(hv) = HeaderValue::from_str(&cookie_val) {

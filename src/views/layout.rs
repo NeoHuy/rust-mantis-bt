@@ -594,6 +594,12 @@ body.login-layout {
     margin: 8px 0;
     white-space: pre;
 }
+.code-block .hl-kw { color: #cf222e; font-weight: 600; }
+.code-block .hl-str { color: #0a3069; }
+.code-block .hl-cmt { color: #6e7781; font-style: italic; }
+.code-block .hl-num { color: #0550ae; }
+.code-block .hl-ty { color: #953800; }
+.code-block .hl-attr { color: #8250df; }
 .inline-code {
     background-color: #f0f2f5;
     border: 1px solid #e1e4e8;

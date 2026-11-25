@@ -4248,3 +4248,149 @@ fn test_add_bugnote_mention_deduplication() {
         "Alice should receive the note notification"
     );
 }
+
+#[test]
+fn test_chunked_batch_lookups_over_200_ids() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("ChunkProj", 10, 10, "", true).unwrap();
+    let uid = db
+        .create_user("chunker", "Chunker", "chunk@x.com", "pw", 55, true, false)
+        .unwrap();
+
+    let mut bug_ids = Vec::with_capacity(250);
+    for idx in 0..250 {
+        let bid = db
+            .create_bug(
+                proj_id,
+                uid,
+                1,
+                &format!("Chunk bug {}", idx),
+                "desc",
+                "",
+                "",
+                30,
+                50,
+                10,
+                "",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+        bug_ids.push(bid);
+    }
+
+    let bugs_map = db.get_bugs_by_ids(&bug_ids).unwrap();
+    assert_eq!(bugs_map.len(), 250);
+    assert_eq!(bugs_map[&bug_ids[0]].summary, "Chunk bug 0");
+    assert_eq!(bugs_map[&bug_ids[249]].summary, "Chunk bug 249");
+
+    let target_bug = bug_ids[0];
+    let mut note_ids = Vec::with_capacity(230);
+    for idx in 0..230 {
+        let nid = db
+            .add_bugnote(target_bug, uid, &format!("Chunk note {}", idx), 10)
+            .unwrap();
+        note_ids.push(nid);
+    }
+
+    let notes_map = db.get_bugnotes_by_ids(&note_ids).unwrap();
+    assert_eq!(notes_map.len(), 230);
+    assert_eq!(notes_map[&note_ids[0]].note, "Chunk note 0");
+    assert_eq!(notes_map[&note_ids[229]].note, "Chunk note 229");
+}
+
+#[test]
+fn test_change_bug_status_note_mentions_and_exclude_dedup() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("StatusMentionProj", 10, 10, "", true)
+        .unwrap();
+    let rep_id = db
+        .create_user("rep_u", "Rep", "rep@test.com", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev_u", "Dev", "dev@test.com", "pw", 55, true, false)
+        .unwrap();
+    let actor_id = db
+        .create_user("actor_u", "Actor", "actor@test.com", "pw", 55, true, false)
+        .unwrap();
+    let _observer_id = db
+        .create_user("obs_u", "Observer", "obs@test.com", "pw", 25, true, false)
+        .unwrap();
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            rep_id,
+            1,
+            "Status mention bug",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_bug_table SET handler_id = ?1 WHERE id = ?2",
+            rusqlite::params![dev_id, bug_id],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    // Resolving with a note mentioning @dev_u (handler) and @obs_u (non-subscriber):
+    // - dev_u should receive ONLY 1 email ("Mentioned by actor_u"), NOT a duplicate status email.
+    // - obs_u should receive 1 mention email.
+    // - rep_u should receive 1 standard status-changed email.
+    db.change_bug_status(
+        bug_id,
+        actor_id,
+        80,
+        20,
+        Some("Fixed; please verify @dev_u and @obs_u"),
+    )
+    .unwrap();
+
+    let queued = db.list_queued_emails().unwrap();
+    assert_eq!(queued.len(), 3, "Expected exactly 3 emails: rep, dev, obs");
+
+    let dev_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "dev@test.com")
+        .collect();
+    assert_eq!(dev_emails.len(), 1);
+    assert!(dev_emails[0].subject.contains("Mentioned by actor_u"));
+
+    let obs_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "obs@test.com")
+        .collect();
+    assert_eq!(obs_emails.len(), 1);
+    assert!(obs_emails[0].subject.contains("Mentioned by actor_u"));
+
+    let rep_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "rep@test.com")
+        .collect();
+    assert_eq!(rep_emails.len(), 1);
+    assert!(rep_emails[0].subject.contains("Status changed to resolved"));
+
+    // Also test change_bug_status_with_exclude (used when REST PATCH notifies description mentions + changes status)
+    db.flush_email_queue().unwrap();
+    db.change_bug_status_with_exclude(bug_id, actor_id, 90, 20, None, &["rep_u".to_string()])
+        .unwrap();
+    let queued2 = db.list_queued_emails().unwrap();
+    assert_eq!(queued2.len(), 1);
+    assert_eq!(queued2[0].email, "dev@test.com");
+}

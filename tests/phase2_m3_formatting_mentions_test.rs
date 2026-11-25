@@ -634,4 +634,257 @@ async fn test_phase2_m3_core_formatting_mentions_end_to_end() {
         html_rep.contains(&format!("~{}", priv_note_id)),
         "Reporter should see plain unlinked ~note_id text"
     );
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TEST PART 4: Manage Plugins UI toggle for MantisCoreFormatting
+    // ─────────────────────────────────────────────────────────────────────────
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_plugin_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let plugin_html = String::from_utf8_lossy(&body);
+    assert!(
+        plugin_html.contains(r#"action="/manage_plugin_toggle/MantisCoreFormatting""#),
+        "Manage Plugins UI must render toggle button for MantisCoreFormatting"
+    );
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TEST PART 5: Bulk ADD_NOTE @mentions & deduplication
+    // ─────────────────────────────────────────────────────────────────────────
+    db.flush_email_queue().unwrap();
+    // Assign developer_bob as handler on bug1_id so standard note notification would target him too
+    db.assign_bug(bug1_id, 1, _dev_id).unwrap();
+    db.flush_email_queue().unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_actiongroup")
+                .header("cookie", &admin_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "action=ADD_NOTE&bug_arr={}&note_view_state=10&bugnote_text=Bulk+ping+@developer_bob",
+                    bug1_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let bulk_emails = db.list_queued_emails().unwrap();
+    let bob_bulk_emails: Vec<_> = bulk_emails
+        .iter()
+        .filter(|e| e.email == "bob@example.com")
+        .collect();
+    assert_eq!(
+        bob_bulk_emails.len(),
+        1,
+        "Bulk ADD_NOTE must send exactly 1 mention email to @developer_bob without duplicate note email"
+    );
+    assert!(bob_bulk_emails[0].subject.contains("Mentioned by"));
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TEST PART 6: bugnote_update newly-added @mentions & private note RBAC
+    // ─────────────────────────────────────────────────────────────────────────
+    // Create a private note by admin mentioning @developer_bob
+    let edit_note_id = db
+        .add_bugnote(bug1_id, 1, "Initial private note @developer_bob", 50)
+        .unwrap();
+    // Reporter alice (access 25 < 55) MUST NOT be able to edit private note even if she tries
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bugnote_update/{}", edit_note_id))
+                .header("cookie", &alice_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("note=Hacked+private+note"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // Public note edited by admin: keeps @developer_bob, newly adds @reporter_alice
+    let pub_edit_note_id = db
+        .add_bugnote(bug1_id, 1, "Initial public note @developer_bob", 10)
+        .unwrap();
+    db.flush_email_queue().unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bugnote_update/{}", pub_edit_note_id))
+                .header("cookie", &admin_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "note=Edited+public+note+@developer_bob+and+@reporter_alice",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let edit_emails = db.list_queued_emails().unwrap();
+    assert_eq!(
+        edit_emails.len(),
+        1,
+        "Only newly mentioned @reporter_alice should be notified on bugnote_update"
+    );
+    assert_eq!(edit_emails[0].email, "alice@example.com");
+    assert!(edit_emails[0].subject.contains("Mentioned by"));
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TEST PART 7: bug_change_status with optional note @mention (no duplicate status email)
+    // ─────────────────────────────────────────────────────────────────────────
+    db.flush_email_queue().unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/bug_change_status/{}", bug1_id))
+                .header("cookie", &admin_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "new_status=80&resolution=20&note=Resolved+for+@developer_bob",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    let status_emails = db.list_queued_emails().unwrap();
+    let bob_status_emails: Vec<_> = status_emails
+        .iter()
+        .filter(|e| e.email == "bob@example.com")
+        .collect();
+    assert_eq!(
+        bob_status_emails.len(),
+        1,
+        "Mentioned handler bob should receive 1 mention email and NO duplicate status email"
+    );
+    assert!(bob_status_emails[0].subject.contains("Mentioned by"));
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TEST PART 8: REST API @mentions (POST /issues, PATCH /issues/:id + status, POST /notes)
+    // ─────────────────────────────────────────────────────────────────────────
+    let (_tok_id, raw_token) = db.create_api_token(1, "rest-mention-test").unwrap();
+    let bearer = format!("Bearer {}", raw_token);
+
+    // 8a. POST /api/rest/issues with @mention
+    db.flush_email_queue().unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/rest/issues")
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(
+                    r#"{{"summary":"REST issue","description":"Hello @developer_bob","project":{{"id":{}}}}}"#,
+                    pub_proj_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let rest_body = axum::body::to_bytes(res.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let rest_json: serde_json::Value = serde_json::from_slice(&rest_body).unwrap();
+    let rest_bug_id = rest_json["issue"]["id"].as_i64().unwrap();
+
+    let create_emails = db.list_queued_emails().unwrap();
+    assert!(create_emails
+        .iter()
+        .any(|e| e.email == "bob@example.com" && e.subject.contains("Mentioned by")));
+
+    // 8b. PATCH /api/rest/issues/:id combining newly mentioned @reporter_alice + status change
+    // First subscribe alice as monitor on rest_bug_id so she would normally get the status email too
+    db.add_bug_monitor(rest_bug_id, _rep_id).unwrap();
+    db.flush_email_queue().unwrap();
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/api/rest/issues/{}", rest_bug_id))
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"description":"Updated for @developer_bob and @reporter_alice","status":{"id":50}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let patch_emails = db.list_queued_emails().unwrap();
+    let alice_patch_emails: Vec<_> = patch_emails
+        .iter()
+        .filter(|e| e.email == "alice@example.com")
+        .collect();
+    assert_eq!(
+        alice_patch_emails.len(),
+        1,
+        "Newly mentioned monitor @reporter_alice must receive 1 mention email and NO duplicate status email on combined PATCH"
+    );
+    assert!(alice_patch_emails[0].subject.contains("Mentioned by"));
+    assert!(
+        !patch_emails.iter().any(|e| e.email == "bob@example.com"),
+        "Previously mentioned @developer_bob must not be re-notified"
+    );
+
+    // 8c. POST /api/rest/issues/:id/notes with @mention
+    db.flush_email_queue().unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/rest/issues/{}/notes", rest_bug_id))
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"text":"REST note for @developer_bob"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let note_emails = db.list_queued_emails().unwrap();
+    let bob_note_emails: Vec<_> = note_emails
+        .iter()
+        .filter(|e| e.email == "bob@example.com")
+        .collect();
+    assert_eq!(
+        bob_note_emails.len(),
+        1,
+        "Mentioned @developer_bob should receive exactly 1 mention email on REST add_note"
+    );
+    assert!(bob_note_emails[0].subject.contains("Mentioned by"));
 }

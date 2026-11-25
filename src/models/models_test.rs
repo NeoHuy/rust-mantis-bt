@@ -922,3 +922,44 @@ fn test_bug_revision_model() {
     assert_eq!(unknown_rev.revision_type(), None);
     assert_eq!(unknown_rev.type_label(), "Unknown");
 }
+
+#[test]
+fn test_mentions_and_refs_domain_helpers() {
+    use std::collections::HashSet;
+
+    let raw = "See #12, ~34, @Alice and @bob. Ignore `code #99 ~88 @ignored` and a@b.com.";
+    assert_eq!(scan_issue_refs(raw), vec![12]);
+    assert_eq!(scan_note_refs(raw), vec![34]);
+    assert_eq!(
+        extract_mentions(raw),
+        vec!["Alice".to_string(), "bob".to_string()]
+    );
+
+    let collected = collect_mentions(&["Ping @alice and @BOB", "Also @charlie and @ALICE"]);
+    assert_eq!(collected, vec!["alice", "BOB", "charlie"]);
+
+    let mut old = HashSet::new();
+    old.insert("alice".to_string());
+    let fresh = diff_new_mentions(
+        &old,
+        &[
+            "ALICE".to_string(),
+            "bob".to_string(),
+            "BOB".to_string(),
+            "dave".to_string(),
+        ],
+    );
+    assert_eq!(fresh, vec!["bob", "dave"]);
+
+    assert_eq!(
+        combine_context("Summary", &["  ", "Part 1", "", "Part 2  "]),
+        "Part 1\n\nPart 2"
+    );
+    assert_eq!(
+        combine_context("Fallback Summary", &["   ", "\n"]),
+        "Fallback Summary"
+    );
+
+    let chars: Vec<char> = "cc @bob.".chars().collect();
+    assert_eq!(parse_mention_at(&chars, 3), Some(("bob".to_string(), 7)));
+}

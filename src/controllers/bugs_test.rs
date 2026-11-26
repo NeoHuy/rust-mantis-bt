@@ -693,7 +693,7 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
     let dev_cookie = test_http_login(&app, "dev_m3", "pw", proj_id).await;
     let rep_cookie = test_http_login(&app, "rep_m3", "pw", proj_id).await;
 
-    // 1. GET /bug_report_page as Reporter: no Assign To, has Target Version & Report Stay
+    // 1. GET /bug_report_page as Reporter: no Assign To, no Target Version, has Report Stay
     let res = app
         .clone()
         .oneshot(
@@ -714,7 +714,7 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
     )
     .unwrap();
     assert!(!rep_html.contains(r#"name="handler_id""#));
-    assert!(rep_html.contains(r#"name="target_version""#));
+    assert!(!rep_html.contains(r#"name="target_version""#));
     assert!(rep_html.contains(r#"name="report_stay""#));
 
     // 2. Reporter attempting to assign handler_id > 0 -> 403 Forbidden
@@ -735,6 +735,52 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 2b. Reporter attempting to set target_version -> 403 Forbidden
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&category_id={}&summary=Unauthorized+TargetVer&target_version=v2.0",
+                    proj_id, cat_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 2c. Developer submitting already-released or unknown target_version -> redirected with err
+    for bad_ver in ["v1.0", "nonexistent-v99"] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bug_report")
+                    .header("cookie", &dev_cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "project_id={}&category_id={}&summary=Bad+TargetVer&target_version={}",
+                        proj_id, cat_id, bad_ver
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let err_loc = res.headers().get("location").unwrap().to_str().unwrap();
+        assert!(
+            err_loc.contains("err="),
+            "expected err redirect for {}",
+            bad_ver
+        );
+    }
 
     // 3. Developer submits with target_version=v2.0, handler_id=1 (admin), and report_stay=1
     let res = app
@@ -761,10 +807,11 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(loc.starts_with("/bug_report_page?msg="));
+    assert!(loc.starts_with("/bug_report_page?"));
+    assert!(loc.contains(&format!("project_id={}", proj_id)));
     assert!(loc.contains("created_bug_id="));
 
-    // Follow redirect to /bug_report_page?msg=...&created_bug_id=...
+    // Follow redirect to /bug_report_page?project_id=...&created_bug_id=...
     let res = app
         .clone()
         .oneshot(
@@ -787,11 +834,53 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
     assert!(stay_html.contains(r#"href="/view_bug_page/"#));
     assert_eq!(stay_html.matches(r#"class="flash-message""#).count(), 1);
 
+    // 3b. Forged created_bug_id pointing to private issue not visible to reporter does NOT leak banner
+    let priv_bug_id = db
+        .create_bug(
+            proj_id,
+            1,
+            cat_id,
+            "Secret Issue",
+            "Secret",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/bug_report_page?created_bug_id={}", priv_bug_id))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let forged_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!forged_html.contains(&format!("/view_bug_page/{}", priv_bug_id)));
+
     // Verify bug in DB got target_version="v2.0" and handler_id=1
     let bugs = db.list_bugs(proj_id, 0, 50).unwrap();
     let stay_bug = bugs.iter().find(|b| b.summary == "Stay Test Bug").unwrap();
     assert_eq!(stay_bug.target_version, "v2.0");
     assert_eq!(stay_bug.handler_id, 1);
+    assert_eq!(stay_bug.status, 50);
 
     // 4. Default submit without report_stay and handler_id=0 keeps category default assignee & redirects to view_bug_page
     let res = app
@@ -904,6 +993,44 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
     assert!(view_html.contains("formatted-text"));
     assert!(view_html.contains("btn-white btn-round"));
     assert!(view_html.contains("Close</button>"));
+    assert!(view_html.contains(r#"aria-controls="widget-body-bugnotes""#));
+    assert!(view_html.contains(r#"onsubmit="return confirm('Close this issue?');""#));
+
+    // 1b. Reporter / Developer (< 70) must NOT see Close button or Delete Issue button
+    let dev2_id = db
+        .create_user(
+            "dev_view_m3",
+            "Dev View",
+            "dev_view@example.com",
+            "pw",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let _ = dev2_id;
+    let dev2_cookie = test_http_login(&app, "dev_view_m3", "pw", proj_id).await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &dev2_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let dev_view_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!dev_view_html.contains("Close</button>"));
+    assert!(!dev_view_html.contains("Delete Issue</button>"));
 
     // 2. GET /update_bug_page/:id has <select> version dropdowns with legacy fallbacks selected
     let res = app

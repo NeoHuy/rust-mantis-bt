@@ -1644,7 +1644,7 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
     assert_eq!(dev_html.matches(r#"class="flash-message""#).count(), 1);
     assert_no_nested_forms(&dev_html);
 
-    // Reporter (access 25) does NOT see Assign To
+    // Reporter (access 25) does NOT see Assign To, Target Version, or unreleased Product Versions
     let ctx_rep = dummy_ctx(3, 25);
     let Html(rep_html) = render_bug_report_page(
         &ctx_rep,
@@ -1659,7 +1659,9 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
         None,
     );
     assert!(!rep_html.contains(r#"name="handler_id""#));
-    assert!(rep_html.contains(r#"name="target_version""#));
+    assert!(!rep_html.contains(r#"name="target_version""#));
+    assert!(rep_html.contains(r#"<option value="v1.0">v1.0</option>"#));
+    assert!(!rep_html.contains(r#"<option value="v2.0">v2.0</option>"#));
     assert!(rep_html.contains(r#"name="report_stay""#));
     assert_no_nested_forms(&rep_html);
 }

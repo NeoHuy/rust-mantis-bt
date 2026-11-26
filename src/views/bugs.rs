@@ -1727,15 +1727,30 @@ pub fn render_bug_report_page(
 
     let mut ver_opts = String::from(r#"<option value="">(none)</option>"#);
     let mut target_ver_opts = String::from(r#"<option value="">(none)</option>"#);
+    let allow_unreleased = effective_access >= crate::models::ACCESS_DEVELOPER;
     for v in versions {
         if v.obsolete == 0 {
             let escaped = html_escape(&v.version);
-            ver_opts.push_str(&format!(r#"<option value="{0}">{0}</option>"#, escaped));
-            if v.released == 0 {
+            if v.released != 0 || allow_unreleased {
+                ver_opts.push_str(&format!(r#"<option value="{0}">{0}</option>"#, escaped));
+            }
+            if v.released == 0 && allow_unreleased {
                 target_ver_opts.push_str(&format!(r#"<option value="{0}">{0}</option>"#, escaped));
             }
         }
     }
+
+    let target_ver_row = if allow_unreleased {
+        format!(
+            r#"<tr>
+                <th class="category"><label for="target_version">Target Version</label></th>
+                <td class="input-col"><select id="target_version" name="target_version">{}</select></td>
+            </tr>"#,
+            target_ver_opts
+        )
+    } else {
+        String::new()
+    };
 
     let assign_to_row = if effective_access >= crate::models::ACCESS_DEVELOPER {
         let mut user_opts =
@@ -1884,10 +1899,7 @@ pub fn render_bug_report_page(
                                     <th class="category"><label for="build">Product Build</label></th>
                                     <td class="input-col"><input type="text" id="build" name="build" placeholder="Product Build" style="max-width:220px;"></td>
                                 </tr>
-                                <tr>
-                                    <th class="category"><label for="target_version">Target Version</label></th>
-                                    <td class="input-col"><select id="target_version" name="target_version">{}</select></td>
-                                </tr>
+                                {}
                                 {}
                                 <tr>
                                     <th class="category"><label for="due_date">Due Date</label></th>
@@ -1951,7 +1963,7 @@ pub fn render_bug_report_page(
         proj_opts,
         cat_opts,
         ver_opts,
-        target_ver_opts,
+        target_ver_row,
         assign_to_row,
         cf_rows_html,
         dropzone_html
@@ -2268,12 +2280,12 @@ fn render_collapsible_widget_box(
                 </h4>
                 <div class="widget-toolbar">
                     {extra_toolbar}
-                    <button type="button" data-action="collapse" aria-expanded="true" aria-label="Toggle {title_attr}">
+                    <button type="button" data-action="collapse" aria-expanded="true" aria-controls="widget-body-{wid}" aria-label="Toggle {title_attr}">
                         <i class="ace-icon fa fa-chevron-up" aria-hidden="true"></i>
                     </button>
                 </div>
             </div>
-            <div class="widget-body">
+            <div class="widget-body" id="widget-body-{wid}">
                 {body}
                 {toolbox}
             </div>
@@ -2281,11 +2293,186 @@ fn render_collapsible_widget_box(
         id_attr = id_attr,
         wid = html_escape(widget_id),
         icon = html_escape(icon_class),
-        title = title,
+        title = html_escape(title),
         title_attr = html_escape(title),
         extra_toolbar = extra_toolbar_html,
         body = body_html,
         toolbox = toolbox
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_bug_action_toolbar(
+    bug: &Bug,
+    eff: i32,
+    current_user_id: i64,
+    users: &[User],
+    is_monitoring: bool,
+    can_clone: bool,
+    can_move: bool,
+    custom_fields: &[CustomField],
+    cf_values: &[CustomFieldValue],
+    versions: &[ProjectVersion],
+    cats: &[Category],
+) -> String {
+    let mut actions_html = String::new();
+    let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == current_user_id);
+    if can_edit {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-primary btn-white btn-round btn-sm" href="/update_bug_page/{}"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>"#,
+            bug.id
+        ));
+    }
+
+    if eff >= 55 {
+        let mut user_opts = String::from(r#"<option value="0">(Unassigned)</option>"#);
+        for u in users {
+            let sel = if u.id == bug.handler_id {
+                "selected"
+            } else {
+                ""
+            };
+            user_opts.push_str(&format!(
+                r#"<option value="{}" {}>{}</option>"#,
+                u.id,
+                sel,
+                html_escape(&u.username)
+            ));
+        }
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_assign/{}" style="display:inline-flex; gap:4px; align-items:center;">
+                <select name="handler_id" style="width:auto;">{}</select>
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-user" aria-hidden="true"></i> Assign To</button>
+            </form>"#,
+            bug.id, user_opts
+        ));
+    }
+
+    if eff >= 40 {
+        let status_form =
+            render_status_change_form(bug, eff, custom_fields, cf_values, versions, cats);
+        actions_html.push_str(&status_form);
+    }
+
+    if is_monitoring {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-eye-slash" aria-hidden="true"></i> End Monitoring</button>
+            </form>"#,
+            bug.id
+        ));
+    } else {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_monitor_add/{}" style="display:inline;">
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-eye" aria-hidden="true"></i> Monitor</button>
+            </form>"#,
+            bug.id
+        ));
+    }
+
+    if eff >= 70 {
+        let (stick_label, stick_cls) = if bug.sticky == 1 {
+            ("Unstick", "btn btn-warning btn-white btn-round btn-sm")
+        } else {
+            ("Stick", "btn btn-white btn-round btn-sm")
+        };
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_stick/{}" style="display:inline;">
+                <button type="submit" class="{}"><i class="fa fa-thumb-tack" aria-hidden="true"></i> {}</button>
+            </form>"#,
+            bug.id, stick_cls, stick_label
+        ));
+    }
+
+    if can_clone {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-white btn-round btn-sm" href="/bug_clone_page/{}"><i class="fa fa-clone" aria-hidden="true"></i> Clone</a>"#,
+            bug.id
+        ));
+    }
+
+    if can_move {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-white btn-round btn-sm" href="/bug_move_page/{}"><i class="fa fa-arrows" aria-hidden="true"></i> Move</a>"#,
+            bug.id
+        ));
+    }
+
+    if eff >= 70 && bug.status < 90 {
+        let close_res = if bug.resolution > 10 {
+            bug.resolution
+        } else {
+            20
+        };
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline;" onsubmit="return confirm('Close this issue?');">
+                <input type="hidden" name="new_status" value="90">
+                <input type="hidden" name="resolution" value="{}">
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-check-square-o" aria-hidden="true"></i> Close</button>
+            </form>"#,
+            bug.id, close_res
+        ));
+    }
+
+    actions_html.push_str(&format!(
+        r#"<a class="btn btn-white btn-round btn-sm" href="/bug_revision_view_page/{}"><i class="fa fa-history" aria-hidden="true"></i> Revisions</a>"#,
+        bug.id
+    ));
+
+    if eff >= 70 {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_delete/{}" style="display:inline;" onsubmit="return confirm('Delete this issue? This action cannot be undone.');">
+                <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Issue</button>
+            </form>"#,
+            bug.id
+        ));
+    }
+
+    actions_html
+}
+
+pub fn render_bugnote_add_form(bug_id: i64, eff: i32) -> String {
+    if eff < 25 {
+        return String::new();
+    }
+    let priv_opt = if eff >= 55 {
+        r#"<option value="50">private</option>"#
+    } else {
+        ""
+    };
+    let time_row = if eff >= 55 {
+        r#"<tr>
+                <th class="category">Time Tracking (HH:MM or mins)</th>
+                <td class="input-col"><input type="text" name="time_tracking" placeholder="00:00 or minutes" style="width:160px;"></td>
+            </tr>"#
+    } else {
+        ""
+    };
+    format!(
+        r#"<form method="POST" action="/bugnote_add/{}">
+                <div class="table-responsive">
+                    <table class="form-table form-table-left">
+                        <tr>
+                            <th class="category">Note</th>
+                            <td class="input-col"><textarea name="note" rows="5" required></textarea></td>
+                        </tr>
+                        <tr>
+                            <th class="category">View Status</th>
+                            <td class="input-col">
+                                <select name="view_state" style="width:auto;">
+                                    <option value="10">public</option>
+                                    {}
+                                </select>
+                            </td>
+                        </tr>
+                        {}
+                    </table>
+                </div>
+                <div class="widget-toolbox" style="margin-top:8px;">
+                    <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-comment" aria-hidden="true"></i> Add Note</button>
+                </div>
+            </form>"#,
+        bug_id, priv_opt, time_row
     )
 }
 

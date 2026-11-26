@@ -32,6 +32,14 @@ impl Drop for DiskFileCleanupGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BugCreateExtras<'a> {
+    pub build: &'a str,
+    pub target_version: &'a str,
+    pub due_date: i64,
+    pub handler_id: Option<i64>,
+}
+
 impl Db {
     pub(crate) fn from_connection(conn: Connection) -> Self {
         Self {
@@ -2348,6 +2356,48 @@ impl Db {
         view_state: i32,
         mentioned_usernames: &[String],
     ) -> Result<i64, String> {
+        self.create_bug_full_with_mentions(
+            project_id,
+            reporter_id,
+            category_id,
+            summary,
+            description,
+            steps_to_reproduce,
+            additional_information,
+            priority,
+            severity,
+            reproducibility,
+            version,
+            os,
+            os_build,
+            platform,
+            view_state,
+            mentioned_usernames,
+            BugCreateExtras::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bug_full_with_mentions(
+        &self,
+        project_id: i64,
+        reporter_id: i64,
+        category_id: i64,
+        summary: &str,
+        description: &str,
+        steps_to_reproduce: &str,
+        additional_information: &str,
+        priority: i32,
+        severity: i32,
+        reproducibility: i32,
+        version: &str,
+        os: &str,
+        os_build: &str,
+        platform: &str,
+        view_state: i32,
+        mentioned_usernames: &[String],
+        extras: BugCreateExtras<'_>,
+    ) -> Result<i64, String> {
         let trimmed_summary = summary.trim();
         if trimmed_summary.is_empty() {
             return Err("Summary cannot be empty".to_string());
@@ -2362,7 +2412,20 @@ impl Db {
         let mut initial_handler_id = 0i64;
         let mut initial_status = 10i32;
 
-        if category_id > 0 {
+        if let Some(hid) = extras.handler_id.filter(|&h| h > 0) {
+            let u = Self::query_user_by_id(&conn, hid)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Assigned user {} not found", hid))?;
+            if u.enabled != 1 {
+                return Err("Assigned user is disabled".to_string());
+            }
+            let eff = Self::query_effective_access_level(&conn, &u, project_id).unwrap_or(0);
+            if eff < 55 {
+                return Err("Assigned user lacks Developer access".to_string());
+            }
+            initial_handler_id = hid;
+            initial_status = 50;
+        } else if category_id > 0 {
             let cat_user_id: Option<i64> = conn
                 .query_row(
                     "SELECT user_id FROM mantis_category_table WHERE id = ?1",
@@ -2394,7 +2457,7 @@ impl Db {
                 category_id, date_submitted, last_updated, os, os_build,
                 platform, version, fixed_in_version, target_version, build,
                 summary, view_state, sticky, due_date
-            ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, 10, ?8, ?9, ?9, ?10, ?11, ?12, ?13, '', '', '', ?14, ?15, 0, 0)",
+            ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, 10, ?8, ?9, ?9, ?10, ?11, ?12, ?13, '', ?14, ?15, ?16, ?17, 0, ?18)",
             params![
                 project_id,
                 reporter_id,
@@ -2409,8 +2472,11 @@ impl Db {
                 os_build,
                 platform,
                 version,
+                extras.target_version,
+                extras.build,
                 trimmed_summary,
                 view_state,
+                extras.due_date,
             ],
         )
         .map_err(|e| e.to_string())?;

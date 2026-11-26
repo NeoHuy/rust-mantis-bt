@@ -4477,12 +4477,12 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
         )
         .unwrap();
 
-    // Public note and private note on pub_bug
+    // Public note and private note on pub_bug (private note includes time_tracking)
     let pub_note_id = db
         .add_bugnote(pub_bug, rep_id, "Public comment", 10)
         .unwrap();
     let priv_note_id = db
-        .add_bugnote(pub_bug, dev_id, "Private dev comment", 50)
+        .add_bugnote_with_time(pub_bug, dev_id, "Private dev comment", 50, 45)
         .unwrap();
 
     // Update both notes and toggle view_state on public note (then toggle back to public)
@@ -4495,7 +4495,7 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
 
     // Timeline for rep_user across All Projects (None):
     // - Sees pub_bug creation, public bugnote_added, and public bugnote_updated
-    // - Must NOT see priv_bug, priv_proj_bug, private bugnote_added, private bugnote_updated, or bugnote_view_state
+    // - Must NOT see priv_bug, priv_proj_bug, private bugnote_added, private bugnote_updated, bugnote_view_state, or private time_tracking
     let rep_events = db.list_timeline_events(&rep_user, None, 50).unwrap();
     assert!(rep_events
         .iter()
@@ -4524,6 +4524,10 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
             .iter()
             .any(|e| e.field_name == "bugnote_view_state"),
         "Reporter must not see bugnote_view_state events"
+    );
+    assert!(
+        !rep_events.iter().any(|e| e.field_name == "time_tracking"),
+        "Reporter must not see time_tracking events from private notes"
     );
     assert!(
         !rep_events.iter().any(|e| e.bug_id == priv_bug),
@@ -4568,6 +4572,12 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
             .count(),
         2,
         "Developer must see bugnote_view_state events"
+    );
+    assert!(
+        dev_events
+            .iter()
+            .any(|e| e.bug_id == pub_bug && e.field_name == "time_tracking" && e.new_value == "45"),
+        "Developer must see time_tracking event on private note"
     );
 
     // Subproject scoping: parent pub_proj includes visible child subproject events, excludes non-member private subproject

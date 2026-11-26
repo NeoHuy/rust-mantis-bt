@@ -4419,6 +4419,18 @@ impl Db {
                AND (b.view_state = 10 OR b.reporter_id = ?1 OR b.handler_id = ?1 OR {dev_cond})
                AND (h.field_name != 'bugnote_view_state' OR {dev_cond})
                AND (
+                   h.field_name != 'time_tracking'
+                   OR {dev_cond}
+                   OR EXISTS (
+                       SELECT 1 FROM mantis_bugnote_table tn
+                       WHERE tn.bug_id = h.bug_id
+                         AND tn.reporter_id = h.user_id
+                         AND ABS(tn.date_submitted - h.date_modified) <= 2
+                         AND tn.time_tracking = CAST(h.new_value AS INTEGER)
+                         AND tn.view_state = 10
+                   )
+               )
+               AND (
                    h.field_name NOT IN ('bugnote_added', 'bugnote_updated')
                    OR (n.id IS NOT NULL AND (n.view_state = 10 OR {dev_cond}))
                )

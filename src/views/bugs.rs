@@ -1165,7 +1165,7 @@ pub fn render_view_all_bug_page(
         ));
         let delete_btn = if sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
             format!(
-                r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete filter?');" title="Delete filter">Delete</button></form>"#,
+                r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" data-confirm="Delete filter?" title="Delete filter">Delete</button></form>"#,
                 sf.id
             )
         } else {
@@ -1483,7 +1483,7 @@ pub fn render_view_all_bug_page(
                 </div>
             </div>
             <div class="widget-body !p-0">
-                <form method="POST" action="/bug_actiongroup" onsubmit="return handleBulkSubmit();">
+                <form id="bulk_action_form" method="POST" action="/bug_actiongroup">
                     <input type="hidden" name="return_query" value="{}">
                     <div class="widget-toolbox flex flex-wrap items-center justify-between gap-2">
                         <div class="flex flex-wrap items-center gap-1">
@@ -1521,7 +1521,7 @@ pub fn render_view_all_bug_page(
                     <div class="widget-toolbox flex flex-wrap items-center justify-between gap-3">
                         <div class="bulk-action-bar flex flex-wrap gap-2 items-center">
                             <span class="font-bold text-xs text-gray-700">Action:</span>
-                            <select name="action" id="bulk_action_select" onchange="updateBulkActionInputs(this.value)" class="!w-auto font-semibold text-xs">
+                            <select name="action" id="bulk_action_select" class="!w-auto font-semibold text-xs">
                                 <option value="" selected disabled>-- Select Action --</option>
                                 <option value="MOVE">Move</option>
                                 <option value="COPY">Copy</option>
@@ -1643,39 +1643,6 @@ pub fn render_view_all_bug_page(
                         </div>
                     </div>
                 </form>
-                <script>
-                function updateBulkActionInputs(act) {{
-                    var groups = document.querySelectorAll('.bulk-input-group');
-                    for (var i = 0; i < groups.length; i++) {{
-                        var grp = groups[i];
-                        var acts = grp.getAttribute('data-actions') || '';
-                        if (acts.split(',').indexOf(act) !== -1) {{
-                            grp.style.display = 'inline-flex';
-                        }} else {{
-                            grp.style.display = 'none';
-                        }}
-                    }}
-                }}
-                function handleBulkSubmit() {{
-                    var sel = document.getElementById('bulk_action_select');
-                    if (!sel || !sel.value) {{
-                        alert('Please select an action.');
-                        return false;
-                    }}
-                    var checked = document.querySelectorAll('input[name=\'bug_arr\']:checked');
-                    if (checked.length === 0) {{
-                        alert('Please select at least one issue.');
-                        return false;
-                    }}
-                    if (sel.value === 'DELETE') {{
-                        return confirm('Are you sure you want to permanently delete ' + checked.length + ' selected issue(s)?');
-                    }}
-                    return true;
-                }}
-                if (document.getElementById('bulk_action_select')) {{
-                    updateBulkActionInputs(document.getElementById('bulk_action_select').value);
-                }}
-                </script>
             </div>
         </div>
         {}"#,

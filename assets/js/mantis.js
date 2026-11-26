@@ -382,6 +382,65 @@
     });
   }
 
+  function initConfirmButtons() {
+    var confirmEls = document.querySelectorAll('[data-confirm]');
+    for (var i = 0; i < confirmEls.length; i++) {
+      (function (el) {
+        el.addEventListener('click', function (e) {
+          var msg = el.getAttribute('data-confirm') || 'Are you sure?';
+          if (!window.confirm(msg)) {
+            e.preventDefault();
+          }
+        });
+      })(confirmEls[i]);
+    }
+  }
+
+  function initBulkActionForm() {
+    var form = document.getElementById('bulk_action_form');
+    var sel = document.getElementById('bulk_action_select');
+    if (!sel) return;
+
+    function updateBulkActionInputs(act) {
+      var groups = document.querySelectorAll('.bulk-input-group');
+      for (var i = 0; i < groups.length; i++) {
+        var grp = groups[i];
+        var acts = grp.getAttribute('data-actions') || '';
+        if (acts.split(',').indexOf(act) !== -1) {
+          grp.style.display = 'inline-flex';
+        } else {
+          grp.style.display = 'none';
+        }
+      }
+    }
+
+    updateBulkActionInputs(sel.value);
+    sel.addEventListener('change', function () {
+      updateBulkActionInputs(sel.value);
+    });
+
+    if (form) {
+      form.addEventListener('submit', function (e) {
+        if (!sel.value) {
+          window.alert('Please select an action.');
+          e.preventDefault();
+          return;
+        }
+        var checked = document.querySelectorAll('input[name="bug_arr"]:checked');
+        if (checked.length === 0) {
+          window.alert('Please select at least one issue.');
+          e.preventDefault();
+          return;
+        }
+        if (sel.value === 'DELETE') {
+          if (!window.confirm('Are you sure you want to permanently delete ' + checked.length + ' selected issue(s)?')) {
+            e.preventDefault();
+          }
+        }
+      });
+    }
+  }
+
   window.MantisBT = window.MantisBT || {};
   window.MantisBT.getCsrfToken = getCsrfToken;
 
@@ -394,5 +453,7 @@
     initWidgetBoxes();
     initSelectAllCheckboxes();
     initSavedFilterQuickSelect();
+    initConfirmButtons();
+    initBulkActionForm();
   });
 })();

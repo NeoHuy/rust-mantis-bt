@@ -796,10 +796,135 @@ fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
     if filter.monitored_by.unwrap_or(0) > 0 {
         count += 1;
     }
+    if filter
+        .target_version
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        count += 1;
+    }
+    if filter
+        .fixed_in_version
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        count += 1;
+    }
     if query.filter_id.unwrap_or(0) > 0 {
         count += 1;
     }
     count
+}
+
+fn build_clear_version_url(
+    query: &ListBugsQuery,
+    filter: &BugFilter,
+    clear_target: bool,
+) -> String {
+    let mut clear_q = query.clone();
+    let from_saved_filter = if clear_target {
+        query
+            .target_version
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+            && query.filter_id.unwrap_or(0) > 0
+    } else {
+        query
+            .fixed_in_version
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+            && query.filter_id.unwrap_or(0) > 0
+    };
+
+    if from_saved_filter {
+        clear_q.filter_id = None;
+        if clear_q.project_id.is_none() {
+            clear_q.project_id = filter.project_id.filter(|&v| v > 0);
+        }
+        if clear_q.search.is_none() && clear_q.q.is_none() {
+            clear_q.search = filter.search.clone();
+        }
+        if clear_q.status.is_none() {
+            clear_q.status = filter.status.filter(|&v| v > 0);
+        }
+        if clear_q.hide_status.is_none() {
+            clear_q.hide_status = filter.hide_status.filter(|&v| v > 0);
+        }
+        if clear_q.priority.is_none() {
+            clear_q.priority = filter.priority.filter(|&v| v > 0);
+        }
+        if clear_q.severity.is_none() {
+            clear_q.severity = filter.severity.filter(|&v| v > 0);
+        }
+        if clear_q.category_id.is_none() {
+            clear_q.category_id = filter.category_id.filter(|&v| v > 0);
+        }
+        if clear_q.reporter_id.is_none() {
+            clear_q.reporter_id = filter.reporter_id.filter(|&v| v > 0);
+        }
+        if clear_q.handler_id.is_none() {
+            clear_q.handler_id = filter.handler_id.filter(|&v| v != 0);
+        }
+        if clear_q.tag_id.is_none() {
+            clear_q.tag_id = filter.tag_id.filter(|&v| v > 0);
+        }
+        if clear_q.monitored_by.is_none() {
+            clear_q.monitored_by = filter.monitored_by.filter(|&v| v > 0);
+        }
+        if !clear_target && clear_q.target_version.is_none() {
+            clear_q.target_version = filter.target_version.clone();
+        }
+        if clear_target && clear_q.fixed_in_version.is_none() {
+            clear_q.fixed_in_version = filter.fixed_in_version.clone();
+        }
+    }
+
+    if clear_target {
+        clear_q.target_version = None;
+    } else {
+        clear_q.fixed_in_version = None;
+    }
+    build_view_all_bug_page_url(&clear_q, 1)
+}
+
+fn render_version_scope_bar(filter: &BugFilter, query: &ListBugsQuery) -> String {
+    let mut chips = String::new();
+    if let Some(ref tv) = filter.target_version {
+        let trimmed = tv.trim();
+        if !trimmed.is_empty() {
+            let clear_url = build_clear_version_url(query, filter, true);
+            chips.push_str(&format!(
+                r#" <a class="btn btn-white btn-round btn-sm" href="{}" title="Clear Target Version filter">Target Version: {} <i class="fa fa-times" aria-hidden="true"></i></a>"#,
+                html_escape(&clear_url),
+                html_escape(trimmed)
+            ));
+        }
+    }
+    if let Some(ref fv) = filter.fixed_in_version {
+        let trimmed = fv.trim();
+        if !trimmed.is_empty() {
+            let clear_url = build_clear_version_url(query, filter, false);
+            chips.push_str(&format!(
+                r#" <a class="btn btn-white btn-round btn-sm" href="{}" title="Clear Fixed in Version filter">Fixed in Version: {} <i class="fa fa-times" aria-hidden="true"></i></a>"#,
+                html_escape(&clear_url),
+                html_escape(trimmed)
+            ));
+        }
+    }
+    if chips.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="widget-toolbox flex flex-wrap items-center gap-2 text-xs"><span class="font-semibold text-gray-700">Version Scope:</span>{}</div>"#,
+            chips
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1420,6 +1545,8 @@ pub fn render_view_all_bug_page(
         format!("{} - {} / {}", start, end, total)
     };
 
+    let version_scope_bar = render_version_scope_bar(filter, query);
+
     let content = format!(
         r#"{}
         <noscript><style>#filter.collapsed > .widget-body {{ display: block; }}</style></noscript>
@@ -1442,6 +1569,7 @@ pub fn render_view_all_bug_page(
                     </a>
                 </div>
             </div>
+            {}
             <div class="widget-body">
                 <form method="GET" action="/view_all_bug_page">
                     <input type="hidden" name="sort" value="{}">
@@ -1681,6 +1809,7 @@ pub fn render_view_all_bug_page(
         active_filter_badge,
         quick_hidden_inputs,
         html_escape(search_val),
+        version_scope_bar,
         html_escape(cur_sort),
         html_escape(cur_dir),
         cur_per_page_str,

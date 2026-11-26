@@ -457,18 +457,35 @@ fn sanitize_csv_cell(val: &str) -> String {
     }
 }
 
-pub async fn csv_export(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Query(q): Query<ListBugsQuery>,
-) -> Response {
+fn check_project_filter_access(
+    db: &Db,
+    ctx: &AuthContext,
+    override_project_id: Option<i64>,
+) -> Option<Response> {
     if ctx.active_project_id > 0 {
         let eff = db
             .effective_access_level(&ctx.user, ctx.active_project_id)
             .unwrap_or(0);
         if eff < 10 {
-            return forbidden(&ctx, "You do not have access to this project.");
+            return Some(forbidden(ctx, "You do not have access to this project."));
         }
+    }
+    if let Some(pid) = override_project_id.filter(|&v| v > 0) {
+        let eff = db.effective_access_level(&ctx.user, pid).unwrap_or(0);
+        if eff < 10 {
+            return Some(forbidden(ctx, "You do not have access to this project."));
+        }
+    }
+    None
+}
+
+pub async fn csv_export(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<ListBugsQuery>,
+) -> Response {
+    if let Some(resp) = check_project_filter_access(&db, &ctx, q.project_id) {
+        return resp;
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
@@ -561,13 +578,8 @@ pub async fn view_all_bug_page(
     ctx: AuthContext,
     Query(q): Query<ListBugsQuery>,
 ) -> Response {
-    if ctx.active_project_id > 0 {
-        let eff = db
-            .effective_access_level(&ctx.user, ctx.active_project_id)
-            .unwrap_or(0);
-        if eff < 10 {
-            return forbidden(&ctx, "You do not have access to this project.");
-        }
+    if let Some(resp) = check_project_filter_access(&db, &ctx, q.project_id) {
+        return resp;
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);

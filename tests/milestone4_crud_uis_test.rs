@@ -1565,4 +1565,143 @@ async fn test_ui_m4_subproject_dropdown_excludes_ancestors_and_manage_users_pref
     .unwrap();
     assert!(html_fid_tv.contains("Target v2 issue"));
     assert!(!html_fid_tv.contains("Other version issue"));
+    assert!(html_fid_tv.contains("Target Version: v2.0"));
+}
+
+#[tokio::test]
+async fn test_version_scope_chip_and_project_id_override_rbac() {
+    let db = Db::open_in_memory().unwrap();
+    let priv_proj = db
+        .create_project("SecretVersionProj", 10, 50, "", true)
+        .unwrap();
+    let priv_cat = db.list_effective_categories(priv_proj).unwrap()[0].id;
+    let admin_user = db.get_user_by_username("administrator").unwrap().unwrap();
+    let priv_bug = db
+        .create_bug(
+            priv_proj,
+            admin_user.id,
+            priv_cat,
+            "Secret v2 issue",
+            "Private project issue details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.update_bug_fields(
+        priv_bug,
+        admin_user.id,
+        BugUpdate {
+            target_version: Some("v2.0".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    db.create_user(
+        "outside_rep",
+        "Outside Reporter",
+        "outside@example.com",
+        "pw1234",
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+
+    let app = rust_mantis_bt::controllers::build_router(db);
+    let (admin_cookie, _) = get_cookie(&app, "administrator", "root", false).await;
+    let (rep_cookie, _) = get_cookie(&app, "outside_rep", "pw1234", false).await;
+
+    // 1. Unauthorized Reporter requesting private ?project_id= gets 403 Forbidden and no secret leak
+    let deny_view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/view_all_bug_page?project_id={}&target_version=v2.0",
+                    priv_proj
+                ))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_view.status(), StatusCode::FORBIDDEN);
+    let deny_view_body = String::from_utf8(
+        axum::body::to_bytes(deny_view.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!deny_view_body.contains("Secret v2 issue"));
+
+    // 2. Unauthorized Reporter requesting /csv_export?project_id= gets 403 Forbidden
+    let deny_csv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/csv_export?project_id={}", priv_proj))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_csv.status(), StatusCode::FORBIDDEN);
+
+    // 3. Unauthorized Reporter posting /filter_save with private project_id gets 403 Forbidden
+    let deny_save = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=StealScope&project_id={}&status=10",
+                    priv_proj
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_save.status(), StatusCode::FORBIDDEN);
+
+    // 4. Authorized admin viewing ?target_version=v2.0 sees Active (1) and removable Target Version chip
+    let auth_tv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/view_all_bug_page?target_version=v2.0")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auth_tv.status(), StatusCode::OK);
+    let auth_tv_body = String::from_utf8(
+        axum::body::to_bytes(auth_tv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(auth_tv_body.contains("Active (1)"));
+    assert!(auth_tv_body.contains("Target Version: v2.0"));
+    assert_no_nested_forms(&auth_tv_body);
 }

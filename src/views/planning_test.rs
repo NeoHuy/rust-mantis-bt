@@ -162,6 +162,7 @@ fn test_render_manage_email_queue_page() {
     assert!(html.contains("user@example.com"));
     assert!(html.contains("Issue #1 assigned"));
     assert!(html.contains(r#"action="/manage_email_delete/1""#));
+    assert!(html.contains("btn btn-danger btn-white btn-round btn-sm"));
 }
 
 #[test]
@@ -205,6 +206,9 @@ fn test_render_news_edit_page_and_news_page_edit_link() {
     assert!(!out_list_rep.0.contains(r#"href="/news_edit_page/42""#));
     assert!(out_list_mgr.0.contains(r#"class="widget-toolbar""#));
     assert!(out_list_mgr.0.contains("btn-white btn-round btn-sm"));
+    assert!(out_list_mgr
+        .0
+        .contains("btn btn-danger btn-white btn-round btn-sm"));
 }
 
 #[test]

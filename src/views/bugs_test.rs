@@ -1890,3 +1890,80 @@ fn test_render_bugnotes_cards_anchors_badges_and_no_nested_forms() {
     assert!(out.contains("Make Public"));
     assert_no_nested_forms(&out);
 }
+
+#[test]
+fn test_view_all_bug_page_counts_and_renders_version_scope_chips() {
+    let ctx = dummy_ctx(1, 55);
+    let q_tv = ListBugsQuery {
+        target_version: Some("v2.0".to_string()),
+        ..Default::default()
+    };
+    let f_tv = BugFilter {
+        target_version: Some("v2.0".to_string()),
+        ..Default::default()
+    };
+    let Html(html_tv) = render_view_all_bug_page(
+        &ctx,
+        &[],
+        0,
+        1,
+        25,
+        &f_tv,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q_tv,
+        &ViewIssuesMeta::default(),
+    );
+    assert!(html_tv.contains("Active (1)"));
+    assert!(html_tv.contains("Version Scope:"));
+    assert!(html_tv.contains("Target Version: v2.0"));
+    assert!(html_tv.contains("Clear Target Version filter"));
+    assert!(
+        !html_tv.contains(r#"title="Clear Target Version filter""#)
+            || !html_tv.contains(r#"href="/view_all_bug_page?page=1&target_version=v2.0""#)
+    );
+    assert_no_nested_forms(&html_tv);
+
+    let q_both = ListBugsQuery {
+        target_version: Some("v2.0".to_string()),
+        fixed_in_version: Some("v1.9".to_string()),
+        ..Default::default()
+    };
+    let f_both = BugFilter {
+        target_version: Some("v2.0".to_string()),
+        fixed_in_version: Some("v1.9".to_string()),
+        ..Default::default()
+    };
+    let Html(html_both) = render_view_all_bug_page(
+        &ctx,
+        &[],
+        0,
+        1,
+        25,
+        &f_both,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q_both,
+        &ViewIssuesMeta::default(),
+    );
+    assert!(html_both.contains("Active (2)"));
+    assert!(html_both.contains("Target Version: v2.0"));
+    assert!(html_both.contains("Fixed in Version: v1.9"));
+    assert_no_nested_forms(&html_both);
+}

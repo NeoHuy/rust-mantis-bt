@@ -55,6 +55,12 @@ pub async fn filter_save(
     if is_public && ctx.user.access_level < 70 {
         return forbidden(&ctx, "Manager access required to save public filters.");
     }
+    if let Some(pid) = form.project_id.filter(|&v| v > 0) {
+        let eff = db.effective_access_level(&ctx.user, pid).unwrap_or(0);
+        if eff < 10 {
+            return forbidden(&ctx, "You do not have access to this project.");
+        }
+    }
 
     let filter = BugFilter {
         project_id: if let Some(pid) = form.project_id.filter(|&v| v > 0) {

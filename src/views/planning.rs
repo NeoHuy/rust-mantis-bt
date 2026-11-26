@@ -606,7 +606,7 @@ pub fn render_news_page(
                     r#"<div class="widget-toolbar">
                         <a href="/news_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>
                         <form method="POST" action="/news_delete/{}" class="inline-block m-0" onsubmit="return confirm('Delete news item?');">
-                            <button type="submit" class="btn btn-danger btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
+                            <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                         </form>
                     </div>"#,
                     n.id, n.id
@@ -709,7 +709,7 @@ pub fn render_manage_email_queue_page(
                 <td class="whitespace-nowrap">{}</td>
                 <td>
                     <form method="POST" action="/manage_email_delete/{}" class="inline-block m-0">
-                        <button type="submit" class="btn btn-danger btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>
             </tr>"#,

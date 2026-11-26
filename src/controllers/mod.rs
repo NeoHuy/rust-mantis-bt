@@ -45,85 +45,72 @@ pub async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
     }
 }
 
-async fn favicon_handler() -> impl IntoResponse {
+fn static_asset_response<T: IntoResponse>(
+    content_type: &'static str,
+    body: T,
+) -> axum::response::Response {
     (
         [
-            (axum::http::header::CONTENT_TYPE, "image/x-icon"),
+            (axum::http::header::CONTENT_TYPE, content_type),
             (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
         ],
+        body,
+    )
+        .into_response()
+}
+
+async fn favicon_handler() -> impl IntoResponse {
+    static_asset_response(
+        "image/x-icon",
         include_bytes!("../../assets/favicon.ico").as_slice(),
     )
 }
 
 async fn logo_handler() -> impl IntoResponse {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "image/png"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+    static_asset_response(
+        "image/png",
         include_bytes!("../../assets/mantis_logo_notext.png").as_slice(),
     )
 }
 
 async fn full_logo_handler() -> impl IntoResponse {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "image/png"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+    static_asset_response(
+        "image/png",
         include_bytes!("../../assets/mantis_logo.png").as_slice(),
     )
 }
 
 async fn tailwind_css_handler() -> impl IntoResponse {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+    static_asset_response(
+        "text/css; charset=utf-8",
         include_str!("../../assets/css/tailwind.css"),
     )
 }
 
 async fn font_awesome_css_handler() -> impl IntoResponse {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+    static_asset_response(
+        "text/css; charset=utf-8",
         include_str!("../../assets/css/font-awesome.min.css"),
     )
 }
 
 async fn mantis_js_handler() -> impl IntoResponse {
-    (
-        [
-            (
-                axum::http::header::CONTENT_TYPE,
-                "application/javascript; charset=utf-8",
-            ),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+    static_asset_response(
+        "application/javascript; charset=utf-8",
         include_str!("../../assets/js/mantis.js"),
     )
 }
 
 async fn fontawesome_woff2_handler() -> impl IntoResponse {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "font/woff2"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+    static_asset_response(
+        "font/woff2",
         include_bytes!("../../assets/fonts/fontawesome-webfont.woff2").as_slice(),
     )
 }
 
 async fn fontawesome_woff_handler() -> impl IntoResponse {
-    (
-        [
-            (axum::http::header::CONTENT_TYPE, "font/woff"),
-            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
+    static_asset_response(
+        "font/woff",
         include_bytes!("../../assets/fonts/fontawesome-webfont.woff").as_slice(),
     )
 }

@@ -30,8 +30,8 @@ fn test_render_unauthenticated_layout() {
     assert!(html.contains("<p>Form</p>"));
     assert!(html.contains(r#"class="login-layout light-login""#));
     assert!(html.contains(r#"src="/assets/mantis_logo.png""#));
-    assert!(html.contains(r#"href="/assets/tailwind.css""#));
-    assert!(html.contains(r#"href="/assets/font-awesome.min.css""#));
+    assert!(html.contains(r#"href="/assets/tailwind.css?v="#));
+    assert!(html.contains(r#"href="/assets/font-awesome.min.css?v="#));
 }
 
 #[test]
@@ -63,10 +63,10 @@ fn test_render_layout_authenticated_admin_shell() {
 
     assert!(html.contains("<title>Manage Users - MantisBT</title>"));
     assert!(html.contains(r#"<meta name="csrf-token" content=""#));
-    assert!(html.contains(r#"href="/assets/tailwind.css""#));
-    assert!(html.contains(r#"href="/assets/font-awesome.min.css""#));
-    assert!(html.contains(r#"src="/assets/mantis.js" defer"#));
-    assert!(html.contains(r#"<body class="skin-3">"#));
+    assert!(html.contains(r#"href="/assets/tailwind.css?v="#));
+    assert!(html.contains(r#"href="/assets/font-awesome.min.css?v="#));
+    assert!(html.contains(r#"src="/assets/mantis.js?v="#));
+    assert!(html.contains(r#"<body class="skin-3" data-username="jdoe">"#));
 
     // Navbar controls
     assert!(html.contains(r#"id="menu-toggler""#));

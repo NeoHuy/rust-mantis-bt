@@ -183,7 +183,9 @@ pub fn render_manage_plugin_page(
             r#"<span class="badge badge-warning">Disabled</span>"#
         };
         let prot_str = if p.protected != 0 { "Yes" } else { "No" };
-        let action_html = if p.protected != 0 {
+        let is_toggleable = p.protected == 0
+            || crate::models::TOGGLEABLE_CORE_PLUGINS.contains(&p.basename.as_str());
+        let action_html = if !is_toggleable {
             "<em>Protected</em>".to_string()
         } else {
             let next_enabled = if p.enabled != 0 { "0" } else { "1" };

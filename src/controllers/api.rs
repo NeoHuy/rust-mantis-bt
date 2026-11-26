@@ -189,7 +189,7 @@ pub async fn manage_plugin_toggle(
         Ok(()) => Redirect::to("/manage_plugin_page?msg=Plugin+updated").into_response(),
         Err(e) => Redirect::to(&format!(
             "/manage_plugin_page?err={}",
-            crate::models::url_encode(&e)
+            crate::models::url_encode(&crate::controllers::sanitize_error_message(&e))
         ))
         .into_response(),
     }
@@ -583,7 +583,7 @@ pub async fn rest_create_issue(
         .unwrap_or(70) as i32;
     let view_state = payload.view_state.as_ref().and_then(|v| v.id).unwrap_or(10) as i32;
 
-    let mentions = crate::views::formatting::collect_mentions(&[
+    let mentions = crate::models::collect_mentions(&[
         payload.description.as_deref().unwrap_or(""),
         payload.steps_to_reproduce.as_deref().unwrap_or(""),
         payload.additional_information.as_deref().unwrap_or(""),
@@ -621,7 +621,7 @@ pub async fn rest_create_issue(
 
             // Mention notifications
             if !mentions.is_empty() {
-                let context_text = crate::views::formatting::combine_context(
+                let context_text = crate::models::combine_context(
                     &payload.summary,
                     &[
                         payload.description.as_deref().unwrap_or(""),
@@ -714,6 +714,15 @@ pub async fn rest_update_issue(
         .filter(|&new_st| new_st != bug.status);
 
     if let Some(new_st) = requested_status_change {
+        if bug.status == 90 && new_st != 20 && new_st != 90 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "Closed bug can only be reopened to feedback (status 20)"
+                })),
+            )
+                .into_response();
+        }
         let is_reporter_reopen =
             bug.status == 80 && new_st == 20 && eff >= 25 && bug.reporter_id == auth.user.id;
         if !is_reporter_reopen {
@@ -739,20 +748,27 @@ pub async fn rest_update_issue(
     let old_full = db.get_bug_full(id).ok().flatten();
     let old_mentions: std::collections::HashSet<String> = if let Some(ref f) = old_full {
         let mut m = std::collections::HashSet::new();
-        for u in crate::views::formatting::extract_mentions(&f.description) {
-            m.insert(u.to_lowercase());
+        for u in crate::models::extract_mentions(&f.description) {
+            m.insert(u.to_ascii_lowercase());
         }
-        for u in crate::views::formatting::extract_mentions(&f.steps_to_reproduce) {
-            m.insert(u.to_lowercase());
+        for u in crate::models::extract_mentions(&f.steps_to_reproduce) {
+            m.insert(u.to_ascii_lowercase());
         }
-        for u in crate::views::formatting::extract_mentions(&f.additional_information) {
-            m.insert(u.to_lowercase());
+        for u in crate::models::extract_mentions(&f.additional_information) {
+            m.insert(u.to_ascii_lowercase());
         }
         m
     } else {
         std::collections::HashSet::new()
     };
 
+    let effective_summary = payload
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&bug.summary)
+        .to_string();
     let new_desc = payload.description.clone();
     let new_steps = payload.steps_to_reproduce.clone();
     let new_add = payload.additional_information.clone();
@@ -775,21 +791,29 @@ pub async fn rest_update_issue(
     }
 
     // Mention notifications for newly added mentions
-    let updated_mentions = crate::views::formatting::collect_mentions(&[
+    let updated_mentions = crate::models::collect_mentions(&[
         new_desc.as_deref().unwrap_or(""),
         new_steps.as_deref().unwrap_or(""),
         new_add.as_deref().unwrap_or(""),
     ]);
-    let newly_added = crate::views::formatting::diff_new_mentions(&old_mentions, &updated_mentions);
+    let newly_added = crate::models::diff_new_mentions(&old_mentions, &updated_mentions);
     if !newly_added.is_empty() {
-        let context = crate::views::formatting::combine_context(
-            &bug.summary,
+        let base_context = crate::models::combine_context(
+            &effective_summary,
             &[
                 new_desc.as_deref().unwrap_or(""),
                 new_steps.as_deref().unwrap_or(""),
                 new_add.as_deref().unwrap_or(""),
             ],
         );
+        let context = if let Some(new_st) = requested_status_change {
+            let status_name = BugStatus::from_i32(new_st)
+                .map(|s| s.as_str())
+                .unwrap_or("updated");
+            format!("[Status changed to {}]\n\n{}", status_name, base_context)
+        } else {
+            base_context
+        };
         if let Err(e) = db.notify_bug_mentions(id, auth.user.id, &newly_added, false, &context) {
             eprintln!("[rest] failed to notify mentions on issue update: {}", e);
         }
@@ -801,7 +825,14 @@ pub async fn rest_update_issue(
             .and_then(|r| r.id)
             .map(|v| v as i32)
             .unwrap_or(bug.resolution);
-        if let Err(e) = db.change_bug_status(id, auth.user.id, new_st, res_code, None) {
+        if let Err(e) = db.change_bug_status_with_exclude(
+            id,
+            auth.user.id,
+            new_st,
+            res_code,
+            None,
+            &newly_added,
+        ) {
             return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
         }
     }
@@ -890,7 +921,7 @@ pub async fn rest_add_issue_note(
         0
     };
 
-    let mentions = crate::views::formatting::collect_mentions(&[&payload.text]);
+    let mentions = crate::models::collect_mentions(&[&payload.text]);
 
     match db.add_bugnote_with_time_and_mentions(
         id,

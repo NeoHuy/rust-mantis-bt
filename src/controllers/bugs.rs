@@ -14,7 +14,7 @@ use axum::Router;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
-use crate::views::formatting::extract_mentions;
+use crate::models::extract_mentions;
 
 pub fn url_decode(s: &str) -> String {
     let mut bytes = Vec::with_capacity(s.len());
@@ -798,11 +798,8 @@ pub async fn bug_report(
         }
     }
 
-    let deduped = crate::views::formatting::collect_mentions(&[
-        &description,
-        &steps_to_reproduce,
-        &additional_info,
-    ]);
+    let deduped =
+        crate::models::collect_mentions(&[&description, &steps_to_reproduce, &additional_info]);
 
     let bug_id = match db.create_bug_with_mentions(
         project_id,
@@ -852,7 +849,7 @@ pub async fn bug_report(
     }
 
     if !deduped.is_empty() {
-        let context_text = crate::views::formatting::combine_context(
+        let context_text = crate::models::combine_context(
             summary,
             &[&description, &steps_to_reproduce, &additional_info],
         );
@@ -894,6 +891,101 @@ pub async fn bug_report(
     } else {
         Redirect::to(&format!("/view_bug_page/{}", bug_id)).into_response()
     }
+}
+
+fn build_format_context(
+    db: &Db,
+    viewer: &User,
+    text_corpus: &[&str],
+    users: &[User],
+) -> views::formatting::FormatContext {
+    let formatting_enabled = db.is_plugin_enabled(crate::models::PLUGIN_CORE_FORMATTING);
+    let mut format_ctx = views::formatting::FormatContext {
+        enabled: formatting_enabled,
+        ..Default::default()
+    };
+
+    if !formatting_enabled {
+        return format_ctx;
+    }
+
+    let mut issue_ids = std::collections::BTreeSet::new();
+    let mut note_ids = std::collections::BTreeSet::new();
+
+    for text in text_corpus {
+        for id in crate::models::scan_issue_refs(text) {
+            issue_ids.insert(id);
+        }
+        for id in crate::models::scan_note_refs(text) {
+            note_ids.insert(id);
+        }
+    }
+
+    // Cap batch DB lookups to 100 unique IDs per type in deterministic order to bound query size and prevent N+1/DoS amplification.
+    let target_issue_ids: Vec<i64> = issue_ids.into_iter().take(100).collect();
+    let target_note_ids: Vec<i64> = note_ids.into_iter().take(100).collect();
+
+    let mut project_eff_cache: HashMap<i64, i32> = HashMap::new();
+
+    match db.get_bugs_by_ids(&target_issue_ids) {
+        Ok(target_bugs) => {
+            for (&id, target_bug) in &target_bugs {
+                let target_eff = *project_eff_cache
+                    .entry(target_bug.project_id)
+                    .or_insert_with(|| {
+                        db.effective_access_level(viewer, target_bug.project_id)
+                            .unwrap_or(0)
+                    });
+                if Db::can_view_bug(viewer.id, target_eff, target_bug) {
+                    format_ctx.issue_refs.insert(
+                        id,
+                        views::formatting::IssueRefInfo {
+                            id: target_bug.id,
+                            status: target_bug.status,
+                            summary: target_bug.summary.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        Err(e) => eprintln!("[formatting] error batch fetching target bugs: {}", e),
+    }
+
+    match db.get_bugnotes_by_ids(&target_note_ids) {
+        Ok(target_notes) => {
+            let parent_bug_ids: Vec<i64> = target_notes.values().map(|n| n.bug_id).collect();
+            let parent_bugs = db.get_bugs_by_ids(&parent_bug_ids).unwrap_or_default();
+
+            for (&nid, target_note) in &target_notes {
+                if let Some(target_bug) = parent_bugs.get(&target_note.bug_id) {
+                    let target_eff = *project_eff_cache
+                        .entry(target_bug.project_id)
+                        .or_insert_with(|| {
+                            db.effective_access_level(viewer, target_bug.project_id)
+                                .unwrap_or(0)
+                        });
+                    if Db::can_view_bug(viewer.id, target_eff, target_bug)
+                        && (target_note.view_state != crate::models::VIEW_STATE_PRIVATE
+                            || target_eff >= crate::models::ACCESS_DEVELOPER)
+                    {
+                        format_ctx.note_refs.insert(nid, target_note.bug_id);
+                    }
+                }
+            }
+        }
+        Err(e) => eprintln!("[formatting] error batch fetching target bugnotes: {}", e),
+    }
+
+    for u in users {
+        if u.enabled != 0 {
+            format_ctx.valid_usernames.insert(u.username.clone());
+            format_ctx
+                .valid_usernames
+                .insert(u.username.to_ascii_lowercase());
+        }
+    }
+
+    format_ctx
 }
 
 pub async fn view_bug_page(
@@ -1353,99 +1445,14 @@ pub async fn view_bug_page(
         String::new()
     };
 
-    let formatting_enabled = db.is_plugin_enabled("MantisCoreFormatting");
-    let mut format_ctx = views::formatting::FormatContext {
-        enabled: formatting_enabled,
-        ..Default::default()
-    };
-
-    if formatting_enabled {
-        let mut text_corpus = Vec::new();
-        text_corpus.push(full.description.as_str());
-        text_corpus.push(full.steps_to_reproduce.as_str());
-        text_corpus.push(full.additional_information.as_str());
-        for n in &notes {
-            text_corpus.push(n.note.as_str());
-        }
-
-        let mut issue_ids = std::collections::BTreeSet::new();
-        let mut note_ids = std::collections::BTreeSet::new();
-
-        for text in text_corpus {
-            for id in views::formatting::scan_issue_refs(text) {
-                issue_ids.insert(id);
-            }
-            for id in views::formatting::scan_note_refs(text) {
-                note_ids.insert(id);
-            }
-        }
-
-        // Limit batch lookups to 100 refs in deterministic order to prevent N+1 amplification DoS
-        let target_issue_ids: Vec<i64> = issue_ids.into_iter().take(100).collect();
-        let target_note_ids: Vec<i64> = note_ids.into_iter().take(100).collect();
-
-        let mut project_eff_cache: HashMap<i64, i32> = HashMap::new();
-
-        // 1. Batch-fetch all referenced issues in a single query
-        match db.get_bugs_by_ids(&target_issue_ids) {
-            Ok(target_bugs) => {
-                for (&id, target_bug) in &target_bugs {
-                    let target_eff = *project_eff_cache
-                        .entry(target_bug.project_id)
-                        .or_insert_with(|| {
-                            db.effective_access_level(&ctx.user, target_bug.project_id)
-                                .unwrap_or(0)
-                        });
-                    if Db::can_view_bug(ctx.user.id, target_eff, target_bug) {
-                        format_ctx.issue_refs.insert(
-                            id,
-                            views::formatting::IssueRefInfo {
-                                id: target_bug.id,
-                                status: target_bug.status,
-                                summary: target_bug.summary.clone(),
-                            },
-                        );
-                    }
-                }
-            }
-            Err(e) => eprintln!("[formatting] error batch fetching target bugs: {}", e),
-        }
-
-        // 2. Batch-fetch all referenced notes and their parent issues in batch queries
-        match db.get_bugnotes_by_ids(&target_note_ids) {
-            Ok(target_notes) => {
-                let parent_bug_ids: Vec<i64> = target_notes.values().map(|n| n.bug_id).collect();
-                let parent_bugs = db.get_bugs_by_ids(&parent_bug_ids).unwrap_or_default();
-
-                for (&nid, target_note) in &target_notes {
-                    if let Some(target_bug) = parent_bugs.get(&target_note.bug_id) {
-                        let target_eff = *project_eff_cache
-                            .entry(target_bug.project_id)
-                            .or_insert_with(|| {
-                                db.effective_access_level(&ctx.user, target_bug.project_id)
-                                    .unwrap_or(0)
-                            });
-                        if Db::can_view_bug(ctx.user.id, target_eff, target_bug) {
-                            // For private bugnotes, require ACCESS_DEVELOPER (eff >= 55)
-                            if target_note.view_state != crate::models::VIEW_STATE_PRIVATE
-                                || target_eff >= crate::models::ACCESS_DEVELOPER
-                            {
-                                format_ctx.note_refs.insert(nid, target_note.bug_id);
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => eprintln!("[formatting] error batch fetching target bugnotes: {}", e),
-        }
-
-        for u in &users {
-            if u.enabled != 0 {
-                format_ctx.valid_usernames.insert(u.username.clone());
-                format_ctx.valid_usernames.insert(u.username.to_lowercase());
-            }
-        }
+    let mut text_corpus = Vec::new();
+    text_corpus.push(full.description.as_str());
+    text_corpus.push(full.steps_to_reproduce.as_str());
+    text_corpus.push(full.additional_information.as_str());
+    for n in &notes {
+        text_corpus.push(n.note.as_str());
     }
+    let format_ctx = build_format_context(&db, &ctx.user, &text_corpus, &users);
 
     let mut notes_html = total_time_html;
     notes_html.push_str(&views::bugs::render_bugnotes_table(
@@ -1760,21 +1767,13 @@ pub async fn update_bug(
         new_mentions.extend(m);
     }
 
-    let fresh_mentions = crate::views::formatting::diff_new_mentions(&old_mentions, &new_mentions);
+    let fresh_mentions = crate::models::diff_new_mentions(&old_mentions, &new_mentions);
     let context_text = context_parts.join("\n\n");
 
     match db.update_bug_fields(id, ctx.user.id, fields) {
         Ok(_) => {
-            for (cf_id, val) in custom_field_values_to_set {
-                if let Err(e) = db.set_custom_field_value(cf_id, id, ctx.user.id, &val) {
-                    return Redirect::to(&format!(
-                        "/view_bug_page/{}?err={}",
-                        id,
-                        url_encode(&sanitize_error_message(&e))
-                    ))
-                    .into_response();
-                }
-            }
+            // Trigger mention notifications immediately after update_bug_fields commits
+            // so a custom field write failure cannot drop emails for already-saved text.
             if !fresh_mentions.is_empty() {
                 if let Err(e) =
                     db.notify_bug_mentions(id, ctx.user.id, &fresh_mentions, false, &context_text)
@@ -1783,6 +1782,16 @@ pub async fn update_bug(
                         "[mentions] failed to send mention notifications on update_bug: {}",
                         e
                     );
+                }
+            }
+            for (cf_id, val) in custom_field_values_to_set {
+                if let Err(e) = db.set_custom_field_value(cf_id, id, ctx.user.id, &val) {
+                    return Redirect::to(&format!(
+                        "/view_bug_page/{}?err={}",
+                        id,
+                        url_encode(&sanitize_error_message(&e))
+                    ))
+                    .into_response();
                 }
             }
             Redirect::to(&format!("/view_bug_page/{}?msg=Issue+updated", id)).into_response()
@@ -1889,6 +1898,7 @@ pub async fn bug_clone(
     let copy_files =
         form.copy_files.as_deref() == Some("1") || form.copy_files.as_deref() == Some("on");
 
+    // Intentionally do NOT re-notify historical @mentions copied from the source issue during cloning.
     match db.clone_bug(
         id,
         ctx.user.id,
@@ -2181,6 +2191,7 @@ pub async fn bug_actiongroup(
                     .effective_access_level(&ctx.user, target_project_id)
                     .unwrap_or(0);
                 if target_eff >= 25 {
+                    // Intentionally do NOT re-notify historical @mentions copied from the source issue during bulk cloning.
                     db.clone_bug(
                         bug.id,
                         ctx.user.id,
@@ -2407,8 +2418,30 @@ pub async fn bug_actiongroup(
                                 .to_string())
                         } else {
                             let valid_vs = if view_state == 50 { 50 } else { 10 };
-                            db.add_bugnote(bug.id, ctx.user.id, note_text, valid_vs)
-                                .map(|_| ())
+                            let deduped = crate::models::collect_mentions(&[note_text]);
+                            let res = db.add_bugnote_with_time_and_mentions(
+                                bug.id,
+                                ctx.user.id,
+                                note_text,
+                                valid_vs,
+                                0,
+                                &deduped,
+                            );
+                            if res.is_ok() && !deduped.is_empty() {
+                                if let Err(e) = db.notify_bug_mentions(
+                                    bug.id,
+                                    ctx.user.id,
+                                    &deduped,
+                                    valid_vs == crate::models::VIEW_STATE_PRIVATE,
+                                    note_text,
+                                ) {
+                                    eprintln!(
+                                        "[mentions] failed to send mention notifications on bulk ADD_NOTE: {}",
+                                        e
+                                    );
+                                }
+                            }
+                            res.map(|_| ())
                         }
                     } else {
                         Err("Empty note text".to_string())
@@ -2951,7 +2984,7 @@ pub async fn bugnote_add(
     };
 
     let trimmed_note = form.note.trim();
-    let deduped = crate::views::formatting::collect_mentions(&[trimmed_note]);
+    let deduped = crate::models::collect_mentions(&[trimmed_note]);
 
     match db.add_bugnote_with_time_and_mentions(
         bug_id,
@@ -3083,6 +3116,13 @@ pub async fn bugnote_update(
     }
 
     let note_text = form.note.unwrap_or_default();
+    let old_mentions: HashSet<String> = extract_mentions(&note.note)
+        .into_iter()
+        .map(|m| m.to_ascii_lowercase())
+        .collect();
+    let new_mentions = crate::models::collect_mentions(&[&note_text]);
+    let fresh_mentions = crate::models::diff_new_mentions(&old_mentions, &new_mentions);
+
     if let Err(e) = db.update_bugnote(id, ctx.user.id, &note_text) {
         return Redirect::to(&format!(
             "/bugnote_edit_page/{}?err={}",
@@ -3090,6 +3130,21 @@ pub async fn bugnote_update(
             url_encode(&sanitize_error_message(&e))
         ))
         .into_response();
+    }
+
+    if !fresh_mentions.is_empty() {
+        if let Err(e) = db.notify_bug_mentions(
+            bug.id,
+            ctx.user.id,
+            &fresh_mentions,
+            note.view_state == crate::models::VIEW_STATE_PRIVATE,
+            &note_text,
+        ) {
+            eprintln!(
+                "[mentions] failed to send mention notifications on bugnote_update: {}",
+                e
+            );
+        }
     }
 
     Redirect::to(&format!("/view_bug_page/{}", bug.id)).into_response()

@@ -110,10 +110,12 @@ fn test_code_blocks_and_inline_code_protection() {
         "```rust\nfn main() {\n    let x = \"#101 ~501 @alice\";\n}\n```\n\nUse `cargo test #101`";
     let formatted = format_text(code_input, &ctx);
 
-    // Fenced code block with language
+    // Fenced code block with language and CSP-safe server-side highlighting
     assert!(formatted.contains(r#"<pre class="code-block"><code class="language-rust">"#));
-    assert!(formatted.contains("let x = &quot;#101 ~501 @alice&quot;;"));
-    // Tokens inside code block must NOT be linked or highlighted
+    assert!(formatted.contains(
+        r#"<span class="hl-kw">let</span> x = <span class="hl-str">&quot;#101 ~501 @alice&quot;</span>;"#
+    ));
+    // Tokens inside code block must NOT be linked or highlighted as mentions/issue refs
     assert!(!formatted.contains("/view_bug_page/101"));
     assert!(!formatted.contains("class=\"mention\""));
 
@@ -144,16 +146,19 @@ fn test_issue_refs_open_vs_resolved_and_unauthorized_leakage() {
     ));
     assert!(!open_res.contains("issue-link-resolved"));
 
-    // Resolved bug #102 (status 80) -> strikethrough styling
+    // Resolved bug #102 (status 80) -> single strikethrough styling via CSS class (no redundant <del>)
     let res_res = format_text("Check #102 now", &ctx);
     assert!(res_res.contains(
-        r##"<a href="/view_bug_page/102" class="issue-link-resolved" title="#0000102: Fix memory leak [resolved]"><del>#0000102</del></a>"##
+        r##"<a href="/view_bug_page/102" class="issue-link-resolved" title="#0000102: Fix memory leak [resolved]">#0000102</a>"##
     ));
+    assert!(!res_res.contains("<del>#0000102</del>"));
 
-    // Closed bug #103 (status 90) -> strikethrough styling
+    // Closed bug #103 (status 90) -> single strikethrough styling via CSS class
     let closed_res = format_text("Check #103 now", &ctx);
-    assert!(closed_res.contains("issue-link-resolved"));
-    assert!(closed_res.contains("<del>#0000103</del>"));
+    assert!(closed_res.contains(
+        r##"<a href="/view_bug_page/103" class="issue-link-resolved" title="#0000103: Deprecate old API [closed]">#0000103</a>"##
+    ));
+    assert!(!closed_res.contains("<del>#0000103</del>"));
 
     // Missing / inaccessible bug #999 -> NO title leak, NO link!
     let missing_res = format_text("Check #999 secret issue", &ctx);
@@ -780,6 +785,220 @@ fn test_markdown_bracket_spam_with_2kb_url_zero_alloc_performance() {
     assert!(
         elapsed < std::time::Duration::from_millis(200),
         "1000 brackets before 2KB url took {:?}, must be under 200ms (zero redundant allocs)",
+        elapsed
+    );
+    assert!(!res.contains("<a href"));
+}
+
+#[test]
+fn test_highlight_code_block_languages() {
+    use super::highlight_code_block;
+
+    // Rust
+    let rust_hl = highlight_code_block(
+        "rust",
+        "#[derive(Debug)]\npub fn add(a: i32) -> Result<i32, String> {\n    // comment\n    let x = \"hi\";\n    Ok(a + 42)\n}",
+    );
+    assert!(rust_hl.contains(r#"<span class="hl-attr">#[derive(Debug)]</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-kw">pub</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-kw">fn</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-ty">i32</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-ty">Result</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-cmt">// comment</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&quot;hi&quot;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-num">42</span>"#));
+
+    // Python
+    let py_hl = highlight_code_block(
+        "py",
+        "@staticmethod\ndef greet(name: str):\n    # hello\n    return 'hi'",
+    );
+    assert!(py_hl.contains(r#"<span class="hl-attr">@staticmethod</span>"#));
+    assert!(py_hl.contains(r#"<span class="hl-kw">def</span>"#));
+    assert!(py_hl.contains(r#"<span class="hl-ty">str</span>"#));
+    assert!(py_hl.contains(r#"<span class="hl-cmt"># hello</span>"#));
+    assert!(py_hl.contains(r#"<span class="hl-str">&#x27;hi&#x27;</span>"#));
+
+    // JS / TS
+    let ts_hl = highlight_code_block(
+        "typescript",
+        "const url: string = `https://x.com`; // note\nreturn true;",
+    );
+    assert!(ts_hl.contains(r#"<span class="hl-kw">const</span>"#));
+    assert!(ts_hl.contains(r#"<span class="hl-ty">string</span>"#));
+    assert!(ts_hl.contains(r#"<span class="hl-str">`https://x.com`</span>"#));
+    assert!(ts_hl.contains(r#"<span class="hl-cmt">// note</span>"#));
+
+    // SQL (case-insensitive)
+    let sql_hl = highlight_code_block(
+        "sql",
+        "select id, name from users where active = 1 and note = 'ok'; -- q",
+    );
+    assert!(sql_hl.contains(r#"<span class="hl-kw">select</span>"#));
+    assert!(sql_hl.contains(r#"<span class="hl-kw">from</span>"#));
+    assert!(sql_hl.contains(r#"<span class="hl-kw">where</span>"#));
+    assert!(sql_hl.contains(r#"<span class="hl-num">1</span>"#));
+    assert!(sql_hl.contains(r#"<span class="hl-str">&#x27;ok&#x27;</span>"#));
+    assert!(sql_hl.contains(r#"<span class="hl-cmt">-- q</span>"#));
+
+    // JSON (keys vs string values, numbers, booleans)
+    let json_hl = highlight_code_block("json", r#"{"count": 7, "ok": true, "msg": "hi"}"#);
+    assert!(json_hl.contains(r#"<span class="hl-attr">&quot;count&quot;</span>"#));
+    assert!(json_hl.contains(r#"<span class="hl-num">7</span>"#));
+    assert!(json_hl.contains(r#"<span class="hl-kw">true</span>"#));
+    assert!(json_hl.contains(r#"<span class="hl-str">&quot;hi&quot;</span>"#));
+
+    // Bash / Go / PHP / C++ / CSS / HTML
+    let bash_hl = highlight_code_block("bash", "if [ -n \"$HOME\" ]; then echo $USER; fi");
+    assert!(bash_hl.contains(r#"<span class="hl-kw">if</span>"#));
+    assert!(bash_hl.contains(r#"<span class="hl-attr">$USER</span>"#));
+
+    let go_hl = highlight_code_block("go", "func main() { var x int = 3 }");
+    assert!(go_hl.contains(r#"<span class="hl-kw">func</span>"#));
+    assert!(go_hl.contains(r#"<span class="hl-ty">int</span>"#));
+
+    let php_hl = highlight_code_block("php", "function f($x) { return null; }");
+    assert!(php_hl.contains(r#"<span class="hl-kw">function</span>"#));
+    assert!(php_hl.contains(r#"<span class="hl-attr">$x</span>"#));
+
+    let cpp_hl = highlight_code_block("c++", "#include <vector>\nint main() { return 0; }");
+    assert!(cpp_hl.contains(r#"<span class="hl-attr">#include</span>"#));
+    assert!(cpp_hl.contains(r#"<span class="hl-ty">int</span>"#));
+
+    let css_hl = highlight_code_block("css", ".btn { color: #ff0000; padding: 8px; }");
+    assert!(css_hl.contains(r#"<span class="hl-attr">color</span>"#));
+    assert!(css_hl.contains(r#"<span class="hl-num">#ff0000</span>"#));
+    assert!(css_hl.contains(r#"<span class="hl-num">8px</span>"#));
+
+    let html_hl = highlight_code_block("html", r#"<div class="box">hi</div>"#);
+    assert!(html_hl.contains(r#"&lt;<span class="hl-kw">div</span>"#));
+    assert!(html_hl.contains(r#"<span class="hl-attr">class</span>"#));
+    assert!(html_hl.contains(r#"<span class="hl-str">&quot;box&quot;</span>"#));
+}
+
+#[test]
+fn test_highlight_code_block_fallback_and_xss_safety() {
+    let ctx = sample_context(true);
+
+    // Unknown and empty language tags fall back to plain escaped text
+    let unknown = format_text("```unknownlang\nlet x = <tag>;\n```", &ctx);
+    assert!(unknown.contains(r#"<code class="language-unknownlang">let x = &lt;tag&gt;;</code>"#));
+    assert!(!unknown.contains("hl-kw"));
+
+    let empty = format_text("```\nlet x = 1;\n```", &ctx);
+    assert!(empty.contains(r#"<pre class="code-block"><code>let x = 1;</code></pre>"#));
+    assert!(!empty.contains("hl-kw"));
+
+    // XSS payloads inside highlighted HTML/JS/Rust blocks must be strictly escaped
+    let xss_html = format_text(
+        "```html\n<script>alert(1)</script><img src=\"x\" onerror=\"alert(2)\">\n```",
+        &ctx,
+    );
+    assert!(!xss_html.contains("<script>"));
+    assert!(!xss_html.contains("<img"));
+    assert!(xss_html.contains("&lt;<span class=\"hl-kw\">script</span>&gt;"));
+
+    // Malformed fence info strings must sanitize class attribute
+    let evil_fence = format_text(
+        "```rust\" onclick=\"alert(1)\nlet x = 1;\n```\n\n```\" onmouseover=\"alert(1)\nhello\n```",
+        &ctx,
+    );
+    assert!(!evil_fence.contains(r#"onclick="#));
+    assert!(!evil_fence.contains(r#"onmouseover="#));
+    assert!(evil_fence.contains(r#"<code class="language-rust">"#));
+    assert!(evil_fence.contains(r#"<pre class="code-block"><code>hello</code></pre>"#));
+}
+
+#[test]
+fn test_highlight_code_block_linear_time_adversarial() {
+    use super::highlight_code_block;
+
+    let large_rust = "let x = 123; // comment\n".repeat(10_000);
+    let large_json_ws = format!("{}{}", "\"key\"".repeat(5_000), " ".repeat(100_000));
+    let large_unclosed_html = "<div attr=\"val".repeat(10_000);
+
+    let start = std::time::Instant::now();
+    let _ = highlight_code_block("rust", &large_rust);
+    let _ = highlight_code_block("json", &large_json_ws);
+    let _ = highlight_code_block("html", &large_unclosed_html);
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "Adversarial code highlighting took {:?}, must stay linear under 500ms",
+        elapsed
+    );
+}
+
+#[test]
+fn test_formatter_edge_cases_polish() {
+    let mut ctx = sample_context(true);
+    ctx.valid_usernames.insert("bob".to_string());
+    ctx.valid_usernames.insert("bob.".to_string());
+
+    // 1. Bare URLs inside bold and strikethrough keep delimiters outside href
+    let bold_url = format_text("**https://example.com**", &ctx);
+    assert!(bold_url.contains(
+        r#"<strong><a href="https://example.com" target="_blank" rel="noopener noreferrer nofollow">https://example.com</a></strong>"#
+    ));
+    let strike_url = format_text("~~https://example.com/a~b~~", &ctx);
+    assert!(strike_url.contains(
+        r#"<del><a href="https://example.com/a~b" target="_blank" rel="noopener noreferrer nofollow">https://example.com/a~b</a></del>"#
+    ));
+
+    // 2. Balanced parentheses in Markdown link URLs (Wikipedia style)
+    let wiki_md = format_text("[Foo](https://en.wikipedia.org/wiki/Foo_(bar))", &ctx);
+    assert!(wiki_md.contains(
+        r#"<a href="https://en.wikipedia.org/wiki/Foo_(bar)" target="_blank" rel="noopener noreferrer nofollow">Foo</a>"#
+    ));
+
+    // 3. Nested blockquotes
+    let nested_q = format_text("> Outer\n> > Inner 1\n> > Inner 2\n> Back", &ctx);
+    assert!(nested_q
+        .contains("<blockquote>Outer<blockquote>Inner 1<br>Inner 2</blockquote>Back</blockquote>"));
+
+    // 4. Mention trailing punctuation consistency between extract_mentions and highlight_mentions
+    let mention_dot = "Ping @bob.";
+    assert_eq!(extract_mentions(mention_dot), vec!["bob".to_string()]);
+    let rendered_dot = format_text(mention_dot, &ctx);
+    assert!(rendered_dot.contains(r#"<span class="mention">@bob</span>."#));
+    assert!(!rendered_dot.contains(r#"<span class="mention">@bob.</span>"#));
+}
+
+#[test]
+fn test_highlight_unclosed_quote_and_rust_lifetimes() {
+    use super::highlight_code_block;
+
+    // 1. Unclosed single quote in bash stops at newline so subsequent lines still highlight
+    let bash_hl = highlight_code_block("bash", "echo don't\nif true; then echo ok; fi");
+    assert!(bash_hl.contains(r#"<span class="hl-kw">if</span>"#));
+    assert!(bash_hl.contains(r#"<span class="hl-kw">true</span>"#));
+
+    // 2. Rust lifetimes ('a, 'static) are NOT misread as char literals, while char literals ('z', '\n', '\'', '\\', '🦀') are
+    let rust_hl = highlight_code_block(
+        "rust",
+        "fn f<'a>(x: &'a str) -> char {\n    let c = 'z';\n    let nl = '\\n';\n    let sq = '\\'';\n    let bs = '\\\\';\n    let crab = '🦀';\n    c\n}",
+    );
+    assert!(!rust_hl.contains(r#"<span class="hl-str">'a"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;z&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;\n&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;\&#x27;&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;\\&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;🦀&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-ty">str</span>"#));
+}
+
+#[test]
+fn test_markdown_http_scheme_spam_performance() {
+    let ctx = sample_context(true);
+    let input = "[](http://".repeat(20_000);
+    let start = std::time::Instant::now();
+    let res = format_text(&input, &ctx);
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "20k [](http:// spam took {:?}, must stay under 200ms",
         elapsed
     );
     assert!(!res.contains("<a href"));

@@ -395,8 +395,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 .and_then(|v| v.as_i64())
                 .unwrap_or(10) as i32;
 
-            let mentions =
-                crate::views::formatting::collect_mentions(&[description, steps, add_info]);
+            let mentions = crate::models::collect_mentions(&[description, steps, add_info]);
 
             match db.create_bug_with_mentions(
                 project_id,
@@ -418,7 +417,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
             ) {
                 Ok(bug_id) => {
                     if !mentions.is_empty() {
-                        let context_text = crate::views::formatting::combine_context(
+                        let context_text = crate::models::combine_context(
                             summary,
                             &[description, steps, add_info],
                         );
@@ -590,7 +589,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                 0
             };
 
-            let mentions = crate::views::formatting::collect_mentions(&[text]);
+            let mentions = crate::models::collect_mentions(&[text]);
             match db.add_bugnote_with_time_and_mentions(
                 issue_id,
                 user.id,

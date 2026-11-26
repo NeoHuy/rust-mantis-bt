@@ -965,3 +965,86 @@ async fn test_mcp_sse_and_messages_e2e() {
     assert_eq!(res_dev.status(), StatusCode::OK);
     std::env::remove_var("MANTIS_ALLOW_QUERY_TOKEN");
 }
+
+#[test]
+fn test_mcp_mentions_on_create_issue_and_add_note() {
+    use rust_mantis_bt::mcp::tools::dispatch_tool_call;
+    use serde_json::json;
+
+    let db = Db::open_in_memory().unwrap();
+    let actor_id = db
+        .create_user(
+            "mcp_actor",
+            "Actor",
+            "actor@test.com",
+            "pw",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let actor = db.get_user_by_id(actor_id).unwrap().unwrap();
+    let _dev_id = db
+        .create_user("mcp_dev", "Dev", "dev@test.com", "pw", 55, true, false)
+        .unwrap();
+    let _rep_id = db
+        .create_user("mcp_rep", "Rep", "rep@test.com", "pw", 25, true, false)
+        .unwrap();
+
+    let proj_id = db
+        .create_project("McpMentionProj", 10, 10, "", true)
+        .unwrap();
+    let cat_id = db.add_category(proj_id, "General", 0).unwrap();
+    db.flush_email_queue().unwrap();
+
+    // 1. create_issue with @mcp_dev and @mcp_rep
+    let res = dispatch_tool_call(
+        &db,
+        &actor,
+        "create_issue",
+        json!({
+            "project_id": proj_id,
+            "category_id": cat_id,
+            "summary": "MCP mention issue",
+            "description": "Please inspect @mcp_dev and @mcp_rep"
+        }),
+    );
+    assert!(!res.is_error);
+    let parsed: serde_json::Value = serde_json::from_str(&res.content[0].text).unwrap();
+    let issue_id = parsed["issue_id"].as_i64().unwrap();
+
+    let emails = db.list_queued_emails().unwrap();
+    assert!(emails
+        .iter()
+        .any(|e| e.email == "dev@test.com" && e.subject.contains("Mentioned by mcp_actor")));
+    assert!(emails
+        .iter()
+        .any(|e| e.email == "rep@test.com" && e.subject.contains("Mentioned by mcp_actor")));
+
+    // 2. add_issue_note (private) mentions @mcp_dev and @mcp_rep -> only @mcp_dev (55+) notified
+    db.flush_email_queue().unwrap();
+    let res = dispatch_tool_call(
+        &db,
+        &actor,
+        "add_issue_note",
+        json!({
+            "issue_id": issue_id,
+            "text": "Private check @mcp_dev and @mcp_rep",
+            "view_state": 50
+        }),
+    );
+    assert!(!res.is_error);
+    let note_emails = db.list_queued_emails().unwrap();
+    let dev_note_emails: Vec<_> = note_emails
+        .iter()
+        .filter(|e| e.email == "dev@test.com")
+        .collect();
+    assert_eq!(dev_note_emails.len(), 1);
+    assert!(dev_note_emails[0]
+        .subject
+        .contains("Mentioned by mcp_actor"));
+    assert!(
+        !note_emails.iter().any(|e| e.email == "rep@test.com"),
+        "Reporter must not receive private note mention email"
+    );
+}

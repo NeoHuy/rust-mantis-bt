@@ -4477,9 +4477,9 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
         )
         .unwrap();
 
-    // Public note and private note on pub_bug (private note includes time_tracking)
+    // Public note (with time_tracking=30) and private note (with time_tracking=45) on pub_bug
     let pub_note_id = db
-        .add_bugnote(pub_bug, rep_id, "Public comment", 10)
+        .add_bugnote_with_time(pub_bug, rep_id, "Public comment", 10, 30)
         .unwrap();
     let priv_note_id = db
         .add_bugnote_with_time(pub_bug, dev_id, "Private dev comment", 50, 45)
@@ -4526,7 +4526,15 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
         "Reporter must not see bugnote_view_state events"
     );
     assert!(
-        !rep_events.iter().any(|e| e.field_name == "time_tracking"),
+        rep_events
+            .iter()
+            .any(|e| e.bug_id == pub_bug && e.field_name == "time_tracking" && e.new_value == "30"),
+        "Reporter must see time_tracking event from public note"
+    );
+    assert!(
+        !rep_events
+            .iter()
+            .any(|e| e.field_name == "time_tracking" && e.new_value == "45"),
         "Reporter must not see time_tracking events from private notes"
     );
     assert!(

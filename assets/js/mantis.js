@@ -386,7 +386,8 @@
     var confirmEls = document.querySelectorAll('[data-confirm]');
     for (var i = 0; i < confirmEls.length; i++) {
       (function (el) {
-        el.addEventListener('click', function (e) {
+        var evt = el.tagName === 'FORM' ? 'submit' : 'click';
+        el.addEventListener(evt, function (e) {
           var msg = el.getAttribute('data-confirm') || 'Are you sure?';
           if (!window.confirm(msg)) {
             e.preventDefault();

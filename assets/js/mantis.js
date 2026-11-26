@@ -492,12 +492,27 @@
     }
   }
 
+  function initProjectReloadSelects() {
+    var selects = document.querySelectorAll('select[data-reload-url]');
+    for (var i = 0; i < selects.length; i++) {
+      (function (sel) {
+        sel.addEventListener('change', function () {
+          var base = sel.getAttribute('data-reload-url');
+          if (!base) return;
+          var sep = base.indexOf('?') === -1 ? '?' : '&';
+          window.location.assign(base + sep + 'project_id=' + encodeURIComponent(sel.value));
+        });
+      })(selects[i]);
+    }
+  }
+
   window.MantisBT = window.MantisBT || {};
   window.MantisBT.getCsrfToken = getCsrfToken;
 
   document.addEventListener('DOMContentLoaded', function () {
     initDropdowns();
     initProjectSwitcher();
+    initProjectReloadSelects();
     initSidebar();
     initJumpToIssue();
     initRecentlyVisited();

@@ -687,13 +687,27 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
         .create_user("dev_m3", "Dev M3", "dev@m3.com", "pw", 55, true, false)
         .unwrap();
     let cat_id = db.add_category(proj_id, "Backend", dev_id).unwrap();
-    let _ = rep_id;
+    let disabled_dev_id = db
+        .create_user(
+            "disabled_dev_m3",
+            "Disabled",
+            "dis@m3.com",
+            "pw",
+            55,
+            false,
+            false,
+        )
+        .unwrap();
+    let proj2_id = db
+        .create_project("UIM3Secondary", 10, 10, "", true)
+        .unwrap();
+    let cat2_id = db.add_category(proj2_id, "Frontend", dev_id).unwrap();
 
     let app = crate::build_router(db.clone());
     let dev_cookie = test_http_login(&app, "dev_m3", "pw", proj_id).await;
     let rep_cookie = test_http_login(&app, "rep_m3", "pw", proj_id).await;
 
-    // 1. GET /bug_report_page as Reporter: no Assign To, no Target Version, has Report Stay
+    // 1. GET /bug_report_page as Reporter: no Assign To, no Target Version, only released Product Version
     let res = app
         .clone()
         .oneshot(
@@ -715,6 +729,8 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
     .unwrap();
     assert!(!rep_html.contains(r#"name="handler_id""#));
     assert!(!rep_html.contains(r#"name="target_version""#));
+    assert!(rep_html.contains(r#"<option value="v1.0">v1.0</option>"#));
+    assert!(!rep_html.contains(r#"<option value="v2.0">v2.0</option>"#));
     assert!(rep_html.contains(r#"name="report_stay""#));
 
     // 2. Reporter attempting to assign handler_id > 0 -> 403 Forbidden
@@ -782,7 +798,89 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
         );
     }
 
-    // 3. Developer submits with target_version=v2.0, handler_id=1 (admin), and report_stay=1
+    // 2d. Developer assigning disabled, non-developer, or nonexistent handler_id -> redirected with err
+    for bad_hid in [disabled_dev_id, rep_id, 999999] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/bug_report")
+                    .header("cookie", &dev_cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "project_id={}&category_id={}&summary=Bad+Handler&handler_id={}",
+                        proj_id, cat_id, bad_hid
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        let err_loc = res.headers().get("location").unwrap().to_str().unwrap();
+        assert!(
+            err_loc.contains("err="),
+            "expected err redirect for handler_id {}",
+            bad_hid
+        );
+    }
+
+    // 3. Developer submits into non-default secondary project with report_stay=1 -> preserves project_id & category_id
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &dev_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&category_id={}&summary=Secondary+Stay&report_stay=1",
+                    proj2_id, cat2_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let sec_loc = res
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(sec_loc.contains(&format!("project_id={}", proj2_id)));
+    assert!(sec_loc.contains(&format!("category_id={}", cat2_id)));
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&sec_loc)
+                .header("cookie", &dev_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let sec_stay_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(sec_stay_html.contains(&format!(
+        r#"<option value="{}" selected>UIM3Secondary</option>"#,
+        proj2_id
+    )));
+    assert!(sec_stay_html.contains(&format!(
+        r#"<option value="{}" selected>Frontend</option>"#,
+        cat2_id
+    )));
+
+    // 3b. Developer submits with target_version=v2.0, handler_id=1 (admin), and report_stay=1
     let res = app
         .clone()
         .oneshot(
@@ -1057,4 +1155,28 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
     assert!(upd_html.contains(r#"<option value="legacy-fixed" selected>legacy-fixed</option>"#));
     assert!(upd_html.contains(r#"<option value="legacy-target" selected>legacy-target</option>"#));
     assert!(upd_html.contains("Back To Issue"));
+
+    // 3. Already-closed bug (status=90) must hide Close button even for Administrator
+    db.change_bug_status(bug_id, 1, 90, 20, None).unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let closed_view_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!closed_view_html.contains("Close</button>"));
+    assert!(closed_view_html.contains("Delete Issue</button>"));
 }

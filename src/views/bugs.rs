@@ -1,9 +1,10 @@
 use crate::auth::AuthContext;
 use crate::models::{
-    build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
-    BugHistory, BugPriority, BugReproducibility, BugResolution, BugRevision, BugSeverity,
-    BugStatus, Bugnote, Category, CustomField, CustomFieldValue, JiraLink, ListBugsQuery,
-    ProjectVersion, RelationshipType, SavedFilter, Tag, TimelineEvent, User, ViewState,
+    build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFile, BugFilter,
+    BugFull, BugHistory, BugPriority, BugRelationship, BugReproducibility, BugResolution,
+    BugRevision, BugSeverity, BugStatus, BugTag, Bugnote, Category, CustomField, CustomFieldValue,
+    JiraLink, ListBugsQuery, ProjectVersion, RelationshipType, SavedFilter, Tag, TimelineEvent,
+    User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
@@ -1697,6 +1698,7 @@ pub fn render_bug_report_page(
     ctx: &AuthContext,
     project_opts: &[(i64, String, bool)],
     categories: &[(i64, String)],
+    selected_category_id: Option<i64>,
     versions: &[ProjectVersion],
     assignable_users: &[User],
     custom_fields: &[CustomField],
@@ -1718,9 +1720,15 @@ pub fn render_bug_report_page(
 
     let mut cat_opts = String::new();
     for (cid, cname) in categories {
+        let sel = if selected_category_id == Some(*cid) {
+            "selected"
+        } else {
+            ""
+        };
         cat_opts.push_str(&format!(
-            r#"<option value="{}">{}</option>"#,
+            r#"<option value="{}" {}>{}</option>"#,
             cid,
+            sel,
             html_escape(cname)
         ));
     }
@@ -1832,7 +1840,7 @@ pub fn render_bug_report_page(
                             <table class="form-table form-table-left">
                                 <tr>
                                     <th class="category"><label for="project_id">Project</label></th>
-                                    <td class="input-col"><select id="project_id" name="project_id">{}</select></td>
+                                    <td class="input-col"><select id="project_id" name="project_id" data-reload-url="/bug_report_page">{}</select></td>
                                 </tr>
                                 <tr>
                                     <th class="category"><label for="category_id">Category</label></th>
@@ -1897,13 +1905,13 @@ pub fn render_bug_report_page(
                                 </tr>
                                 <tr>
                                     <th class="category"><label for="build">Product Build</label></th>
-                                    <td class="input-col"><input type="text" id="build" name="build" placeholder="Product Build" style="max-width:220px;"></td>
+                                    <td class="input-col"><input type="text" id="build" name="build" placeholder="Product Build" class="input-w-220"></td>
                                 </tr>
                                 {}
                                 {}
                                 <tr>
                                     <th class="category"><label for="due_date">Due Date</label></th>
-                                    <td class="input-col"><input type="date" id="due_date" name="due_date" style="max-width:220px;"></td>
+                                    <td class="input-col"><input type="date" id="due_date" name="due_date" class="input-w-220"></td>
                                 </tr>
                                 <tr>
                                     <th class="category"><span class="required">*</span> <label for="summary">Summary</label></th>
@@ -1949,7 +1957,7 @@ pub fn render_bug_report_page(
                             </table>
                         </div>
                     </div>
-                    <div class="widget-toolbox" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <div class="widget-toolbox toolbox-split">
                         <button type="submit" class="btn btn-primary btn-white btn-round">
                             <i class="fa fa-check" aria-hidden="true"></i> Submit Issue
                         </button>
@@ -2340,8 +2348,8 @@ pub fn render_bug_action_toolbar(
             ));
         }
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_assign/{}" style="display:inline-flex; gap:4px; align-items:center;">
-                <select name="handler_id" style="width:auto;">{}</select>
+            r#"<form method="POST" action="/bug_assign/{}" class="inline-flex-form">
+                <select name="handler_id" class="select-auto">{}</select>
                 <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-user" aria-hidden="true"></i> Assign To</button>
             </form>"#,
             bug.id, user_opts
@@ -2356,14 +2364,14 @@ pub fn render_bug_action_toolbar(
 
     if is_monitoring {
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
+            r#"<form method="POST" action="/bug_monitor_delete/{}" class="inline-form">
                 <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-eye-slash" aria-hidden="true"></i> End Monitoring</button>
             </form>"#,
             bug.id
         ));
     } else {
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_monitor_add/{}" style="display:inline;">
+            r#"<form method="POST" action="/bug_monitor_add/{}" class="inline-form">
                 <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-eye" aria-hidden="true"></i> Monitor</button>
             </form>"#,
             bug.id
@@ -2377,7 +2385,7 @@ pub fn render_bug_action_toolbar(
             ("Stick", "btn btn-white btn-round btn-sm")
         };
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_stick/{}" style="display:inline;">
+            r#"<form method="POST" action="/bug_stick/{}" class="inline-form">
                 <button type="submit" class="{}"><i class="fa fa-thumb-tack" aria-hidden="true"></i> {}</button>
             </form>"#,
             bug.id, stick_cls, stick_label
@@ -2405,7 +2413,7 @@ pub fn render_bug_action_toolbar(
             20
         };
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline;" onsubmit="return confirm('Close this issue?');">
+            r#"<form method="POST" action="/bug_change_status/{}" class="inline-form" onsubmit="return confirm('Close this issue?');">
                 <input type="hidden" name="new_status" value="90">
                 <input type="hidden" name="resolution" value="{}">
                 <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-check-square-o" aria-hidden="true"></i> Close</button>
@@ -2421,7 +2429,7 @@ pub fn render_bug_action_toolbar(
 
     if eff >= 70 {
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_delete/{}" style="display:inline;" onsubmit="return confirm('Delete this issue? This action cannot be undone.');">
+            r#"<form method="POST" action="/bug_delete/{}" class="inline-form" onsubmit="return confirm('Delete this issue? This action cannot be undone.');">
                 <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Issue</button>
             </form>"#,
             bug.id
@@ -2443,7 +2451,7 @@ pub fn render_bugnote_add_form(bug_id: i64, eff: i32) -> String {
     let time_row = if eff >= 55 {
         r#"<tr>
                 <th class="category">Time Tracking (HH:MM or mins)</th>
-                <td class="input-col"><input type="text" name="time_tracking" placeholder="00:00 or minutes" style="width:160px;"></td>
+                <td class="input-col"><input type="text" name="time_tracking" placeholder="00:00 or minutes" class="input-w-160"></td>
             </tr>"#
     } else {
         ""
@@ -2459,7 +2467,7 @@ pub fn render_bugnote_add_form(bug_id: i64, eff: i32) -> String {
                         <tr>
                             <th class="category">View Status</th>
                             <td class="input-col">
-                                <select name="view_state" style="width:auto;">
+                                <select name="view_state" class="select-auto">
                                     <option value="10">public</option>
                                     {}
                                 </select>
@@ -2468,7 +2476,7 @@ pub fn render_bugnote_add_form(bug_id: i64, eff: i32) -> String {
                         {}
                     </table>
                 </div>
-                <div class="widget-toolbox" style="margin-top:8px;">
+                <div class="widget-toolbox mt-8">
                     <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-comment" aria-hidden="true"></i> Add Note</button>
                 </div>
             </form>"#,
@@ -2513,7 +2521,7 @@ pub fn render_view_bug_page(
 
     let jira_badge = if let Some(jl) = jira_link {
         format!(
-            r#"<a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; text-decoration:none; margin-left:8px; font-size:11px; font-weight:bold;">Jira: {} &nearr;</a>"#,
+            r#"<a href="{}" target="_blank" class="badge badge-jira">Jira: {} &nearr;</a>"#,
             html_escape(&jl.jira_url),
             html_escape(&jl.jira_key)
         )
@@ -2548,7 +2556,7 @@ pub fn render_view_bug_page(
         .unwrap_or("public");
 
     let sticky_badge = if bug.sticky == 1 {
-        r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:11px; font-weight:bold; padding:2px 6px; border-radius:3px; margin-left:6px;">[Sticky]</span>"#
+        r#" <span class="badge badge-sticky">[Sticky]</span>"#
     } else {
         ""
     };
@@ -2560,7 +2568,7 @@ pub fn render_view_bug_page(
     let due_date_html = if bug.due_date > 0 {
         let d = format_date(bug.due_date);
         let overdue = if bug.status < 80 && bug.due_date < now {
-            r#" <span class="badge badge-danger" style="background:#d9534f; color:#fff; font-size:11px; padding:2px 6px; border-radius:3px; margin-left:6px;">Overdue</span>"#
+            r#" <span class="badge badge-danger badge-overdue">Overdue</span>"#
         } else {
             ""
         };
@@ -2595,7 +2603,7 @@ pub fn render_view_bug_page(
 
     let details_body = format!(
         r#"<div class="table-responsive">
-            <table class="form-table form-table-left bug-view-table" style="margin-bottom:0;">
+            <table class="form-table form-table-left bug-view-table mb-0">
                 <thead>
                     <tr class="bug-header">
                         <th class="category">ID</th>
@@ -3016,7 +3024,7 @@ pub fn render_update_bug_page(
                             </table>
                         </div>
                     </div>
-                    <div class="widget-toolbox" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                    <div class="widget-toolbox toolbox-split">
                         <div style="display:flex; gap:8px; align-items:center;">
                             <button type="submit" class="btn btn-primary btn-white btn-round"><i class="fa fa-check" aria-hidden="true"></i> Update Information</button>
                             <a href="/view_bug_page/{}" class="btn btn-white btn-round">Back To Issue</a>
@@ -3096,22 +3104,167 @@ pub fn render_update_bug_page(
     render_layout(&format!("Update Issue #{:07}", bug.id), ctx, None, &content)
 }
 
-pub fn render_bugnotes_table(
+pub fn render_bug_tags_html(
+    bug_id: i64,
+    bug_tags: &[BugTag],
+    eff: i32,
+    current_user_id: i64,
+) -> String {
+    let mut tags_html = String::new();
+    if bug_tags.is_empty() {
+        tags_html.push_str("<span>No tags attached.</span>");
+    } else {
+        for bt in bug_tags {
+            let can_detach = eff >= 55 || (eff >= 25 && bt.user_id == current_user_id);
+            let detach_form = if can_detach {
+                format!(
+                    r#" <form method="POST" action="/bug_tag_detach/{}/{}" class="inline-form"><button type="submit" class="btn btn-danger btn-sm">x</button></form>"#,
+                    bug_id, bt.tag_id
+                )
+            } else {
+                String::new()
+            };
+            tags_html.push_str(&format!(
+                r#"<span class="badge badge-success badge-tag"><a href="/view_all_bug_page?tag_id={}">{}</a>{}</span>"#,
+                bt.tag_id,
+                html_escape(&bt.tag_name),
+                detach_form
+            ));
+        }
+    }
+    if eff >= 25 {
+        tags_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_tag_attach/{}" class="inline-flex-row mt-8">
+                <input type="text" name="tag_string" placeholder="Attach tags (comma-separated)" class="input-w-240">
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-tag" aria-hidden="true"></i> Attach Tags</button>
+            </form>"#,
+            bug_id
+        ));
+    }
+    tags_html
+}
+
+pub fn render_bug_files_html(files_with_previews: &[(&BugFile, String)], eff: i32) -> String {
+    if files_with_previews.is_empty() {
+        return "<p>No attachments.</p>".to_string();
+    }
+    let mut files_html = String::from(
+        r#"<table class="data-table"><thead><tr><th>Filename</th><th>Size</th><th>Type</th><th>Actions</th></tr></thead><tbody>"#,
+    );
+    for (f, preview_html) in files_with_previews {
+        let del_btn = if eff >= 70 {
+            format!(
+                r#"<form method="POST" action="/bug_file_delete/{}" class="inline-form"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
+                f.id
+            )
+        } else {
+            String::new()
+        };
+        files_html.push_str(&format!(
+            r#"<tr>
+                    <td>
+                        <a href="/file/bug/{}/{}">{}</a>
+                        {}
+                    </td>
+                    <td>{} bytes</td>
+                    <td>{}</td>
+                    <td>{}</td>
+                </tr>"#,
+            f.id,
+            html_escape(&f.filename),
+            html_escape(&f.filename),
+            preview_html,
+            f.filesize,
+            html_escape(&f.file_type),
+            del_btn
+        ));
+    }
+    files_html.push_str("</tbody></table>");
+    files_html
+}
+
+pub fn render_bug_relationships_html(rels: &[BugRelationship], eff: i32) -> String {
+    if rels.is_empty() {
+        return "<p>No relationships.</p>".to_string();
+    }
+    let mut rels_html = String::from(
+        r#"<table class="data-table"><thead><tr><th>Relationship</th><th>Target Issue</th><th>Actions</th></tr></thead><tbody>"#,
+    );
+    for r in rels {
+        let del_btn = if eff >= 55 {
+            format!(
+                r#"<form method="POST" action="/bug_relationship_delete/{}" class="inline-form"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
+                r.id
+            )
+        } else {
+            String::new()
+        };
+        rels_html.push_str(&format!(
+            r#"<tr>
+                    <td>{}</td>
+                    <td><a href="/view_bug_page/{}">{:07}</a></td>
+                    <td>{}</td>
+                </tr>"#,
+            html_escape(relationship_label(r.relationship_type)),
+            r.destination_bug_id,
+            r.destination_bug_id,
+            del_btn
+        ));
+    }
+    rels_html.push_str("</tbody></table>");
+    rels_html
+}
+
+pub fn render_bug_relationship_add_form(bug_id: i64, eff: i32) -> String {
+    if eff < 55 {
+        return String::new();
+    }
+    format!(
+        r#"<form method="POST" action="/bug_relationship_add/{}" class="inline-flex-row mt-10">
+                <select name="relationship_type" class="select-auto">
+                    <option value="0">related to</option>
+                    <option value="1">duplicate of</option>
+                    <option value="2">has duplicate</option>
+                    <option value="3">blocks</option>
+                    <option value="4">blocked by</option>
+                    <option value="5">parent of</option>
+                    <option value="6">child of</option>
+                </select>
+                <input type="text" name="dest_bug_id" placeholder="Target Bug ID" class="input-w-140" required>
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Relationship</button>
+            </form>"#,
+        bug_id
+    )
+}
+
+pub fn render_bugnotes_section_html(
     notes: &[Bugnote],
     users_map: &HashMap<i64, String>,
+    users_access_map: &HashMap<i64, i32>,
     eff: i32,
     current_user_id: i64,
     format_ctx: &crate::views::formatting::FormatContext,
 ) -> String {
-    let empty_access = HashMap::new();
-    render_bugnotes_cards(
+    let total_time_minutes: i32 = notes.iter().map(|n| n.time_tracking.max(0)).sum();
+    let mut html = if total_time_minutes > 0 {
+        format!(
+            r#"<p class="mb-8"><strong>Total Time Spent:</strong> {:02}:{:02} ({} mins)</p>"#,
+            total_time_minutes / 60,
+            total_time_minutes % 60,
+            total_time_minutes
+        )
+    } else {
+        String::new()
+    };
+    html.push_str(&render_bugnotes_cards(
         notes,
         users_map,
-        &empty_access,
+        users_access_map,
         eff,
         current_user_id,
         format_ctx,
-    )
+    ));
+    html
 }
 
 pub fn render_bugnotes_cards(
@@ -3134,8 +3287,8 @@ pub fn render_bugnotes_cards(
             .unwrap_or_else(|| format!("user#{}", n.reporter_id));
         let access_badge = users_access_map
             .get(&n.reporter_id)
-            .and_then(|&lvl| crate::models::AccessLevel::from_i32(lvl))
-            .map(|al| format!(r#" <span class="badge badge-info">{}</span>"#, al.as_str()))
+            .and_then(|&lvl| crate::models::AccessLevel::label_for_level(lvl))
+            .map(|lbl| format!(r#" <span class="badge badge-info">{}</span>"#, lbl))
             .unwrap_or_default();
 
         let private_class = if n.view_state == 50 {
@@ -3178,7 +3331,7 @@ pub fn render_bugnotes_cards(
                 ("Make Private", 50, "fa-lock")
             };
             actions.push(format!(
-                r#"<form method="POST" action="/bugnote_set_view_state/{}" style="display:inline;"><input type="hidden" name="view_state" value="{}"><button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa {}" aria-hidden="true"></i> {}</button></form>"#,
+                r#"<form method="POST" action="/bugnote_set_view_state/{}" class="inline-form"><input type="hidden" name="view_state" value="{}"><button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa {}" aria-hidden="true"></i> {}</button></form>"#,
                 n.id, next_vs, lock_icon, btn_label
             ));
         }
@@ -3190,7 +3343,7 @@ pub fn render_bugnotes_cards(
 
         if can_del_note {
             actions.push(format!(
-                r#"<form method="POST" action="/bugnote_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
+                r#"<form method="POST" action="/bugnote_delete/{}" class="inline-form"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
                 n.id
             ));
         }
@@ -3202,14 +3355,14 @@ pub fn render_bugnotes_cards(
         html.push_str(&format!(
             r#"<tr id="c{nid}" class="bugnote-card{priv_cls}">
                 <td class="bugnote-meta">
-                    <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                    <div class="bugnote-meta-header">
                         <span class="bugnote-avatar"><i class="fa fa-user" aria-hidden="true"></i></span>
                         <strong>{author}</strong>{access_badge}
                     </div>
-                    <div style="font-size:11px; color:#555555; margin-top:4px;">
+                    <div class="bugnote-meta-time">
                         <i class="fa fa-clock-o" aria-hidden="true"></i> {ts}
                     </div>
-                    <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; margin-top:4px;">
+                    <div class="bugnote-meta-links">
                         <a rel="bookmark" href="/view_bug_page/{bid}#c{nid}" title="Direct link to note">
                             <i class="fa fa-link" aria-hidden="true"></i> ~{nid:07}
                         </a>

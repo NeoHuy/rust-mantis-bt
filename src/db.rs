@@ -996,6 +996,131 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_assignable_users_for_project(
+        &self,
+        project_id: i64,
+        min_access: i32,
+    ) -> rusqlite::Result<Vec<User>> {
+        let conn = self.conn();
+        if project_id <= 0 {
+            let mut stmt = conn.prepare(
+                "SELECT id, username, realname, email, password, enabled, protected, access_level,
+                        login_count, lost_password_request_count, failed_login_count, cookie_string,
+                        last_visit, date_created
+                 FROM mantis_user_table
+                 WHERE enabled = 1 AND access_level >= ?1
+                 ORDER BY username ASC",
+            )?;
+            let rows = stmt.query_map(params![min_access], Self::map_user_row)?;
+            return rows.collect();
+        }
+
+        let proj_row = conn
+            .query_row(
+                "SELECT enabled, view_state, access_min FROM mantis_project_table WHERE id = ?1",
+                params![project_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)?,
+                        row.get::<_, i32>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        let Some((enabled, view_state, access_min)) = proj_row else {
+            return Ok(Vec::new());
+        };
+        if enabled == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected, u.access_level,
+                    u.login_count, u.lost_password_request_count, u.failed_login_count, u.cookie_string,
+                    u.last_visit, u.date_created
+             FROM mantis_user_table u
+             LEFT JOIN mantis_project_user_list_table pul
+               ON pul.user_id = u.id AND pul.project_id = ?1
+             WHERE u.enabled = 1
+               AND (
+                   CASE
+                       WHEN u.access_level >= 90 THEN 90
+                       WHEN pul.access_level IS NOT NULL THEN pul.access_level
+                       WHEN ?2 = 10 AND u.access_level >= ?3 THEN u.access_level
+                       WHEN ?2 = 50 AND u.access_level >= 70 THEN u.access_level
+                       ELSE 0
+                   END
+               ) >= ?4
+             ORDER BY u.username ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![project_id, view_state, access_min, min_access],
+            Self::map_user_row,
+        )?;
+        rows.collect()
+    }
+
+    pub fn list_project_user_access_map(
+        &self,
+        project_id: i64,
+    ) -> rusqlite::Result<std::collections::HashMap<i64, i32>> {
+        let conn = self.conn();
+        let mut map = std::collections::HashMap::new();
+        if project_id <= 0 {
+            let mut stmt = conn.prepare("SELECT id, access_level FROM mantis_user_table")?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?)))?;
+            for r in rows {
+                let (uid, lvl) = r?;
+                map.insert(uid, lvl);
+            }
+            return Ok(map);
+        }
+
+        let proj_row = conn
+            .query_row(
+                "SELECT enabled, view_state, access_min FROM mantis_project_table WHERE id = ?1",
+                params![project_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)?,
+                        row.get::<_, i32>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        let Some((enabled, view_state, access_min)) = proj_row else {
+            return Ok(map);
+        };
+        if enabled == 0 {
+            return Ok(map);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT u.id,
+                    CASE
+                        WHEN u.access_level >= 90 THEN 90
+                        WHEN pul.access_level IS NOT NULL THEN pul.access_level
+                        WHEN ?2 = 10 AND u.access_level >= ?3 THEN u.access_level
+                        WHEN ?2 = 50 AND u.access_level >= 70 THEN u.access_level
+                        ELSE 0
+                    END AS eff_level
+             FROM mantis_user_table u
+             LEFT JOIN mantis_project_user_list_table pul
+               ON pul.user_id = u.id AND pul.project_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![project_id, view_state, access_min], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
+        })?;
+        for r in rows {
+            let (uid, lvl) = r?;
+            map.insert(uid, lvl);
+        }
+        Ok(map)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_user(
         &self,

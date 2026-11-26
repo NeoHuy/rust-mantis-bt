@@ -77,6 +77,7 @@ pub struct BugReportQuery {
     pub err: Option<String>,
     pub created_bug_id: Option<i64>,
     pub project_id: Option<i64>,
+    pub category_id: Option<i64>,
 }
 
 fn get_single_val<'a>(form_map: &'a HashMap<String, Vec<String>>, key: &str) -> Option<&'a str> {
@@ -710,17 +711,8 @@ pub async fn bug_report_page(
     };
 
     let assignable_users: Vec<User> = if default_eff >= 55 {
-        db.list_users(None, true)
+        db.list_assignable_users_for_project(default_proj_id, 55)
             .unwrap_or_default()
-            .into_iter()
-            .filter(|u| {
-                if default_proj_id > 0 {
-                    db.effective_access_level(u, default_proj_id).unwrap_or(0) >= 55
-                } else {
-                    u.access_level >= 55
-                }
-            })
-            .collect()
     } else {
         Vec::new()
     };
@@ -749,11 +741,15 @@ pub async fn bug_report_page(
     }
 
     let cat_pairs: Vec<_> = cats.into_iter().map(|c| (c.id, c.name)).collect();
+    let selected_cat_id = q
+        .category_id
+        .filter(|cid| cat_pairs.iter().any(|(id, _)| id == cid));
 
     views::bugs::render_bug_report_page(
         &ctx,
         &project_opts,
         &cat_pairs,
+        selected_cat_id,
         &versions,
         &assignable_users,
         &custom_fields,
@@ -877,6 +873,7 @@ pub async fn bug_report(
             .into_response();
         }
     }
+    // handler_id=0 and an omitted field both yield None so category default assignee applies.
     let requested_handler_id = get_single_val(&form_map, "handler_id")
         .and_then(|v| v.trim().parse::<i64>().ok())
         .filter(|&hid| hid > 0);
@@ -1060,16 +1057,17 @@ pub async fn bug_report(
                 attach_errors.join("; ")
             );
             Redirect::to(&format!(
-                "/bug_report_page?project_id={}&err={}&created_bug_id={}",
+                "/bug_report_page?project_id={}&category_id={}&err={}&created_bug_id={}",
                 project_id,
+                category_id,
                 url_encode(&sanitize_error_message(&err_msg)),
                 bug_id
             ))
             .into_response()
         } else {
             Redirect::to(&format!(
-                "/bug_report_page?project_id={}&created_bug_id={}",
-                project_id, bug_id
+                "/bug_report_page?project_id={}&category_id={}&created_bug_id={}",
+                project_id, category_id, bug_id
             ))
             .into_response()
         }
@@ -1219,15 +1217,9 @@ pub async fn view_bug_page(
     let users = db.list_users(None, false).unwrap_or_default();
     let users_map: HashMap<i64, String> =
         users.iter().map(|u| (u.id, u.username.clone())).collect();
-    let users_access_map: HashMap<i64, i32> = users
-        .iter()
-        .map(|u| {
-            let u_eff = db
-                .effective_access_level(u, bug.project_id)
-                .unwrap_or(u.access_level);
-            (u.id, u_eff)
-        })
-        .collect();
+    let users_access_map = db
+        .list_project_user_access_map(bug.project_id)
+        .unwrap_or_else(|_| users.iter().map(|u| (u.id, u.access_level)).collect());
 
     let reporter_name = users_map
         .get(&bug.reporter_id)
@@ -1383,54 +1375,12 @@ pub async fn view_bug_page(
         eff,
     );
 
-    let mut tags_html = String::new();
-    if bug_tags.is_empty() {
-        tags_html.push_str("<span>No tags attached.</span>");
-    } else {
-        for bt in &bug_tags {
-            let can_detach = eff >= 55 || (eff >= 25 && bt.user_id == ctx.user.id);
-            let detach_form = if can_detach {
-                format!(
-                    r#" <form method="POST" action="/bug_tag_detach/{}/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">x</button></form>"#,
-                    bug.id, bt.tag_id
-                )
-            } else {
-                String::new()
-            };
-            tags_html.push_str(&format!(
-                r#"<span class="badge badge-success" style="margin-right:6px;"><a href="/view_all_bug_page?tag_id={}">{}</a>{}</span>"#,
-                bt.tag_id,
-                views::html_escape(&bt.tag_name),
-                detach_form
-            ));
-        }
-    }
-    if eff >= 25 {
-        tags_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_tag_attach/{}" style="margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
-                <input type="text" name="tag_string" placeholder="Attach tags (comma-separated)" style="width:240px;">
-                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-tag" aria-hidden="true"></i> Attach Tags</button>
-            </form>"#,
-            bug.id
-        ));
-    }
+    let tags_html = views::bugs::render_bug_tags_html(bug.id, &bug_tags, eff, ctx.user.id);
 
-    let mut files_html = String::new();
     let dir = upload_dir();
-    if files.is_empty() {
-        files_html.push_str("<p>No attachments.</p>");
-    } else {
-        files_html.push_str(r#"<table class="data-table"><thead><tr><th>Filename</th><th>Size</th><th>Type</th><th>Actions</th></tr></thead><tbody>"#);
-        for f in &files {
-            let del_btn = if eff >= 70 {
-                format!(
-                    r#"<form method="POST" action="/bug_file_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
-                    f.id
-                )
-            } else {
-                String::new()
-            };
-
+    let files_with_previews: Vec<(&crate::models::BugFile, String)> = files
+        .iter()
+        .map(|f| {
             let ext = std::path::Path::new(&f.filename)
                 .extension()
                 .and_then(|s| s.to_str())
@@ -1465,28 +1415,10 @@ pub async fn view_bug_page(
                 is_safe_image,
                 text_content,
             );
-
-            files_html.push_str(&format!(
-                r#"<tr>
-                    <td>
-                        <a href="/file/bug/{}/{}">{}</a>
-                        {}
-                    </td>
-                    <td>{} bytes</td>
-                    <td>{}</td>
-                    <td>{}</td>
-                </tr>"#,
-                f.id,
-                views::html_escape(&f.filename),
-                views::html_escape(&f.filename),
-                preview_html,
-                f.filesize,
-                views::html_escape(&f.file_type),
-                del_btn
-            ));
-        }
-        files_html.push_str("</tbody></table>");
-    }
+            (f, preview_html)
+        })
+        .collect();
+    let files_html = views::bugs::render_bug_files_html(&files_with_previews, eff);
 
     let upload_form_html = if eff >= 25 {
         views::bugs::render_upload_form_html(bug.id)
@@ -1494,67 +1426,8 @@ pub async fn view_bug_page(
         String::new()
     };
 
-    let mut rels_html = String::new();
-    if rels.is_empty() {
-        rels_html.push_str("<p>No relationships.</p>");
-    } else {
-        rels_html.push_str(r#"<table class="data-table"><thead><tr><th>Relationship</th><th>Target Issue</th><th>Actions</th></tr></thead><tbody>"#);
-        for r in &rels {
-            let del_btn = if eff >= 55 {
-                format!(
-                    r#"<form method="POST" action="/bug_relationship_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
-                    r.id
-                )
-            } else {
-                String::new()
-            };
-            rels_html.push_str(&format!(
-                r#"<tr>
-                    <td>{}</td>
-                    <td><a href="/view_bug_page/{}">{:07}</a></td>
-                    <td>{}</td>
-                </tr>"#,
-                views::html_escape(views::bugs::relationship_label(r.relationship_type)),
-                r.destination_bug_id,
-                r.destination_bug_id,
-                del_btn
-            ));
-        }
-        rels_html.push_str("</tbody></table>");
-    }
-
-    let rel_form_html = if eff >= 55 {
-        format!(
-            r#"<form method="POST" action="/bug_relationship_add/{}" style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                <select name="relationship_type" style="width:auto;">
-                    <option value="0">related to</option>
-                    <option value="1">duplicate of</option>
-                    <option value="2">has duplicate</option>
-                    <option value="3">blocks</option>
-                    <option value="4">blocked by</option>
-                    <option value="5">parent of</option>
-                    <option value="6">child of</option>
-                </select>
-                <input type="text" name="dest_bug_id" placeholder="Target Bug ID" style="width:140px;" required>
-                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Relationship</button>
-            </form>"#,
-            bug.id
-        )
-    } else {
-        String::new()
-    };
-
-    let total_time_minutes: i32 = notes.iter().map(|n| n.time_tracking.max(0)).sum();
-    let total_time_html = if total_time_minutes > 0 {
-        format!(
-            r#"<p style="margin-bottom:8px;"><strong>Total Time Spent:</strong> {:02}:{:02} ({} mins)</p>"#,
-            total_time_minutes / 60,
-            total_time_minutes % 60,
-            total_time_minutes
-        )
-    } else {
-        String::new()
-    };
+    let rels_html = views::bugs::render_bug_relationships_html(&rels, eff);
+    let rel_form_html = views::bugs::render_bug_relationship_add_form(bug.id, eff);
 
     let mut text_corpus = Vec::new();
     text_corpus.push(full.description.as_str());
@@ -1565,15 +1438,14 @@ pub async fn view_bug_page(
     }
     let format_ctx = build_format_context(&db, &ctx.user, &text_corpus, &users);
 
-    let mut notes_html = total_time_html;
-    notes_html.push_str(&views::bugs::render_bugnotes_cards(
+    let notes_html = views::bugs::render_bugnotes_section_html(
         &notes,
         &users_map,
         &users_access_map,
         eff,
         ctx.user.id,
         &format_ctx,
-    ));
+    );
 
     let note_form_html = views::bugs::render_bugnote_add_form(bug.id, eff);
 

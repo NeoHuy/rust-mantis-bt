@@ -798,9 +798,14 @@ fn test_render_bugnotes_table_and_actions() {
     // Can edit note 101 (own note), cannot edit note 102
     // Cannot toggle visibility (requires eff >= 55)
     // Can see revisions link for both
+    let mut access_map = HashMap::new();
+    access_map.insert(1, 25);
+    access_map.insert(2, 60); // custom numeric threshold falls back to "developer"
     let empty_fmt = crate::views::formatting::FormatContext::default();
-    let table_rep = render_bugnotes_table(&notes, &users_map, 25, 1, &empty_fmt);
+    let table_rep = render_bugnotes_cards(&notes, &users_map, &access_map, 25, 1, &empty_fmt);
     assert!(table_rep.contains("alice"));
+    assert!(table_rep.contains("reporter"));
+    assert!(table_rep.contains("developer"));
     assert!(table_rep.contains("Hello public note"));
     assert!(table_rep.contains(r#"href="/bugnote_edit_page/101""#));
     assert!(!table_rep.contains(r#"href="/bugnote_edit_page/102""#));
@@ -810,7 +815,7 @@ fn test_render_bugnotes_table_and_actions() {
 
     // Developer (eff 55, user 3):
     // Can toggle visibility for note 101 (Make Private) and note 102 (Make Public)
-    let table_dev = render_bugnotes_table(&notes, &users_map, 55, 3, &empty_fmt);
+    let table_dev = render_bugnotes_cards(&notes, &users_map, &access_map, 55, 3, &empty_fmt);
     assert!(table_dev.contains(r#"action="/bugnote_set_view_state/101""#));
     assert!(table_dev.contains("Make Private"));
     assert!(table_dev.contains(r#"action="/bugnote_set_view_state/102""#));
@@ -818,7 +823,7 @@ fn test_render_bugnotes_table_and_actions() {
 
     // Manager (eff 70, user 3):
     // Can edit and delete any note
-    let table_mgr = render_bugnotes_table(&notes, &users_map, 70, 3, &empty_fmt);
+    let table_mgr = render_bugnotes_cards(&notes, &users_map, &access_map, 70, 3, &empty_fmt);
     assert!(table_mgr.contains(r#"href="/bugnote_edit_page/101""#));
     assert!(table_mgr.contains(r#"href="/bugnote_edit_page/102""#));
     assert!(table_mgr.contains(r#"action="/bugnote_delete/101""#));
@@ -1612,6 +1617,7 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
         &ctx_dev,
         &project_opts,
         &categories,
+        None,
         &versions,
         std::slice::from_ref(&dev_user),
         &[],
@@ -1650,6 +1656,7 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
         &ctx_rep,
         &project_opts,
         &categories,
+        Some(1),
         &versions,
         &[dev_user],
         &[],
@@ -1662,6 +1669,8 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
     assert!(!rep_html.contains(r#"name="target_version""#));
     assert!(rep_html.contains(r#"<option value="v1.0">v1.0</option>"#));
     assert!(!rep_html.contains(r#"<option value="v2.0">v2.0</option>"#));
+    assert!(rep_html.contains(r#"<option value="1" selected>Backend</option>"#));
+    assert!(rep_html.contains(r#"data-reload-url="/bug_report_page""#));
     assert!(rep_html.contains(r#"name="report_stay""#));
     assert_no_nested_forms(&rep_html);
 }

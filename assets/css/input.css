@@ -1111,6 +1111,121 @@
     font-weight: 700;
   }
 
+  .inline-form {
+    display: inline;
+  }
+
+  .inline-flex-form {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .inline-flex-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .select-auto {
+    width: auto !important;
+  }
+
+  .input-w-140 {
+    width: 140px !important;
+  }
+
+  .input-w-160 {
+    width: 160px !important;
+  }
+
+  .input-w-220 {
+    max-width: 220px !important;
+  }
+
+  .input-w-240 {
+    width: 240px !important;
+  }
+
+  .mt-8 {
+    margin-top: 8px;
+  }
+
+  .mt-10 {
+    margin-top: 10px;
+  }
+
+  .mb-8 {
+    margin-bottom: 8px;
+  }
+
+  .mb-0 {
+    margin-bottom: 0 !important;
+  }
+
+  .toolbox-split {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .bugnote-meta-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .bugnote-meta-time {
+    font-size: 11px;
+    color: #555555;
+    margin-top: 4px;
+  }
+
+  .bugnote-meta-links {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    margin-top: 4px;
+  }
+
+  .badge-jira {
+    background: #0052cc;
+    color: #ffffff;
+    text-decoration: none;
+    margin-left: 8px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .badge-sticky {
+    background: #e0a800;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+  }
+
+  .badge-overdue {
+    background: #d9534f;
+    color: #ffffff;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+  }
+
+  .badge-tag {
+    margin-right: 6px;
+  }
+
   /* ================================================================
      WCAG AA Accessible MantisBT Buttons
      ================================================================ */

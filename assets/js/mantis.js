@@ -290,6 +290,52 @@
     }
   }
 
+  function initSelectAllCheckboxes() {
+    var selectAll = document.getElementById('select_all_bugs');
+    if (!selectAll) return;
+    var items = document.querySelectorAll('input[name="bug_arr"]');
+
+    selectAll.addEventListener('change', function () {
+      for (var i = 0; i < items.length; i++) {
+        items[i].checked = selectAll.checked;
+      }
+      selectAll.indeterminate = false;
+    });
+
+    for (var j = 0; j < items.length; j++) {
+      items[j].addEventListener('change', function () {
+        var checkedCount = 0;
+        for (var k = 0; k < items.length; k++) {
+          if (items[k].checked) checkedCount++;
+        }
+        if (items.length === 0) {
+          selectAll.checked = false;
+          selectAll.indeterminate = false;
+        } else if (checkedCount === 0) {
+          selectAll.checked = false;
+          selectAll.indeterminate = false;
+        } else if (checkedCount === items.length) {
+          selectAll.checked = true;
+          selectAll.indeterminate = false;
+        } else {
+          selectAll.checked = false;
+          selectAll.indeterminate = true;
+        }
+      });
+    }
+  }
+
+  function initSavedFilterQuickSelect() {
+    var sel = document.getElementById('saved_filter_select');
+    if (!sel) return;
+    sel.addEventListener('change', function () {
+      var val = sel.value;
+      if (val && val !== '0') {
+        window.location.href = '/view_all_bug_page?filter_id=' + encodeURIComponent(val);
+      }
+    });
+  }
+
   window.MantisBT = window.MantisBT || {};
   window.MantisBT.getCsrfToken = getCsrfToken;
 
@@ -300,5 +346,7 @@
     initJumpToIssue();
     initRecentlyVisited();
     initWidgetBoxes();
+    initSelectAllCheckboxes();
+    initSavedFilterQuickSelect();
   });
 })();

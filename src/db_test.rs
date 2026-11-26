@@ -4397,3 +4397,151 @@ fn test_change_bug_status_note_mentions_and_exclude_dedup() {
     assert_eq!(queued2.len(), 1);
     assert_eq!(queued2[0].email, "dev@test.com");
 }
+
+#[test]
+fn test_timeline_events_rbac_isolation_and_note_counts() {
+    let db = Db::open_in_memory().unwrap();
+    let pub_proj = db.create_project("Public Proj", 10, 10, "", true).unwrap();
+    let priv_proj = db.create_project("Private Proj", 10, 50, "", true).unwrap();
+
+    let rep_id = db
+        .create_user("rep_tl", "Reporter", "rep@tl.test", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev_tl", "Developer", "dev@tl.test", "pw", 55, true, false)
+        .unwrap();
+
+    let rep_user = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev_user = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    // Public bug in public project created by dev
+    let pub_bug = db
+        .create_bug(
+            pub_proj,
+            dev_id,
+            1,
+            "Public Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Private bug in public project created by dev
+    let priv_bug = db
+        .create_bug(
+            pub_proj,
+            dev_id,
+            1,
+            "Private Issue",
+            "secret",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+
+    // Public bug inside private project (rep_user is NOT a member of priv_proj!)
+    let priv_proj_bug = db
+        .create_bug(
+            priv_proj,
+            dev_id,
+            1,
+            "Hidden Project Issue",
+            "secret",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Public note and private note on pub_bug
+    db.add_bugnote(pub_bug, rep_id, "Public comment", 10)
+        .unwrap();
+    db.add_bugnote(pub_bug, dev_id, "Private dev comment", 50)
+        .unwrap();
+
+    // Timeline for rep_user across All Projects (None):
+    // - Sees pub_bug creation & public bugnote_added
+    // - Must NOT see priv_bug, priv_proj_bug, or private bugnote_added
+    let rep_events = db.list_timeline_events(&rep_user, None, 50).unwrap();
+    assert!(rep_events
+        .iter()
+        .any(|e| e.bug_id == pub_bug && e.type_ == 1 && e.field_name.is_empty()));
+    assert!(rep_events
+        .iter()
+        .any(|e| e.bug_id == pub_bug && e.field_name == "bugnote_added"));
+    assert_eq!(
+        rep_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_added")
+            .count(),
+        1,
+        "Reporter must only see 1 public bugnote_added event"
+    );
+    assert!(
+        !rep_events.iter().any(|e| e.bug_id == priv_bug),
+        "Reporter must not see private issue events"
+    );
+    assert!(
+        !rep_events.iter().any(|e| e.bug_id == priv_proj_bug),
+        "Reporter must not see private project issue events"
+    );
+
+    // Scoped to priv_proj: rep_user gets empty timeline
+    assert!(db
+        .list_timeline_events(&rep_user, Some(priv_proj), 50)
+        .unwrap()
+        .is_empty());
+
+    // Timeline for dev_user (global access 55, no membership in priv_proj -> still cannot see priv_proj, CAN see priv_bug & private note in pub_proj)
+    let dev_events = db
+        .list_timeline_events(&dev_user, Some(pub_proj), 50)
+        .unwrap();
+    assert!(dev_events.iter().any(|e| e.bug_id == priv_bug));
+    assert_eq!(
+        dev_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_added")
+            .count(),
+        2,
+        "Developer must see both public and private bugnote_added events"
+    );
+
+    // Verify batch note counts respect private note visibility
+    let mut rep_levels = HashMap::new();
+    rep_levels.insert(pub_bug, 25);
+    let (rep_notes, _) = db
+        .get_bug_note_and_file_counts(&[pub_bug], &rep_levels)
+        .unwrap();
+    assert_eq!(rep_notes.get(&pub_bug).copied(), Some(1));
+
+    let mut dev_levels = HashMap::new();
+    dev_levels.insert(pub_bug, 55);
+    let (dev_notes, _) = db
+        .get_bug_note_and_file_counts(&[pub_bug], &dev_levels)
+        .unwrap();
+    assert_eq!(dev_notes.get(&pub_bug).copied(), Some(2));
+}

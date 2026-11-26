@@ -343,6 +343,52 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         )
         .unwrap_or_default();
 
+    let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+    let mut editable_bug_ids = HashSet::new();
+    for list in [
+        &assigned_to_me,
+        &unassigned,
+        &reported_by_me,
+        &resolved,
+        &recently_modified,
+        &monitored_by_me,
+    ] {
+        for b in list.iter().take(10) {
+            let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
+                db.effective_access_level(&ctx.user, b.project_id)
+                    .unwrap_or(0)
+            });
+            if eff >= 40 || (eff >= 25 && b.reporter_id == ctx.user.id) {
+                editable_bug_ids.insert(b.id);
+            }
+        }
+    }
+
+    let categories_map = db.list_all_categories_map().unwrap_or_default();
+    let projects_map: HashMap<i64, String> = ctx
+        .visible_projects
+        .iter()
+        .map(|(p, _)| (p.id, p.name.clone()))
+        .collect();
+    let timeline_events = db
+        .list_timeline_events(&ctx.user, pid, 25)
+        .unwrap_or_default();
+    let users_map: HashMap<i64, String> = db
+        .list_users(None, false)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| (u.id, u.username))
+        .collect();
+
+    let meta = views::bugs::MyViewMeta {
+        categories_map,
+        projects_map,
+        editable_bug_ids,
+        timeline_events,
+        users_map,
+        active_project_id: ctx.active_project_id,
+    };
+
     views::bugs::render_my_view_page(
         &ctx,
         &assigned_to_me,
@@ -351,6 +397,7 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         &resolved,
         &recently_modified,
         &monitored_by_me,
+        &meta,
     )
     .into_response()
 }
@@ -545,7 +592,7 @@ pub async fn view_all_bug_page(
         .map(|(p, _)| (p.id, p.name.clone()))
         .collect();
 
-    let mut categories_map: HashMap<i64, String> = HashMap::new();
+    let mut categories_map = db.list_all_categories_map().unwrap_or_default();
     let cats = db
         .list_effective_categories(ctx.active_project_id)
         .unwrap_or_default();
@@ -561,11 +608,33 @@ pub async fn view_all_bug_page(
         .unwrap_or_default();
 
     let mut jira_links = HashMap::new();
+    let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+    let mut bug_access_levels: HashMap<i64, i32> = HashMap::new();
+    let mut editable_bug_ids = HashSet::new();
+    let mut paged_bug_ids = Vec::with_capacity(paged_bugs.len());
     for b in &paged_bugs {
+        paged_bug_ids.push(b.id);
+        let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
+            db.effective_access_level(&ctx.user, b.project_id)
+                .unwrap_or(0)
+        });
+        bug_access_levels.insert(b.id, eff);
+        if eff >= 40 || (eff >= 25 && b.reporter_id == ctx.user.id) {
+            editable_bug_ids.insert(b.id);
+        }
         if let Ok(Some(jl)) = db.get_jira_link_by_bug_id(b.id) {
             jira_links.insert(b.id, jl);
         }
     }
+
+    let (note_counts, file_counts) = db
+        .get_bug_note_and_file_counts(&paged_bug_ids, &bug_access_levels)
+        .unwrap_or_default();
+    let meta = views::bugs::ViewIssuesMeta {
+        note_counts,
+        file_counts,
+        editable_bug_ids,
+    };
 
     views::bugs::render_view_all_bug_page(
         &ctx,
@@ -585,6 +654,7 @@ pub async fn view_all_bug_page(
         q.msg.as_deref(),
         q.err.as_deref(),
         &effective_q,
+        &meta,
     )
     .into_response()
 }

@@ -301,6 +301,22 @@ pub struct BugHistory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub id: i64,
+    pub bug_id: i64,
+    pub bug_summary: String,
+    pub bug_status: i32,
+    pub project_id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub date_modified: i64,
+    pub field_name: String,
+    pub old_value: String,
+    pub new_value: String,
+    pub type_: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BugRelationship {
     pub id: i64,
     pub source_bug_id: i64,

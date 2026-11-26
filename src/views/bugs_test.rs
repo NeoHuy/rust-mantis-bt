@@ -163,6 +163,7 @@ fn test_render_view_all_bug_page_pagination_preserves_query() {
         None,
         None,
         &q,
+        &ViewIssuesMeta::default(),
     );
 
     // Prev link must point to page=1 and preserve q, priority, sort, dir, per_page
@@ -207,23 +208,27 @@ fn test_render_view_all_bug_page_sort_headers_and_per_page_controls() {
         None,
         None,
         &q,
+        &ViewIssuesMeta::default(),
     );
 
-    // Sort column header for summary should be active with asc indicator (&#9650;)
-    assert!(html.contains("Summary &#9650;"));
+    // Sort column header for summary should be active with asc indicator (fa-caret-up)
+    assert!(html.contains("Summary <i class=\"fa fa-caret-up"));
     // Clicking it toggles to desc
     assert!(html.contains("sort=summary&amp;dir=desc") || html.contains("sort=summary&dir=desc"));
 
     // ID sort link switches to sort=id
     assert!(html.contains("sort=id"));
+    assert!(html.contains("sort=last_updated"));
 
     // Per-page control has options 10, 25, 50, 100
     assert!(html.contains("Per page:"));
     assert!(html.contains("per_page=10"));
     assert!(html.contains("per_page=25"));
     assert!(html.contains("per_page=100"));
-    // 50 is active
-    assert!(html.contains(r#"<span class="btn btn-secondary btn-sm" style="font-weight:bold; background:#e0e0e0; pointer-events:none;">50</span>"#));
+    // 50 is active with high-contrast primary style
+    assert!(html.contains(
+        r#"<span class="btn btn-primary btn-sm font-bold pointer-events-none">50</span>"#
+    ));
 
     // CSV export link preserves sort parameters
     assert!(
@@ -264,6 +269,7 @@ fn test_render_view_all_bug_page_saved_filter_delete_button_permissions() {
         None,
         None,
         &ListBugsQuery::default(),
+        &ViewIssuesMeta::default(),
     );
     assert!(html_owner.contains(r#"action="/filter_delete/99""#));
     assert!(html_owner.contains("Delete</button>"));
@@ -288,6 +294,7 @@ fn test_render_view_all_bug_page_saved_filter_delete_button_permissions() {
         None,
         None,
         &ListBugsQuery::default(),
+        &ViewIssuesMeta::default(),
     );
     assert!(html_other.contains("Team Filter"));
     assert!(!html_other.contains(r#"action="/filter_delete/99""#));
@@ -312,6 +319,7 @@ fn test_render_view_all_bug_page_saved_filter_delete_button_permissions() {
         None,
         None,
         &ListBugsQuery::default(),
+        &ViewIssuesMeta::default(),
     );
     assert!(html_manager.contains(r#"action="/filter_delete/99""#));
 
@@ -335,6 +343,7 @@ fn test_render_view_all_bug_page_saved_filter_delete_button_permissions() {
         None,
         None,
         &ListBugsQuery::default(),
+        &ViewIssuesMeta::default(),
     );
     assert!(html_admin.contains(r#"action="/filter_delete/99""#));
 }
@@ -610,8 +619,10 @@ fn test_view_bug_page_build_due_date_overdue_and_sticky() {
         None,
         None,
         &ListBugsQuery::default(),
+        &ViewIssuesMeta::default(),
     );
     assert!(view_all_html.0.contains("[Sticky]"));
+    assert!(view_all_html.0.contains("fa-thumb-tack"));
 }
 
 #[test]
@@ -1176,6 +1187,7 @@ fn test_render_view_all_bug_page_bulk_action_bar_and_no_nested_forms() {
         None,
         None,
         &q,
+        &ViewIssuesMeta::default(),
     );
 
     // Verify checkbox column and select all checkbox
@@ -1270,4 +1282,272 @@ fn test_render_file_preview_html_and_reminder_badge() {
 
     assert_eq!(render_reminder_badge(0), "");
     assert!(render_reminder_badge(1).contains("Reminder"));
+}
+
+#[test]
+fn test_render_my_view_page_two_column_timeline_and_rich_rows() {
+    let ctx = dummy_ctx(1, 55);
+    let open_bug = Bug {
+        id: 1,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 1,
+        duplicate_id: 0,
+        priority: 50, // urgent -> fa-arrow-up
+        severity: 70,
+        reproducibility: 10,
+        status: 50, // assigned
+        resolution: 10,
+        os: String::new(),
+        os_build: String::new(),
+        platform: String::new(),
+        version: String::new(),
+        fixed_in_version: String::new(),
+        target_version: String::new(),
+        build: String::new(),
+        summary: "Urgent login error".to_string(),
+        view_state: 10,
+        sticky: 1,
+        category_id: 2,
+        date_submitted: 1700000000,
+        due_date: 0,
+        last_updated: 1700000100,
+    };
+    let resolved_bug = Bug {
+        id: 2,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 1,
+        duplicate_id: 0,
+        priority: 20, // low -> fa-chevron-down
+        severity: 50,
+        reproducibility: 10,
+        status: 80, // resolved -> strikethrough
+        resolution: 20,
+        os: String::new(),
+        os_build: String::new(),
+        platform: String::new(),
+        version: String::new(),
+        fixed_in_version: String::new(),
+        target_version: String::new(),
+        build: String::new(),
+        summary: "Fixed CSS layout".to_string(),
+        view_state: 50, // private -> fa-lock
+        sticky: 0,
+        category_id: 2,
+        date_submitted: 1700000000,
+        due_date: 0,
+        last_updated: 1700000200,
+    };
+
+    let mut meta = MyViewMeta::default();
+    meta.categories_map.insert(2, "Frontend".to_string());
+    meta.projects_map.insert(1, "Demo Project".to_string());
+    meta.editable_bug_ids.insert(1);
+    meta.users_map.insert(1, "alice".to_string());
+    meta.timeline_events = vec![
+        TimelineEvent {
+            id: 10,
+            bug_id: 1,
+            bug_summary: "Urgent login error".to_string(),
+            bug_status: 50,
+            project_id: 1,
+            user_id: 1,
+            username: "alice".to_string(),
+            date_modified: 1700000150,
+            field_name: "bugnote_added".to_string(),
+            old_value: String::new(),
+            new_value: "11".to_string(),
+            type_: 1,
+        },
+        TimelineEvent {
+            id: 11,
+            bug_id: 2,
+            bug_summary: "Fixed CSS layout".to_string(),
+            bug_status: 80,
+            project_id: 1,
+            user_id: 1,
+            username: "alice".to_string(),
+            date_modified: 1700000200,
+            field_name: "status".to_string(),
+            old_value: "50".to_string(),
+            new_value: "80".to_string(),
+            type_: 0,
+        },
+    ];
+
+    let Html(html) = render_my_view_page(
+        &ctx,
+        &[open_bug],
+        &[],
+        std::slice::from_ref(&resolved_bug),
+        std::slice::from_ref(&resolved_bug),
+        &[],
+        &[],
+        &meta,
+    );
+
+    // 2-column responsive layout + collapsible widget boxes
+    assert!(html.contains("lg:grid-cols-12"));
+    assert!(html.contains("lg:col-span-7"));
+    assert!(html.contains("lg:col-span-5"));
+    assert!(html.contains(r#"data-widget-id="my_view_assigned""#));
+    assert!(html.contains(r#"data-widget-id="my_view_timeline""#));
+    assert!(html.contains(r#"data-action="collapse""#));
+
+    // Rich row details: status square swatch, edit pencil, priority icons, strikethrough ID, category
+    assert!(html.contains("fa-square fa-status-box"));
+    assert!(html.contains(r#"href="/update_bug_page/1""#));
+    assert!(!html.contains(r#"href="/update_bug_page/2""#));
+    assert!(html.contains("fa-pencil"));
+    assert!(html.contains("fa-arrow-up"));
+    assert!(html.contains("fa-chevron-down"));
+    assert!(html.contains("fa-lock"));
+    assert!(html.contains("fa-thumb-tack"));
+    assert!(html.contains("Frontend"));
+    assert!(html.contains("[Demo Project]"));
+    assert!(html.contains("issue-link-resolved"));
+
+    // Activity Timeline details
+    assert!(html.contains("fa-clock-o"));
+    assert!(html.contains("Timeline"));
+    assert!(html.contains("alice"));
+    assert!(html.contains("commented on issue"));
+    assert!(html.contains("resolved issue"));
+    assert!(html.contains("0000001"));
+    assert!(html.contains("0000002"));
+
+    // Status legend bar
+    assert!(html.contains("status-legend-bar"));
+    assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_view_all_bug_page_ui_m2_collapsible_filter_and_responsive_table() {
+    let mut ctx = dummy_ctx(1, 55);
+    ctx.active_project_id = 0; // All Projects -> shows Project column
+    let mut projects_map = HashMap::new();
+    projects_map.insert(1, "Alpha".to_string());
+    let mut categories_map = HashMap::new();
+    categories_map.insert(3, "Backend".to_string());
+    let mut users_map = HashMap::new();
+    users_map.insert(2, "bob".to_string());
+
+    let bugs = vec![
+        Bug {
+            id: 11,
+            project_id: 1,
+            reporter_id: 1,
+            handler_id: 2,
+            duplicate_id: 0,
+            priority: 60, // immediate
+            severity: 70, // crash -> bold red
+            reproducibility: 10,
+            status: 50,
+            resolution: 10,
+            os: String::new(),
+            os_build: String::new(),
+            platform: String::new(),
+            version: String::new(),
+            fixed_in_version: String::new(),
+            target_version: String::new(),
+            build: String::new(),
+            summary: "Server crash on boot".to_string(),
+            view_state: 10,
+            sticky: 1,
+            category_id: 3,
+            date_submitted: 1700000000,
+            due_date: 0,
+            last_updated: 1700000300,
+        },
+        Bug {
+            id: 12,
+            project_id: 1,
+            reporter_id: 2,
+            handler_id: 0,
+            duplicate_id: 0,
+            priority: 30, // normal
+            severity: 50, // minor
+            reproducibility: 10,
+            status: 90, // closed -> strikethrough
+            resolution: 20,
+            os: String::new(),
+            os_build: String::new(),
+            platform: String::new(),
+            version: String::new(),
+            fixed_in_version: String::new(),
+            target_version: String::new(),
+            build: String::new(),
+            summary: "Minor typo".to_string(),
+            view_state: 10,
+            sticky: 0,
+            category_id: 3,
+            date_submitted: 1700000000,
+            due_date: 0,
+            last_updated: 1700000400,
+        },
+    ];
+
+    let mut meta = ViewIssuesMeta::default();
+    meta.editable_bug_ids.insert(11);
+    meta.note_counts.insert(11, 4);
+    meta.file_counts.insert(11, 2);
+
+    let filter = BugFilter {
+        search: Some("crash".to_string()),
+        severity: Some(70),
+        ..Default::default()
+    };
+    let q = ListBugsQuery {
+        q: Some("crash".to_string()),
+        severity: Some(70),
+        sort: Some("last_updated".to_string()),
+        dir: Some("desc".to_string()),
+        ..Default::default()
+    };
+
+    let Html(html) = render_view_all_bug_page(
+        &ctx,
+        &bugs,
+        2,
+        1,
+        25,
+        &filter,
+        &projects_map,
+        &categories_map,
+        &users_map,
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q,
+        &meta,
+    );
+
+    // Collapsible filter box collapsed by default + active indicator + non-JS fallback
+    assert!(html.contains(r#"id="filter" class="widget-box widget-color-blue2 collapsed""#));
+    assert!(html.contains(r#"data-widget-id="view_issues_filter""#));
+    assert!(html.contains(r#"<noscript><style>#filter.collapsed > .widget-body { display: block; }</style></noscript>"#));
+    assert!(html.contains("Active (2)"));
+
+    // Responsive table wrapper + rich MantisBT columns
+    assert!(html.contains(r#"class="table-responsive""#));
+    assert!(html.contains(r#"href="/update_bug_page/11""#));
+    assert!(!html.contains(r#"href="/update_bug_page/12""#));
+    assert!(html.contains("fa-exclamation-triangle"));
+    assert!(html.contains("fa-minus"));
+    assert!(html.contains("fa-thumb-tack"));
+    assert!(html.contains(r#"href="/view_bug_page/11#bugnotes""#));
+    assert!(html.contains(r#"href="/view_bug_page/11#attachments""#));
+    assert!(html.contains("font-bold text-red-700"));
+    assert!(html.contains("assigned (bob)"));
+    assert!(html.contains("Updated <i class=\"fa fa-caret-down"));
+    assert!(html.contains("issue-link-resolved"));
+
+    // Bulk actiongroup & zero nested forms
+    assert!(html.contains(r#"action="/bug_actiongroup""#));
+    assert_no_nested_forms(&html);
 }

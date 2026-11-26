@@ -193,7 +193,14 @@
 
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') {
+        var activeInDropdown = document.activeElement
+          ? document.activeElement.closest('.nav-dropdown.open')
+          : null;
+        var dropdownToggle = activeInDropdown
+          ? activeInDropdown.querySelector('[data-dropdown-toggle]')
+          : null;
         closeAllDropdowns(null);
+        if (dropdownToggle) dropdownToggle.focus();
         setMobileDrawer(false, true);
       }
     });
@@ -204,24 +211,28 @@
     var input = document.getElementById('jump_bug_id');
     if (!input) return;
 
-    function jump() {
-      var v = parseInt(input.value, 10);
-      if (v > 0) {
-        window.location.href = '/view_bug_page/' + v;
+    function handleJump(e) {
+      var raw = input.value.trim();
+      if (/^\d+$/.test(raw)) {
+        var v = parseInt(raw, 10);
+        if (v > 0) {
+          if (e) e.preventDefault();
+          window.location.href = '/view_bug_page/' + v;
+          return;
+        }
+      }
+      if (!raw && e) {
+        e.preventDefault();
       }
     }
 
     if (form) {
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        jump();
-      });
+      form.addEventListener('submit', handleJump);
     }
 
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
-        e.preventDefault();
-        jump();
+        handleJump(e);
       }
     });
   }

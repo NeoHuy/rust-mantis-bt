@@ -376,6 +376,7 @@ fn test_build_csv_export_url() {
         sort: Some("summary".to_string()),
         dir: Some("asc".to_string()),
         per_page: Some(50),
+        ..Default::default()
     };
 
     let url = build_csv_export_url(&q);

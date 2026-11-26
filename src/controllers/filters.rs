@@ -72,6 +72,7 @@ pub async fn filter_save(
         sort: form.sort.filter(|s| !s.trim().is_empty()),
         dir: form.dir.filter(|s| !s.trim().is_empty()),
         per_page: form.per_page.filter(|&v| v > 0),
+        ..Default::default()
     };
 
     match db.save_filter(

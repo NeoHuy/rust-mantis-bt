@@ -102,23 +102,37 @@ pub fn render_roadmap_page_with_options(
                 if d.is_empty() {
                     String::new()
                 } else {
+                    let date_label = if group.released {
+                        "Released"
+                    } else {
+                        "Scheduled"
+                    };
                     format!(
-                        r#"<span class="badge badge-info"><i class="fa fa-calendar" aria-hidden="true"></i> Scheduled: {}</span>"#,
+                        r#"<span class="badge badge-info"><i class="fa fa-calendar" aria-hidden="true"></i> {}: {}</span>"#,
+                        date_label,
                         html_escape(&d)
                     )
                 }
             } else {
                 String::new()
             };
-            let view_issues_href = format!(
-                "/view_all_bug_page?target_version={}",
-                url_encode(&group.version)
-            );
+            let view_issues_href = if let Some(pid) = group.project_id.filter(|&id| id > 0) {
+                format!(
+                    "/view_all_bug_page?project_id={}&target_version={}",
+                    pid,
+                    url_encode(&group.version)
+                )
+            } else {
+                format!(
+                    "/view_all_bug_page?target_version={}",
+                    url_encode(&group.version)
+                )
+            };
 
             let mut list_html = String::new();
             if group.bugs.is_empty() {
                 list_html.push_str(
-                    r#"<li class="list-none text-[#777]">No issues targeted for this version.</li>"#,
+                    r#"<li class="list-none text-[#595959]">No issues targeted for this version.</li>"#,
                 );
             } else {
                 for b in &group.bugs {

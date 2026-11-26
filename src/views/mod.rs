@@ -194,13 +194,13 @@ pub fn render_manage_tabs(ctx: &AuthContext, active_tab: &str) -> String {
             r#"<i class="fa fa-folder-open" aria-hidden="true"></i> Manage Projects"#,
             active_tab == "projects",
         ));
-        tabs.push((
-            "tags",
-            "/manage_tags_page",
-            r#"<i class="fa fa-tags" aria-hidden="true"></i> Manage Tags"#,
-            active_tab == "tags",
-        ));
     }
+    tabs.push((
+        "tags",
+        "/manage_tags_page",
+        r#"<i class="fa fa-tags" aria-hidden="true"></i> Manage Tags"#,
+        active_tab == "tags",
+    ));
     if ctx.user.access_level >= 90 {
         tabs.push((
             "custom_fields",
@@ -249,7 +249,11 @@ pub fn render_manage_overview_page(
     ctx: &AuthContext,
     stats: &crate::models::SiteOverviewStats,
     runtime_info: &[(&str, &str)],
+    err: Option<&str>,
 ) -> Html<String> {
+    let err_banner = err
+        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
     let mut config_rows = String::new();
     for (idx, (k, v)) in runtime_info.iter().enumerate() {
         let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
@@ -262,7 +266,8 @@ pub fn render_manage_overview_page(
     }
 
     let content = format!(
-        r#"<div class="section-title"><i class="fa fa-info-circle" aria-hidden="true"></i> Site Information</div>
+        r#"{}
+        <div class="section-title"><i class="fa fa-info-circle" aria-hidden="true"></i> Site Information</div>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div class="widget-box widget-color-blue2">
                 <div class="widget-header">
@@ -297,6 +302,7 @@ pub fn render_manage_overview_page(
                 </div>
             </div>
         </div>"#,
+        err_banner,
         html_escape(env!("CARGO_PKG_VERSION")),
         stats.projects_count,
         stats.users_count,

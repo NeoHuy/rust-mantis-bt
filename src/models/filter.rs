@@ -25,6 +25,10 @@ pub struct BugFilter {
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
     #[serde(default)]
+    pub target_version: Option<String>,
+    #[serde(default)]
+    pub fixed_in_version: Option<String>,
+    #[serde(default)]
     pub sort: Option<String>,
     #[serde(default)]
     pub dir: Option<String>,
@@ -36,6 +40,7 @@ pub struct BugFilter {
 pub struct ListBugsQuery {
     pub page: Option<i64>,
     pub filter_id: Option<i64>,
+    pub project_id: Option<i64>,
     pub q: Option<String>,
     pub search: Option<String>,
     pub status: Option<i32>,
@@ -47,6 +52,8 @@ pub struct ListBugsQuery {
     pub handler_id: Option<i64>,
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
+    pub target_version: Option<String>,
+    pub fixed_in_version: Option<String>,
     pub msg: Option<String>,
     pub err: Option<String>,
     pub sort: Option<String>,

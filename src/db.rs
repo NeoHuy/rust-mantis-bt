@@ -6132,6 +6132,18 @@ impl Db {
                     }
                 }
             }
+            if let Some(ref tv) = filter.target_version {
+                let tv_trimmed = tv.trim();
+                if !tv_trimmed.is_empty() && b.target_version.trim() != tv_trimmed {
+                    continue;
+                }
+            }
+            if let Some(ref fv) = filter.fixed_in_version {
+                let fv_trimmed = fv.trim();
+                if !fv_trimmed.is_empty() && b.fixed_in_version.trim() != fv_trimmed {
+                    continue;
+                }
+            }
             if let Some(ref kw) = search_kw {
                 let mut matched = b.summary.to_ascii_lowercase().contains(kw)
                     || format!("{:07}", b.id).contains(kw);

@@ -191,7 +191,9 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
             .filter(|s| !s.trim().is_empty());
 
     BugFilter {
-        project_id: if ctx.active_project_id > 0 {
+        project_id: if let Some(pid) = q.project_id.filter(|&v| v > 0) {
+            Some(pid)
+        } else if ctx.active_project_id > 0 {
             Some(ctx.active_project_id)
         } else {
             None
@@ -206,6 +208,18 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         handler_id: q.handler_id.filter(|&v| v != 0),
         tag_id: q.tag_id.filter(|&v| v > 0),
         monitored_by: q.monitored_by.filter(|&v| v > 0),
+        target_version: q
+            .target_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        fixed_in_version: q
+            .fixed_in_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         sort: q
             .sort
             .as_deref()

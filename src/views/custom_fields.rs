@@ -327,25 +327,28 @@ pub fn render_custom_fields_form_rows(
 }
 
 fn render_custom_field_type_options(selected: i32) -> String {
-    let types = [
-        (0, "String"),
-        (1, "Numeric"),
-        (2, "Float"),
-        (3, "Enumeration"),
-        (4, "Email"),
-        (5, "Checkbox"),
-        (6, "List"),
-        (7, "Multiselection list"),
-        (8, "Date"),
-        (9, "Radio"),
-        (10, "Textarea"),
-    ];
+    let type_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let mut out = String::new();
-    for (val, label) in types {
-        let sel = if val == selected { " selected" } else { "" };
+    let mut matched = false;
+    for val in type_ids {
+        let label = CustomFieldType::from_i32(val)
+            .map(|t| t.as_str())
+            .unwrap_or("Unknown");
+        let sel = if val == selected {
+            matched = true;
+            " selected"
+        } else {
+            ""
+        };
         out.push_str(&format!(
             r#"<option value="{}"{}>{}</option>"#,
             val, sel, label
+        ));
+    }
+    if !matched {
+        out.push_str(&format!(
+            r#"<option value="{}" selected>Unknown ({})</option>"#,
+            selected, selected
         ));
     }
     out

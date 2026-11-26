@@ -476,7 +476,13 @@ fn test_manage_custom_field_edit_renders_human_readable_type_label() {
         filter_by: 0,
     };
     let html = render_manage_custom_field_edit_page(&ctx, &cf, &[], None, None).0;
-    assert!(html.contains(r#"<option value="0" selected>String</option>"#));
-    assert!(html.contains(r#"<option value="3">Enumeration</option>"#));
+    assert!(html.contains(r#"<option value="0" selected>string</option>"#));
+    assert!(html.contains(r#"<option value="3">enumeration</option>"#));
     assert!(!html.contains(r#"<input type="text" name="field_type""#));
+
+    // Unknown/legacy type outside 0..=10 is preserved as selected option
+    let mut cf_unknown = cf;
+    cf_unknown.field_type = 99;
+    let html_unknown = render_manage_custom_field_edit_page(&ctx, &cf_unknown, &[], None, None).0;
+    assert!(html_unknown.contains(r#"<option value="99" selected>Unknown (99)</option>"#));
 }

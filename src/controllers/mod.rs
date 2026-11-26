@@ -53,25 +53,21 @@ pub async fn manage_overview_page(
         return crate::views::render_access_denied_page(&ctx);
     }
 
-    let stats = db.get_site_overview_stats().unwrap_or_default();
-    let cookie_secure = std::env::var("MANTIS_COOKIE_SECURE")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
+    let (stats, stats_err) = match db.get_site_overview_stats() {
+        Ok(s) => (s, None),
+        Err(e) => (
+            crate::models::SiteOverviewStats::default(),
+            Some(format!("Failed to load database overview counts: {}", e)),
+        ),
+    };
+    let cookie_secure = crate::models::env_flag_enabled("MANTIS_COOKIE_SECURE");
     let upload_fs = std::env::var("MANTIS_UPLOAD_DIR")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
     let sendgrid_enabled = std::env::var("SENDGRID_API_KEY")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
-    let query_token_enabled = std::env::var("MANTIS_ALLOW_QUERY_TOKEN")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
+    let query_token_enabled = crate::models::env_flag_enabled("MANTIS_ALLOW_QUERY_TOKEN");
     let jira_enabled = db.get_jira_config(0).map(|c| c.enabled).unwrap_or(false);
 
     let runtime_info: Vec<(&str, &str)> = vec![
@@ -109,7 +105,8 @@ pub async fn manage_overview_page(
         ),
     ];
 
-    crate::views::render_manage_overview_page(&ctx, &stats, &runtime_info).into_response()
+    crate::views::render_manage_overview_page(&ctx, &stats, &runtime_info, stats_err.as_deref())
+        .into_response()
 }
 
 fn static_asset_response<T: IntoResponse>(
@@ -230,13 +227,7 @@ pub async fn security_headers_middleware(
             "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; form-action 'self'; frame-ancestors 'self'; base-uri 'self'",
         ),
     );
-    let secure_cookie = std::env::var("MANTIS_COOKIE_SECURE")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
-    if secure_cookie {
+    if crate::models::env_flag_enabled("MANTIS_COOKIE_SECURE") {
         headers.insert(
             axum::http::header::STRICT_TRANSPORT_SECURITY,
             axum::http::HeaderValue::from_static("max-age=31536000; includeSubDomains"),

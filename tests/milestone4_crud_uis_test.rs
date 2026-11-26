@@ -1298,6 +1298,66 @@ async fn test_ui_m4_subproject_dropdown_excludes_ancestors_and_manage_users_pref
         .unwrap();
     db.create_user("zulu_user", "Zulu", "z@x.com", "pw123", 25, true, false)
         .unwrap();
+    db.create_user("007_agent", "Bond", "007@x.com", "pw123", 25, true, false)
+        .unwrap();
+
+    let b_v2 = db
+        .create_bug(
+            unrelated,
+            1,
+            1,
+            "Target v2 issue",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.update_bug_fields(
+        b_v2,
+        1,
+        BugUpdate {
+            target_version: Some("v2.0".to_string()),
+            fixed_in_version: Some("v1.9".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let b_other = db
+        .create_bug(
+            unrelated,
+            1,
+            1,
+            "Other version issue",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.update_bug_fields(
+        b_other,
+        1,
+        BugUpdate {
+            target_version: Some("v3.0".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let app = rust_mantis_bt::controllers::build_router(db);
     let (admin_cookie, _) = get_cookie(&app, "administrator", "root", false).await;
@@ -1356,4 +1416,78 @@ async fn test_ui_m4_subproject_dropdown_excludes_ancestors_and_manage_users_pref
     .unwrap();
     assert!(html_z.contains("zulu_user"));
     assert!(!html_z.contains("alpha_user"));
+
+    // Manage Users 0-9 prefix filter + combined search
+    let res_num = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_user_page?prefix=0-9&filter_enabled=1")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_num.status(), StatusCode::OK);
+    let html_num = String::from_utf8(
+        axum::body::to_bytes(res_num.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_num.contains("007_agent"));
+    assert!(!html_num.contains("zulu_user"));
+
+    // View Issues target_version & fixed_in_version filtering (Roadmap / Changelog "View Issues" links)
+    let res_tv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/view_all_bug_page?project_id={}&target_version=v2.0",
+                    unrelated
+                ))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_tv.status(), StatusCode::OK);
+    let html_tv = String::from_utf8(
+        axum::body::to_bytes(res_tv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_tv.contains("Target v2 issue"));
+    assert!(!html_tv.contains("Other version issue"));
+
+    let res_fv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/view_all_bug_page?fixed_in_version=v1.9")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_fv.status(), StatusCode::OK);
+    let html_fv = String::from_utf8(
+        axum::body::to_bytes(res_fv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_fv.contains("Target v2 issue"));
+    assert!(!html_fv.contains("Other version issue"));
 }

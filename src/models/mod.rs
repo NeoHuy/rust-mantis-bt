@@ -45,6 +45,15 @@ pub const STATUS_CLOSED: i32 = 90;
 pub const PLUGIN_CORE_FORMATTING: &str = "MantisCoreFormatting";
 pub const TOGGLEABLE_CORE_PLUGINS: &[&str] = &[PLUGIN_CORE_FORMATTING];
 
+pub fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SiteOverviewStats {
     pub projects_count: i64,

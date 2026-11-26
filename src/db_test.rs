@@ -4654,3 +4654,39 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
         .unwrap();
     assert_eq!(dev_notes.get(&pub_bug).copied(), Some(2));
 }
+
+#[test]
+fn test_project_access_queries_match_effective_access_on_disabled_and_private_projects() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let rep_id = db
+        .create_user("rep_sql", "Rep", "rep_sql@test.com", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev_sql", "Dev", "dev_sql@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    // Disabled project: admin still gets 90, project-override dev gets 0
+    let dis_proj = db.create_project("DisabledProj", 10, 10, "", true).unwrap();
+    db.update_project(dis_proj, "DisabledProj", 10, false, 10, "", true)
+        .unwrap();
+    db.set_project_user(dis_proj, dev_id, 55).unwrap();
+    let dis_assignable = db.list_assignable_users_for_project(dis_proj, 55).unwrap();
+    assert!(dis_assignable.iter().any(|u| u.id == admin.id));
+    assert!(!dis_assignable.iter().any(|u| u.id == dev_id));
+    let dis_map = db.list_project_user_access_map(dis_proj).unwrap();
+    assert_eq!(dis_map.get(&admin.id).copied(), Some(90));
+    assert_eq!(dis_map.get(&dev_id).copied(), Some(0));
+
+    // Private project: non-member dev gets 0, explicitly added rep gets 25
+    let priv_proj = db.create_project("PrivateProj", 10, 50, "", true).unwrap();
+    db.set_project_user(priv_proj, rep_id, 25).unwrap();
+    let priv_assignable = db.list_assignable_users_for_project(priv_proj, 55).unwrap();
+    assert!(priv_assignable.iter().any(|u| u.id == admin.id));
+    assert!(!priv_assignable.iter().any(|u| u.id == dev_id));
+    assert!(!priv_assignable.iter().any(|u| u.id == rep_id));
+    let priv_map = db.list_project_user_access_map(priv_proj).unwrap();
+    assert_eq!(priv_map.get(&admin.id).copied(), Some(90));
+    assert_eq!(priv_map.get(&dev_id).copied(), Some(0));
+    assert_eq!(priv_map.get(&rep_id).copied(), Some(25));
+}

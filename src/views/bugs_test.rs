@@ -759,7 +759,7 @@ fn assert_no_nested_forms(html: &str) {
 }
 
 #[test]
-fn test_render_bugnotes_table_and_actions() {
+fn test_render_bugnotes_cards_and_actions() {
     let mut users_map = HashMap::new();
     users_map.insert(1, "alice".to_string());
     users_map.insert(2, "bob".to_string());
@@ -828,6 +828,7 @@ fn test_render_bugnotes_table_and_actions() {
     assert!(table_mgr.contains(r#"href="/bugnote_edit_page/102""#));
     assert!(table_mgr.contains(r#"action="/bugnote_delete/101""#));
     assert!(table_mgr.contains(r#"action="/bugnote_delete/102""#));
+    assert!(table_mgr.contains(r#"onsubmit="return confirm('Delete this note?');""#));
 }
 
 #[test]
@@ -1625,6 +1626,7 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
         None,
         None,
         Some(42),
+        true,
     );
     assert!(dev_html.contains("widget-box"));
     assert!(dev_html.contains("fa-edit"));
@@ -1642,6 +1644,7 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
     assert!(dev_html.contains(r#"name="handler_id""#));
     assert!(dev_html.contains("dev_alice (Alice Dev)"));
     assert!(dev_html.contains(r#"name="report_stay""#));
+    assert!(dev_html.contains(r#"id="report_stay" name="report_stay" value="1" checked"#));
     assert!(dev_html.contains("OS Version"));
     assert!(dev_html.contains("Product Build"));
     assert!(!dev_html.contains("OS Build"));
@@ -1664,6 +1667,7 @@ fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
         None,
         None,
         None,
+        false,
     );
     assert!(!rep_html.contains(r#"name="handler_id""#));
     assert!(!rep_html.contains(r#"name="target_version""#));

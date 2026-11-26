@@ -1031,9 +1031,6 @@ impl Db {
         let Some((enabled, view_state, access_min)) = proj_row else {
             return Ok(Vec::new());
         };
-        if enabled == 0 {
-            return Ok(Vec::new());
-        }
 
         let mut stmt = conn.prepare(
             "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected, u.access_level,
@@ -1046,6 +1043,7 @@ impl Db {
                AND (
                    CASE
                        WHEN u.access_level >= 90 THEN 90
+                       WHEN ?5 = 0 THEN 0
                        WHEN pul.access_level IS NOT NULL THEN pul.access_level
                        WHEN ?2 = 10 AND u.access_level >= ?3 THEN u.access_level
                        WHEN ?2 = 50 AND u.access_level >= 70 THEN u.access_level
@@ -1055,7 +1053,7 @@ impl Db {
              ORDER BY u.username ASC",
         )?;
         let rows = stmt.query_map(
-            params![project_id, view_state, access_min, min_access],
+            params![project_id, view_state, access_min, min_access, enabled],
             Self::map_user_row,
         )?;
         rows.collect()
@@ -1094,14 +1092,12 @@ impl Db {
         let Some((enabled, view_state, access_min)) = proj_row else {
             return Ok(map);
         };
-        if enabled == 0 {
-            return Ok(map);
-        }
 
         let mut stmt = conn.prepare(
             "SELECT u.id,
                     CASE
                         WHEN u.access_level >= 90 THEN 90
+                        WHEN ?4 = 0 THEN 0
                         WHEN pul.access_level IS NOT NULL THEN pul.access_level
                         WHEN ?2 = 10 AND u.access_level >= ?3 THEN u.access_level
                         WHEN ?2 = 50 AND u.access_level >= 70 THEN u.access_level
@@ -1111,9 +1107,10 @@ impl Db {
              LEFT JOIN mantis_project_user_list_table pul
                ON pul.user_id = u.id AND pul.project_id = ?1",
         )?;
-        let rows = stmt.query_map(params![project_id, view_state, access_min], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
-        })?;
+        let rows = stmt.query_map(
+            params![project_id, view_state, access_min, enabled],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?)),
+        )?;
         for r in rows {
             let (uid, lvl) = r?;
             map.insert(uid, lvl);
@@ -2575,7 +2572,9 @@ impl Db {
             }
         }
 
-        conn.execute(
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
+        tx.execute(
             "INSERT INTO mantis_bug_table (
                 project_id, reporter_id, handler_id, duplicate_id,
                 priority, severity, reproducibility, status, resolution,
@@ -2606,9 +2605,9 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
 
-        let bug_id = conn.last_insert_rowid();
+        let bug_id = tx.last_insert_rowid();
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO mantis_bug_text_table (
                 id, description, steps_to_reproduce, additional_information
             ) VALUES (?1, ?2, ?3, ?4)",
@@ -2622,7 +2621,10 @@ impl Db {
         .map_err(|e| e.to_string())?;
 
         // Record new bug creation in history (type = 1)
-        let _ = self.record_history(&conn, bug_id, reporter_id, "", "", "", 1);
+        self.record_history(&tx, bug_id, reporter_id, "", "", "", 1)
+            .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
 
         let project_name = Self::helper_project_name(&conn, project_id);
         let action_header = "The following issue has been SUBMITTED.";

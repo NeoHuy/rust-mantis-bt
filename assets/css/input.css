@@ -169,7 +169,7 @@
   .navbar-left {
     display: flex;
     align-items: center;
-    min-width: 0;
+    flex-shrink: 0;
   }
 
   .navbar-toggle {
@@ -207,6 +207,7 @@
     height: 45px;
     text-decoration: none;
     white-space: nowrap;
+    flex-shrink: 0;
   }
 
   .navbar-brand:hover {
@@ -226,6 +227,7 @@
     align-items: center;
     gap: 6px;
     font-size: 12px;
+    min-width: 0;
   }
 
   .btn-report-top {
@@ -615,6 +617,7 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    max-width: 100%;
   }
 
   .breadcrumbs {
@@ -696,6 +699,8 @@
     padding: 16px 20px 28px 20px;
     flex: 1;
     min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
   }
 
   footer.mantis-footer {
@@ -802,6 +807,8 @@
     border-radius: 0;
     margin-bottom: 18px;
     box-shadow: none;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .widget-header,
@@ -875,6 +882,7 @@
   .widget-body,
   .panel-body {
     padding: 12px;
+    overflow-x: auto;
   }
 
   .widget-box.collapsed > .widget-body {
@@ -1532,7 +1540,7 @@
     font-size: 15px;
   }
 
-  .btn-report-top .btn-report-text {
+  .btn-report-top {
     display: none;
   }
 
@@ -1541,11 +1549,11 @@
   }
 
   .nav-dropdown-toggle .active-project-label {
-    max-width: 85px;
+    max-width: 78px;
   }
 
   .nav-dropdown-toggle .user-info {
-    max-width: 75px;
+    max-width: 66px;
     overflow: hidden;
     text-overflow: ellipsis;
   }

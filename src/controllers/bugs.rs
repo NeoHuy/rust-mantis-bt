@@ -71,6 +71,13 @@ pub struct FlashQuery {
     pub err: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct BugReportQuery {
+    pub msg: Option<String>,
+    pub err: Option<String>,
+    pub created_bug_id: Option<i64>,
+}
+
 fn get_single_val<'a>(form_map: &'a HashMap<String, Vec<String>>, key: &str) -> Option<&'a str> {
     form_map
         .get(key)
@@ -662,7 +669,7 @@ pub async fn view_all_bug_page(
 pub async fn bug_report_page(
     State(db): State<Db>,
     ctx: AuthContext,
-    Query(q): Query<FlashQuery>,
+    Query(q): Query<BugReportQuery>,
 ) -> Response {
     let default_proj_id = if ctx.active_project_id > 0 {
         ctx.active_project_id
@@ -696,6 +703,37 @@ pub async fn bug_report_page(
         Vec::new()
     };
 
+    let assignable_users: Vec<User> = if default_eff >= 55 {
+        db.list_users(None, true)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|u| {
+                if default_proj_id > 0 {
+                    db.effective_access_level(u, default_proj_id).unwrap_or(0) >= 55
+                } else {
+                    u.access_level >= 55
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let verified_created_bug_id = q.created_bug_id.and_then(|cid| {
+        if cid <= 0 {
+            return None;
+        }
+        let b = db.get_bug(cid).ok().flatten()?;
+        let eff = db
+            .effective_access_level(&ctx.user, b.project_id)
+            .unwrap_or(0);
+        if Db::can_view_bug(ctx.user.id, eff, &b) {
+            Some(b.id)
+        } else {
+            None
+        }
+    });
+
     let mut project_opts = Vec::new();
     for (p, _) in &ctx.visible_projects {
         let eff = db.effective_access_level(&ctx.user, p.id).unwrap_or(0);
@@ -711,10 +749,12 @@ pub async fn bug_report_page(
         &project_opts,
         &cat_pairs,
         &versions,
+        &assignable_users,
         &custom_fields,
         default_eff,
         q.err.as_deref(),
         q.msg.as_deref(),
+        verified_created_bug_id,
     )
     .into_response()
 }
@@ -809,6 +849,49 @@ pub async fn bug_report(
     let version = get_single_val(&form_map, "version")
         .unwrap_or_default()
         .to_string();
+    let target_version = get_single_val(&form_map, "target_version")
+        .map(|s| s.trim())
+        .unwrap_or("");
+    let requested_handler_id = get_single_val(&form_map, "handler_id")
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|&hid| hid > 0);
+    if let Some(hid) = requested_handler_id {
+        if eff < 55 {
+            return forbidden(&ctx, "Developer access required to assign issues.");
+        }
+        match db.get_user_by_id(hid) {
+            Ok(Some(target_user)) => {
+                if target_user.enabled != 1 {
+                    return Redirect::to(&format!(
+                        "/bug_report_page?err={}",
+                        url_encode("Assigned user is disabled.")
+                    ))
+                    .into_response();
+                }
+                let target_eff = db
+                    .effective_access_level(&target_user, project_id)
+                    .unwrap_or(0);
+                if target_eff < 55 {
+                    return Redirect::to(&format!(
+                        "/bug_report_page?err={}",
+                        url_encode("Assigned user does not have Developer access on this project.")
+                    ))
+                    .into_response();
+                }
+            }
+            _ => {
+                return Redirect::to(&format!(
+                    "/bug_report_page?err={}",
+                    url_encode("Assigned user not found.")
+                ))
+                .into_response();
+            }
+        }
+    }
+    let report_stay = matches!(
+        get_single_val(&form_map, "report_stay").map(str::trim),
+        Some("1" | "true" | "on" | "yes")
+    );
     let platform = get_single_val(&form_map, "platform")
         .unwrap_or_default()
         .to_string();
@@ -895,7 +978,7 @@ pub async fn bug_report(
         }
     };
 
-    if !build.is_empty() || due_date > 0 {
+    if !build.is_empty() || due_date > 0 || !target_version.is_empty() {
         let mut update = BugUpdate::default();
         if !build.is_empty() {
             update.build = Some(build.to_string());
@@ -903,10 +986,22 @@ pub async fn bug_report(
         if due_date > 0 {
             update.due_date = Some(due_date);
         }
+        if !target_version.is_empty() {
+            update.target_version = Some(target_version.to_string());
+        }
         if let Err(e) = db.update_bug_fields(bug_id, ctx.user.id, update) {
             eprintln!(
-                "[bug_report] Failed to update build/due_date for bug {}: {}",
+                "[bug_report] Failed to update build/due_date/target_version for bug {}: {}",
                 bug_id, e
+            );
+        }
+    }
+
+    if let Some(hid) = requested_handler_id {
+        if let Err(e) = db.assign_bug(bug_id, ctx.user.id, hid) {
+            eprintln!(
+                "[bug_report] Failed to assign bug {} to {}: {}",
+                bug_id, hid, e
             );
         }
     }
@@ -947,7 +1042,29 @@ pub async fn bug_report(
         }
     }
 
-    if !attach_errors.is_empty() {
+    if report_stay {
+        if !attach_errors.is_empty() {
+            let err_msg = format!(
+                "Issue #{:07} created, but file errors: {}",
+                bug_id,
+                attach_errors.join("; ")
+            );
+            Redirect::to(&format!(
+                "/bug_report_page?err={}&created_bug_id={}",
+                url_encode(&sanitize_error_message(&err_msg)),
+                bug_id
+            ))
+            .into_response()
+        } else {
+            let ok_msg = format!("Issue #{:07} submitted.", bug_id);
+            Redirect::to(&format!(
+                "/bug_report_page?msg={}&created_bug_id={}",
+                url_encode(&ok_msg),
+                bug_id
+            ))
+            .into_response()
+        }
+    } else if !attach_errors.is_empty() {
         let err_msg = format!(
             "Issue created, but file errors: {}",
             attach_errors.join("; ")
@@ -1093,6 +1210,8 @@ pub async fn view_bug_page(
     let users = db.list_users(None, false).unwrap_or_default();
     let users_map: HashMap<i64, String> =
         users.iter().map(|u| (u.id, u.username.clone())).collect();
+    let users_access_map: HashMap<i64, i32> =
+        users.iter().map(|u| (u.id, u.access_level)).collect();
 
     let reporter_name = users_map
         .get(&bug.reporter_id)
@@ -1170,76 +1289,14 @@ pub async fn view_bug_page(
     let monitors = db.list_bug_monitor_users(id).unwrap_or_default();
     let is_monitoring = monitors.iter().any(|u| u.id == ctx.user.id);
 
-    // Quick Action Toolbar
+    // Quick Action Toolbar (high-contrast MantisBT .btn-white.btn-round outline buttons)
     let mut actions_html = String::new();
     let can_edit = eff >= 40 || (eff >= 25 && bug.reporter_id == ctx.user.id);
     if can_edit {
         actions_html.push_str(&format!(
-            r#"<a class="btn btn-sm" href="/update_bug_page/{}">Edit</a>"#,
+            r#"<a class="btn btn-primary btn-white btn-round btn-sm" href="/update_bug_page/{}"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>"#,
             bug.id
         ));
-    }
-    actions_html.push_str(&format!(
-        r#"<a class="btn btn-secondary btn-sm" href="/bug_revision_view_page/{}">Revisions</a>"#,
-        bug.id
-    ));
-
-    let can_clone = ctx.visible_projects.iter().any(|(p, _)| {
-        p.enabled == 1 && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
-    });
-    if can_clone {
-        actions_html.push_str(&format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/bug_clone_page/{}">Clone</a>"#,
-            bug.id
-        ));
-    }
-
-    let can_move = eff >= 55
-        && ctx.visible_projects.iter().any(|(p, _)| {
-            p.id != bug.project_id
-                && p.enabled == 1
-                && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
-        });
-    if can_move {
-        actions_html.push_str(&format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/bug_move_page/{}">Move</a>"#,
-            bug.id
-        ));
-    }
-
-    if eff >= 55 {
-        actions_html.push_str(&format!(
-            r#"<a class="btn btn-secondary btn-sm" href="/bug_reminder_page/{}">Send a Reminder</a>"#,
-            bug.id
-        ));
-    }
-
-    if is_monitoring {
-        actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
-                <button type="submit" class="btn btn-secondary btn-sm">End Monitoring</button>
-            </form>"#,
-            bug.id
-        ));
-    } else {
-        actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_monitor_add/{}" style="display:inline;">
-                <button type="submit" class="btn btn-secondary btn-sm">Monitor</button>
-            </form>"#,
-            bug.id
-        ));
-    }
-
-    if eff >= 40 {
-        let status_form = views::bugs::render_status_change_form(
-            bug,
-            eff,
-            &custom_fields,
-            &cf_values,
-            &versions,
-            &cats,
-        );
-        actions_html.push_str(&status_form);
     }
 
     if eff >= 55 {
@@ -1260,28 +1317,102 @@ pub async fn view_bug_page(
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_assign/{}" style="display:inline-flex; gap:4px; align-items:center;">
                 <select name="handler_id" style="width:auto;">{}</select>
-                <button type="submit" class="btn btn-secondary btn-sm">Assign To</button>
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-user" aria-hidden="true"></i> Assign To</button>
             </form>"#,
             bug.id, user_opts
         ));
     }
 
+    if eff >= 40 {
+        let status_form = views::bugs::render_status_change_form(
+            bug,
+            eff,
+            &custom_fields,
+            &cf_values,
+            &versions,
+            &cats,
+        );
+        actions_html.push_str(&status_form);
+    }
+
+    if is_monitoring {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-eye-slash" aria-hidden="true"></i> End Monitoring</button>
+            </form>"#,
+            bug.id
+        ));
+    } else {
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_monitor_add/{}" style="display:inline;">
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-eye" aria-hidden="true"></i> Monitor</button>
+            </form>"#,
+            bug.id
+        ));
+    }
+
     if eff >= 70 {
         let (stick_label, stick_cls) = if bug.sticky == 1 {
-            ("Unstick", "btn btn-warning btn-sm")
+            ("Unstick", "btn btn-warning btn-white btn-round btn-sm")
         } else {
-            ("Stick", "btn btn-secondary btn-sm")
+            ("Stick", "btn btn-white btn-round btn-sm")
         };
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_stick/{}" style="display:inline;">
-                <button type="submit" class="{}">{}</button>
+                <button type="submit" class="{}"><i class="fa fa-thumb-tack" aria-hidden="true"></i> {}</button>
             </form>"#,
             bug.id, stick_cls, stick_label
         ));
+    }
 
+    let can_clone = ctx.visible_projects.iter().any(|(p, _)| {
+        p.enabled == 1 && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
+    });
+    if can_clone {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-white btn-round btn-sm" href="/bug_clone_page/{}"><i class="fa fa-clone" aria-hidden="true"></i> Clone</a>"#,
+            bug.id
+        ));
+    }
+
+    let can_move = eff >= 55
+        && ctx.visible_projects.iter().any(|(p, _)| {
+            p.id != bug.project_id
+                && p.enabled == 1
+                && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
+        });
+    if can_move {
+        actions_html.push_str(&format!(
+            r#"<a class="btn btn-white btn-round btn-sm" href="/bug_move_page/{}"><i class="fa fa-arrows" aria-hidden="true"></i> Move</a>"#,
+            bug.id
+        ));
+    }
+
+    if eff >= 70 && bug.status < 90 {
+        let close_res = if bug.resolution > 10 {
+            bug.resolution
+        } else {
+            20
+        };
+        actions_html.push_str(&format!(
+            r#"<form method="POST" action="/bug_change_status/{}" style="display:inline;">
+                <input type="hidden" name="new_status" value="90">
+                <input type="hidden" name="resolution" value="{}">
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-check-square-o" aria-hidden="true"></i> Close</button>
+            </form>"#,
+            bug.id, close_res
+        ));
+    }
+
+    actions_html.push_str(&format!(
+        r#"<a class="btn btn-white btn-round btn-sm" href="/bug_revision_view_page/{}"><i class="fa fa-history" aria-hidden="true"></i> Revisions</a>"#,
+        bug.id
+    ));
+
+    if eff >= 70 {
         actions_html.push_str(&format!(
             r#"<form method="POST" action="/bug_delete/{}" style="display:inline;">
-                <button type="submit" class="btn btn-danger btn-sm">Delete Issue</button>
+                <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Issue</button>
             </form>"#,
             bug.id
         ));
@@ -1366,9 +1497,9 @@ pub async fn view_bug_page(
     }
     if eff >= 25 {
         tags_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_tag_attach/{}" style="margin-top:8px; display:flex; gap:6px; align-items:center;">
+            r#"<form method="POST" action="/bug_tag_attach/{}" style="margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
                 <input type="text" name="tag_string" placeholder="Attach tags (comma-separated)" style="width:240px;">
-                <button type="submit" class="btn btn-secondary btn-sm">Attach Tags</button>
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-tag" aria-hidden="true"></i> Attach Tags</button>
             </form>"#,
             bug.id
         ));
@@ -1383,7 +1514,7 @@ pub async fn view_bug_page(
         for f in &files {
             let del_btn = if eff >= 70 {
                 format!(
-                    r#"<form method="POST" action="/bug_file_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
+                    r#"<form method="POST" action="/bug_file_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
                     f.id
                 )
             } else {
@@ -1461,7 +1592,7 @@ pub async fn view_bug_page(
         for r in &rels {
             let del_btn = if eff >= 55 {
                 format!(
-                    r#"<form method="POST" action="/bug_relationship_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
+                    r#"<form method="POST" action="/bug_relationship_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
                     r.id
                 )
             } else {
@@ -1484,7 +1615,7 @@ pub async fn view_bug_page(
 
     let rel_form_html = if eff >= 55 {
         format!(
-            r#"<form method="POST" action="/bug_relationship_add/{}" style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+            r#"<form method="POST" action="/bug_relationship_add/{}" style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                 <select name="relationship_type" style="width:auto;">
                     <option value="0">related to</option>
                     <option value="1">duplicate of</option>
@@ -1495,7 +1626,7 @@ pub async fn view_bug_page(
                     <option value="6">child of</option>
                 </select>
                 <input type="text" name="dest_bug_id" placeholder="Target Bug ID" style="width:140px;" required>
-                <button type="submit" class="btn btn-secondary btn-sm">Add Relationship</button>
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Relationship</button>
             </form>"#,
             bug.id
         )
@@ -1525,9 +1656,10 @@ pub async fn view_bug_page(
     let format_ctx = build_format_context(&db, &ctx.user, &text_corpus, &users);
 
     let mut notes_html = total_time_html;
-    notes_html.push_str(&views::bugs::render_bugnotes_table(
+    notes_html.push_str(&views::bugs::render_bugnotes_cards(
         &notes,
         &users_map,
+        &users_access_map,
         eff,
         ctx.user.id,
         &format_ctx,
@@ -1541,31 +1673,35 @@ pub async fn view_bug_page(
         };
         let time_row = if eff >= 55 {
             r#"<tr>
-                <td class="label-col">Time Tracking (HH:MM or mins)</td>
+                <th class="category">Time Tracking (HH:MM or mins)</th>
                 <td class="input-col"><input type="text" name="time_tracking" placeholder="00:00 or minutes" style="width:160px;"></td>
             </tr>"#
         } else {
             ""
         };
         format!(
-            r#"<form method="POST" action="/bugnote_add/{}" style="margin-top:12px;">
-                <table class="form-table">
-                    <tr>
-                        <td class="label-col">Note</td>
-                        <td class="input-col"><textarea name="note" required></textarea></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">View Status</td>
-                        <td class="input-col">
-                            <select name="view_state" style="width:auto;">
-                                <option value="10">public</option>
-                                {}
-                            </select>
-                        </td>
-                    </tr>
-                    {}
-                </table>
-                <button type="submit" class="btn btn-sm">Add Note</button>
+            r#"<form method="POST" action="/bugnote_add/{}">
+                <div class="table-responsive">
+                    <table class="form-table form-table-left">
+                        <tr>
+                            <th class="category">Note</th>
+                            <td class="input-col"><textarea name="note" rows="5" required></textarea></td>
+                        </tr>
+                        <tr>
+                            <th class="category">View Status</th>
+                            <td class="input-col">
+                                <select name="view_state" style="width:auto;">
+                                    <option value="10">public</option>
+                                    {}
+                                </select>
+                            </td>
+                        </tr>
+                        {}
+                    </table>
+                </div>
+                <div class="widget-toolbox" style="margin-top:8px;">
+                    <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-comment" aria-hidden="true"></i> Add Note</button>
+                </div>
             </form>"#,
             bug.id, priv_opt, time_row
         )
@@ -1600,6 +1736,7 @@ pub async fn view_bug_page(
         &cat_name,
         &reporter_name,
         &handler_name,
+        eff,
         &cf_values,
         &actions_html,
         &tags_html,

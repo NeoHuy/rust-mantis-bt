@@ -575,6 +575,7 @@ fn test_view_bug_page_build_due_date_overdue_and_sticky() {
         "General",
         "admin",
         "none",
+        90,
         &[],
         "",
         "",
@@ -1553,4 +1554,324 @@ fn test_render_view_all_bug_page_ui_m2_collapsible_filter_and_responsive_table()
     // Bulk actiongroup & zero nested forms
     assert!(html.contains(r#"action="/bug_actiongroup""#));
     assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_bug_report_page_ui_m3_fields_and_permissions() {
+    let project_opts = vec![(1, "Demo Project".to_string(), true)];
+    let categories = vec![(1, "Backend".to_string())];
+    let versions = vec![
+        ProjectVersion {
+            id: 1,
+            project_id: 1,
+            version: "v1.0".to_string(),
+            description: String::new(),
+            released: 1,
+            obsolete: 0,
+            date_order: 100,
+        },
+        ProjectVersion {
+            id: 2,
+            project_id: 1,
+            version: "v2.0".to_string(),
+            description: String::new(),
+            released: 0,
+            obsolete: 0,
+            date_order: 200,
+        },
+        ProjectVersion {
+            id: 3,
+            project_id: 1,
+            version: "v0.9-old".to_string(),
+            description: String::new(),
+            released: 0,
+            obsolete: 1,
+            date_order: 50,
+        },
+    ];
+    let dev_user = User {
+        id: 2,
+        username: "dev_alice".to_string(),
+        realname: "Alice Dev".to_string(),
+        email: "alice@example.com".to_string(),
+        password: "hash".to_string(),
+        enabled: 1,
+        protected: 0,
+        access_level: 55,
+        login_count: 0,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: String::new(),
+        last_visit: 0,
+        date_created: 0,
+    };
+
+    // Developer sees Target Version (unreleased only), Assign To, Report Stay, OS Version, Product Build
+    let ctx_dev = dummy_ctx(2, 55);
+    let Html(dev_html) = render_bug_report_page(
+        &ctx_dev,
+        &project_opts,
+        &categories,
+        &versions,
+        std::slice::from_ref(&dev_user),
+        &[],
+        55,
+        None,
+        None,
+        Some(42),
+    );
+    assert!(dev_html.contains("widget-box"));
+    assert!(dev_html.contains("fa-edit"));
+    assert!(dev_html.contains("Enter Issue Details"));
+    assert!(dev_html.contains("table-responsive"));
+    assert!(dev_html.contains("form-table-left"));
+    assert!(dev_html.contains(r#"class="required">*"#));
+    assert!(dev_html.contains(r#"name="target_version""#));
+    assert!(dev_html.contains(r#"<option value="v2.0">v2.0</option>"#));
+    assert!(!dev_html.contains("v0.9-old"));
+    // Target Version select must NOT list already-released v1.0
+    let tv_start = dev_html.find(r#"name="target_version""#).unwrap();
+    let tv_end = dev_html[tv_start..].find("</select>").unwrap() + tv_start;
+    assert!(!dev_html[tv_start..tv_end].contains("v1.0"));
+    assert!(dev_html.contains(r#"name="handler_id""#));
+    assert!(dev_html.contains("dev_alice (Alice Dev)"));
+    assert!(dev_html.contains(r#"name="report_stay""#));
+    assert!(dev_html.contains("OS Version"));
+    assert!(dev_html.contains("Product Build"));
+    assert!(!dev_html.contains("OS Build"));
+    assert!(dev_html.contains(r#"type="radio" name="view_state" value="10""#));
+    assert!(dev_html.contains(r#"href="/view_bug_page/42""#));
+    assert_eq!(dev_html.matches(r#"class="flash-message""#).count(), 1);
+    assert_no_nested_forms(&dev_html);
+
+    // Reporter (access 25) does NOT see Assign To
+    let ctx_rep = dummy_ctx(3, 25);
+    let Html(rep_html) = render_bug_report_page(
+        &ctx_rep,
+        &project_opts,
+        &categories,
+        &versions,
+        &[dev_user],
+        &[],
+        25,
+        None,
+        None,
+        None,
+    );
+    assert!(!rep_html.contains(r#"name="handler_id""#));
+    assert!(rep_html.contains(r#"name="target_version""#));
+    assert!(rep_html.contains(r#"name="report_stay""#));
+    assert_no_nested_forms(&rep_html);
+}
+
+#[test]
+fn test_render_view_bug_page_single_flash_collapsible_and_no_nested_forms() {
+    let ctx = dummy_ctx(1, 70);
+    let bug = Bug {
+        id: 77,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 1,
+        duplicate_id: 0,
+        priority: 50, // urgent
+        severity: 60,
+        reproducibility: 10,
+        status: 50,
+        resolution: 10,
+        os: "Linux".to_string(),
+        os_build: "6.8".to_string(),
+        platform: "x86_64".to_string(),
+        version: "1.0".to_string(),
+        fixed_in_version: "".to_string(),
+        build: "b-123".to_string(),
+        view_state: 10,
+        summary: "UI M3 Detail Test".to_string(),
+        sticky: 0,
+        target_version: "2.0".to_string(),
+        category_id: 1,
+        date_submitted: 1700000000,
+        due_date: 0,
+        last_updated: 1700000000,
+    };
+    let full = BugFull {
+        bug,
+        description: "**Bold** description referencing #77".to_string(),
+        steps_to_reproduce: "1. Step one".to_string(),
+        additional_information: "Extra info".to_string(),
+    };
+    let fmt_ctx = crate::views::formatting::FormatContext {
+        enabled: true,
+        ..Default::default()
+    };
+
+    let Html(html) = render_view_bug_page(
+        &ctx,
+        &full,
+        "Demo",
+        "Core",
+        "tester",
+        "tester",
+        70,
+        &[],
+        r#"<a class="btn btn-primary btn-white btn-round btn-sm" href="/update_bug_page/77">Edit</a>"#,
+        "<span>No tags attached.</span>",
+        "<p>No relationships.</p>",
+        "",
+        "<p>No attachments.</p>",
+        &render_upload_form_html(77),
+        "<p>No notes</p>",
+        r#"<form method="POST" action="/bugnote_add/77"><textarea name="note"></textarea></form>"#,
+        &render_monitors_html(&[], 77),
+        &render_monitor_form_html(77),
+        "<p>No history entries.</p>",
+        None,
+        "",
+        Some("Status updated successfully"),
+        None,
+        &fmt_ctx,
+    );
+
+    // Single flash banner only (via render_layout, NO duplicate .flash-success)
+    assert!(!html.contains("flash-success"));
+    assert_eq!(html.matches("Status updated successfully").count(), 1);
+
+    // Collapsible widget boxes & quick-jump links
+    assert!(html.contains(r#"data-widget-id="view_bug_details""#));
+    assert!(html.contains(r#"data-widget-id="attachments""#));
+    assert!(html.contains(r#"data-widget-id="relationships""#));
+    assert!(html.contains(r#"data-widget-id="monitors""#));
+    assert!(html.contains(r#"id="bugnotes""#));
+    assert!(html.contains(r#"data-widget-id="bugnote_add""#));
+    assert!(html.contains(r#"id="history""#));
+    assert!(html.contains(r#"data-action="collapse""#));
+    assert!(html.contains(r#"href="/bug_reminder_page/77""#));
+    assert!(html.contains("Send a Reminder"));
+    assert!(html.contains(r##"href="#bugnotes""##));
+    assert!(html.contains(r##"href="#history""##));
+    assert!(html.contains("formatted-text"));
+    assert!(html.contains("fa-arrow-up")); // priority urgent icon
+    assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_update_bug_page_version_dropdowns_and_legacy_fallback() {
+    let ctx = dummy_ctx(1, 70);
+    let bug = Bug {
+        id: 42,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 0,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 10,
+        resolution: 10,
+        category_id: 1,
+        date_submitted: 1600000000,
+        last_updated: 1623715200,
+        os: "macOS".to_string(),
+        os_build: "14.5".to_string(),
+        platform: "arm64".to_string(),
+        version: "legacy-0.8".to_string(),
+        fixed_in_version: "legacy-fix-0.8".to_string(),
+        target_version: "legacy-target-3.0".to_string(),
+        build: "build-99".to_string(),
+        summary: "Legacy version test".to_string(),
+        view_state: 10,
+        sticky: 0,
+        due_date: 0,
+    };
+    let full = BugFull {
+        bug,
+        description: "Desc".to_string(),
+        steps_to_reproduce: "Steps".to_string(),
+        additional_information: "AddInfo".to_string(),
+    };
+    let versions = vec![
+        ProjectVersion {
+            id: 1,
+            project_id: 1,
+            version: "v1.0".to_string(),
+            description: String::new(),
+            released: 1,
+            obsolete: 0,
+            date_order: 100,
+        },
+        ProjectVersion {
+            id: 2,
+            project_id: 1,
+            version: "v2.0".to_string(),
+            description: String::new(),
+            released: 0,
+            obsolete: 0,
+            date_order: 200,
+        },
+    ];
+
+    let Html(html) = render_update_bug_page(&ctx, &full, "", &[], &[], 70, &versions, &[]);
+    assert!(html.contains(r#"<select id="version" name="version">"#));
+    assert!(html.contains(r#"<select id="fixed_in_version" name="fixed_in_version">"#));
+    assert!(html.contains(r#"<select id="target_version" name="target_version">"#));
+    assert!(!html.contains(r#"<input type="text" name="version""#));
+    assert!(!html.contains(r#"<input type="text" name="fixed_in_version""#));
+    assert!(!html.contains(r#"<input type="text" name="target_version""#));
+
+    // Legacy fallback options preserved & selected
+    assert!(html.contains(r#"<option value="legacy-0.8" selected>legacy-0.8</option>"#));
+    assert!(html.contains(r#"<option value="legacy-fix-0.8" selected>legacy-fix-0.8</option>"#));
+    assert!(
+        html.contains(r#"<option value="legacy-target-3.0" selected>legacy-target-3.0</option>"#)
+    );
+
+    // Layout & labels
+    assert!(html.contains("widget-box"));
+    assert!(html.contains("Back To Issue"));
+    assert!(html.contains("OS Version"));
+    assert!(html.contains("Product Build"));
+    assert!(html.contains(r#"<input type="hidden" name="last_updated" value="1623715200">"#));
+    assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_bugnotes_cards_anchors_badges_and_no_nested_forms() {
+    let mut users_map = HashMap::new();
+    users_map.insert(1, "alice".to_string());
+    let mut access_map = HashMap::new();
+    access_map.insert(1, 55);
+
+    let note = Bugnote {
+        id: 105,
+        bug_id: 10,
+        reporter_id: 1,
+        bugnote_text_id: 1,
+        view_state: 50,
+        date_submitted: 1600000000,
+        last_modified: 1600000000,
+        note_type: 1,
+        note_attr: String::new(),
+        time_tracking: 90,
+        note: "Note body with `inline`".to_string(),
+    };
+    let fmt_ctx = crate::views::formatting::FormatContext {
+        enabled: true,
+        ..Default::default()
+    };
+
+    let out = render_bugnotes_cards(&[note], &users_map, &access_map, 55, 1, &fmt_ctx);
+    assert!(out.contains(r#"id="c105""#));
+    assert!(out.contains("bugnote-card"));
+    assert!(out.contains("bugnote-private"));
+    assert!(out.contains("fa-user"));
+    assert!(out.contains("developer"));
+    assert!(out.contains("~0000105"));
+    assert!(out.contains(r#"href="/view_bug_page/10#c105""#));
+    assert!(out.contains("Reminder"));
+    assert!(out.contains("private"));
+    assert!(out.contains("01:30"));
+    assert!(out.contains("formatted-text"));
+    assert!(out.contains("inline-code"));
+    assert!(out.contains("btn-white btn-round"));
+    assert!(out.contains("Make Public"));
+    assert_no_nested_forms(&out);
 }

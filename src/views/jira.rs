@@ -324,7 +324,7 @@ pub fn render_jira_section(
         let unlink_btn = if eff >= 55 {
             format!(
                 r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" style="display:inline; margin-left:4px;" onsubmit="return confirm('Are you sure you want to unlink this Jira ticket?');">
-                    <button type="submit" class="btn btn-sm btn-danger">Unlink</button>
+                    <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-unlink" aria-hidden="true"></i> Unlink</button>
                 </form>"#,
                 bug_id
             )
@@ -335,7 +335,7 @@ pub fn render_jira_section(
         let sync_btn = if eff >= 55 {
             format!(
                 r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;" onsubmit="this.querySelector('button[type=submit]').disabled=true;">
-                    <button type="submit" class="btn btn-sm">Sync with Jira</button>
+                    <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-refresh" aria-hidden="true"></i> Sync with Jira</button>
                 </form>"#,
                 bug_id
             )
@@ -344,37 +344,49 @@ pub fn render_jira_section(
         };
 
         format!(
-            r#"<div class="panel">
-                <div class="panel-header">Jira Integration</div>
-                <div class="panel-body">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th style="width:140px;">Jira Ticket</th>
-                                <th style="width:100px;">Type</th>
-                                <th style="width:120px;">Jira Status</th>
-                                <th>Jira URL</th>
-                                <th style="width:180px;">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td>
-                                    <a href="{}" target="_blank" rel="noopener noreferrer" style="font-weight:bold; color:#0052cc;">
-                                        {} <i class="fa fa-external-link" style="font-size:11px;"></i>
-                                    </a>
-                                </td>
-                                <td>{}</td>
-                                <td>{}</td>
-                                <td>
-                                    <a href="{}" target="_blank" rel="noopener noreferrer" style="color:#555;">{}</a>
-                                </td>
-                                <td>
-                                    {}{}{}
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
+            r#"<div class="widget-box widget-color-blue2" data-widget-id="jira_integration">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-external-link-square" aria-hidden="true"></i>
+                        Jira Integration
+                    </h4>
+                    <div class="widget-toolbar">
+                        <button type="button" data-action="collapse" aria-expanded="true" aria-label="Toggle Jira Integration">
+                            <i class="ace-icon fa fa-chevron-up" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="widget-body">
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th style="width:140px;">Jira Ticket</th>
+                                    <th style="width:100px;">Type</th>
+                                    <th style="width:120px;">Jira Status</th>
+                                    <th>Jira URL</th>
+                                    <th style="width:210px;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>
+                                        <a href="{}" target="_blank" rel="noopener noreferrer" style="font-weight:bold; color:#0052cc;">
+                                            {} <i class="fa fa-external-link" style="font-size:11px;"></i>
+                                        </a>
+                                    </td>
+                                    <td>{}</td>
+                                    <td>{}</td>
+                                    <td>
+                                        <a href="{}" target="_blank" rel="noopener noreferrer" style="color:#555;">{}</a>
+                                    </td>
+                                    <td>
+                                        {}{}{}
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>"#,
             html_escape(&jl.jira_url),
@@ -399,51 +411,73 @@ pub fn render_jira_section(
         }
 
         format!(
-            r#"<div class="panel">
-                <div class="panel-header">Jira Integration</div>
-                <div class="panel-body">
+            r#"<div class="widget-box widget-color-blue2" data-widget-id="jira_integration">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-external-link-square" aria-hidden="true"></i>
+                        Jira Integration
+                    </h4>
+                    <div class="widget-toolbar">
+                        <button type="button" data-action="collapse" aria-expanded="true" aria-label="Toggle Jira Integration">
+                            <i class="ace-icon fa fa-chevron-up" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="widget-body">
                     <p style="margin-bottom:12px; color:#666;">No Jira ticket linked to this issue.</p>
                     <form method="POST" action="/view_bug_page/{}/jira_sync" onsubmit="this.querySelector('button[type=submit]').disabled=true;">
-                        <table class="form-table">
-                            <tr>
-                                <td class="label-col">Jira Ticket Number</td>
-                                <td class="input-col">
-                                    <input type="text" name="jira_key" placeholder="e.g. 123 or JBC-123" style="width:260px;">
-                                    <small style="color:#777; display:block; margin-top:2px;">Leave empty to create a new Jira ticket</small>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td class="label-col">Epic</td>
-                                <td class="input-col">
-                                    <select name="epic_key" style="min-width:240px; width:auto;">
-                                        <option value="">None (No Epic)</option>
-                                        {}
-                                    </select>
-                                    <small style="color:#777; display:block; margin-top:2px;">Optional parent epic in Jira</small>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td class="label-col">Issue Type</td>
-                                <td class="input-col">
-                                    <select name="issue_type" style="width:auto;">
-                                        <option value="Bug">Bug</option>
-                                        <option value="Task">Task</option>
-                                        <option value="Story">Story</option>
-                                    </select>
-                                    <small style="color:#777; display:block; margin-top:2px;">Type if creating a new Jira ticket</small>
-                                </td>
-                            </tr>
-                        </table>
-                        <button type="submit" class="btn btn-sm">Sync</button>
+                        <div class="table-responsive">
+                            <table class="form-table form-table-left">
+                                <tr>
+                                    <th class="category">Jira Ticket Number</th>
+                                    <td class="input-col">
+                                        <input type="text" name="jira_key" placeholder="e.g. 123 or JBC-123" style="width:260px;">
+                                        <small style="color:#777; display:block; margin-top:2px;">Leave empty to create a new Jira ticket</small>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Epic</th>
+                                    <td class="input-col">
+                                        <select name="epic_key" style="min-width:240px; width:auto;">
+                                            <option value="">None (No Epic)</option>
+                                            {}
+                                        </select>
+                                        <small style="color:#777; display:block; margin-top:2px;">Optional parent epic in Jira</small>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Issue Type</th>
+                                    <td class="input-col">
+                                        <select name="issue_type" style="width:auto;">
+                                            <option value="Bug">Bug</option>
+                                            <option value="Task">Task</option>
+                                            <option value="Story">Story</option>
+                                        </select>
+                                        <small style="color:#777; display:block; margin-top:2px;">Type if creating a new Jira ticket</small>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-refresh" aria-hidden="true"></i> Sync</button>
                     </form>
                 </div>
             </div>"#,
             bug_id, epic_options
         )
     } else {
-        r#"<div class="panel">
-            <div class="panel-header">Jira Integration</div>
-            <div class="panel-body">
+        r#"<div class="widget-box widget-color-blue2" data-widget-id="jira_integration">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="ace-icon fa fa-external-link-square" aria-hidden="true"></i>
+                    Jira Integration
+                </h4>
+                <div class="widget-toolbar">
+                    <button type="button" data-action="collapse" aria-expanded="true" aria-label="Toggle Jira Integration">
+                        <i class="ace-icon fa fa-chevron-up" aria-hidden="true"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="widget-body">
                 <p style="color:#666;">No Jira ticket linked to this issue.</p>
             </div>
         </div>"#

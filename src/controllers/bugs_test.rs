@@ -601,3 +601,333 @@ fn test_build_format_context_visibility_and_toggle() {
     assert!(off_ctx.issue_refs.is_empty());
     assert!(off_ctx.note_refs.is_empty());
 }
+
+async fn test_http_login(
+    app: &axum::Router,
+    username: &str,
+    password: &str,
+    proj_id: i64,
+) -> String {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "username={}&password={}",
+                    username, password
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let auth_cookie = res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    let res2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/set_project")
+                .header("cookie", &auth_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("project_id={}", proj_id)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res2.status(), StatusCode::SEE_OTHER);
+    let proj_cookie = res2
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    format!("{}; {}", auth_cookie, proj_cookie)
+}
+
+#[tokio::test]
+async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("UIM3Report", 10, 10, "", true).unwrap();
+    db.add_version(proj_id, "v1.0", "Released", true, false)
+        .unwrap();
+    db.add_version(proj_id, "v2.0", "Planned", false, false)
+        .unwrap();
+
+    let rep_id = db
+        .create_user("rep_m3", "Rep M3", "rep@m3.com", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev_m3", "Dev M3", "dev@m3.com", "pw", 55, true, false)
+        .unwrap();
+    let cat_id = db.add_category(proj_id, "Backend", dev_id).unwrap();
+    let _ = rep_id;
+
+    let app = crate::build_router(db.clone());
+    let dev_cookie = test_http_login(&app, "dev_m3", "pw", proj_id).await;
+    let rep_cookie = test_http_login(&app, "rep_m3", "pw", proj_id).await;
+
+    // 1. GET /bug_report_page as Reporter: no Assign To, has Target Version & Report Stay
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/bug_report_page")
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let rep_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!rep_html.contains(r#"name="handler_id""#));
+    assert!(rep_html.contains(r#"name="target_version""#));
+    assert!(rep_html.contains(r#"name="report_stay""#));
+
+    // 2. Reporter attempting to assign handler_id > 0 -> 403 Forbidden
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&category_id={}&summary=Unauthorized+Assign&handler_id={}",
+                    proj_id, cat_id, dev_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // 3. Developer submits with target_version=v2.0, handler_id=1 (admin), and report_stay=1
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &dev_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&category_id={}&summary=Stay+Test+Bug&target_version=v2.0&handler_id=1&report_stay=1",
+                    proj_id, cat_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc = res
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(loc.starts_with("/bug_report_page?msg="));
+    assert!(loc.contains("created_bug_id="));
+
+    // Follow redirect to /bug_report_page?msg=...&created_bug_id=...
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&loc)
+                .header("cookie", &dev_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let stay_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(stay_html.contains(r#"href="/view_bug_page/"#));
+    assert_eq!(stay_html.matches(r#"class="flash-message""#).count(), 1);
+
+    // Verify bug in DB got target_version="v2.0" and handler_id=1
+    let bugs = db.list_bugs(proj_id, 0, 50).unwrap();
+    let stay_bug = bugs.iter().find(|b| b.summary == "Stay Test Bug").unwrap();
+    assert_eq!(stay_bug.target_version, "v2.0");
+    assert_eq!(stay_bug.handler_id, 1);
+
+    // 4. Default submit without report_stay and handler_id=0 keeps category default assignee & redirects to view_bug_page
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/bug_report")
+                .header("cookie", &dev_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&category_id={}&summary=Default+Assignee+Bug&handler_id=0",
+                    proj_id, cat_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let loc2 = res
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(loc2.starts_with("/view_bug_page/"));
+
+    let bugs2 = db.list_bugs(proj_id, 0, 50).unwrap();
+    let def_bug = bugs2
+        .iter()
+        .find(|b| b.summary == "Default Assignee Bug")
+        .unwrap();
+    assert_eq!(def_bug.handler_id, dev_id);
+}
+
+#[tokio::test]
+async fn test_http_view_and_update_bug_ui_m3_parity() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("UIM3View", 10, 10, "", true).unwrap();
+    db.add_version(proj_id, "v1.0", "Released", true, false)
+        .unwrap();
+    db.add_version(proj_id, "v2.0", "Planned", false, false)
+        .unwrap();
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            1,
+            1,
+            "Detail View Test",
+            "See #1 and `code`",
+            "",
+            "",
+            40,
+            50,
+            10,
+            "legacy-0.5",
+            "Linux",
+            "6.6",
+            "x86_64",
+            10,
+        )
+        .unwrap();
+    db.update_bug_fields(
+        bug_id,
+        1,
+        BugUpdate {
+            target_version: Some("legacy-target".to_string()),
+            fixed_in_version: Some("legacy-fixed".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let note_id = db
+        .add_bugnote(bug_id, 1, "First timeline note", 10)
+        .unwrap();
+
+    let app = crate::build_router(db.clone());
+    let admin_cookie = test_http_login(&app, "administrator", "root", proj_id).await;
+
+    // 1. GET /view_bug_page/:id?msg=Issue+updated has exactly ONE flash banner
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}?msg=Issue+updated", bug_id))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let view_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!view_html.contains("flash-success"));
+    assert_eq!(view_html.matches("Issue updated").count(), 1);
+    assert!(view_html.contains(&format!(r#"id="c{}""#, note_id)));
+    assert!(view_html.contains("First timeline note"));
+    assert!(view_html.contains("formatted-text"));
+    assert!(view_html.contains("btn-white btn-round"));
+    assert!(view_html.contains("Close</button>"));
+
+    // 2. GET /update_bug_page/:id has <select> version dropdowns with legacy fallbacks selected
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/update_bug_page/{}", bug_id))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let upd_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(upd_html.contains(r#"<select id="version" name="version">"#));
+    assert!(upd_html.contains(r#"<option value="legacy-0.5" selected>legacy-0.5</option>"#));
+    assert!(upd_html.contains(r#"<option value="legacy-fixed" selected>legacy-fixed</option>"#));
+    assert!(upd_html.contains(r#"<option value="legacy-target" selected>legacy-target</option>"#));
+    assert!(upd_html.contains("Back To Issue"));
+}

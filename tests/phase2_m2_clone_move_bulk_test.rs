@@ -267,8 +267,10 @@ async fn test_clone_issue_http_flow_and_separate_files() {
             .to_vec(),
     )
     .unwrap();
-    assert!(body.contains(&format!(r#"href="/bug_clone_page/{}">Clone</a>"#, bug_src)));
-    assert!(body.contains(&format!(r#"href="/bug_move_page/{}">Move</a>"#, bug_src)));
+    assert!(body.contains(&format!(r#"href="/bug_clone_page/{}""#, bug_src)));
+    assert!(body.contains("Clone</a>"));
+    assert!(body.contains(&format!(r#"href="/bug_move_page/{}""#, bug_src)));
+    assert!(body.contains("Move</a>"));
 
     // Target project permission guard: Developer tries to clone into a private project where they have no membership (< 25)
     let p_priv = db

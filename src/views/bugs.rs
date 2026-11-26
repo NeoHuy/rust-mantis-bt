@@ -1698,10 +1698,12 @@ pub fn render_bug_report_page(
     project_opts: &[(i64, String, bool)],
     categories: &[(i64, String)],
     versions: &[ProjectVersion],
+    assignable_users: &[User],
     custom_fields: &[CustomField],
     effective_access: i32,
     flash_err: Option<&str>,
     flash_msg: Option<&str>,
+    created_bug_id: Option<i64>,
 ) -> Html<String> {
     let mut proj_opts = String::new();
     for (pid, pname, is_selected) in project_opts {
@@ -1724,13 +1726,42 @@ pub fn render_bug_report_page(
     }
 
     let mut ver_opts = String::from(r#"<option value="">(none)</option>"#);
+    let mut target_ver_opts = String::from(r#"<option value="">(none)</option>"#);
     for v in versions {
-        ver_opts.push_str(&format!(
-            r#"<option value="{}">{}</option>"#,
-            html_escape(&v.version),
-            html_escape(&v.version)
-        ));
+        if v.obsolete == 0 {
+            let escaped = html_escape(&v.version);
+            ver_opts.push_str(&format!(r#"<option value="{0}">{0}</option>"#, escaped));
+            if v.released == 0 {
+                target_ver_opts.push_str(&format!(r#"<option value="{0}">{0}</option>"#, escaped));
+            }
+        }
     }
+
+    let assign_to_row = if effective_access >= crate::models::ACCESS_DEVELOPER {
+        let mut user_opts =
+            String::from(r#"<option value="0" selected>(Unassigned / Category Default)</option>"#);
+        for u in assignable_users {
+            let display = if !u.realname.trim().is_empty() {
+                format!("{} ({})", u.username, u.realname)
+            } else {
+                u.username.clone()
+            };
+            user_opts.push_str(&format!(
+                r#"<option value="{}">{}</option>"#,
+                u.id,
+                html_escape(&display)
+            ));
+        }
+        format!(
+            r#"<tr>
+                <th class="category"><label for="handler_id">Assign To</label></th>
+                <td class="input-col"><select id="handler_id" name="handler_id">{}</select></td>
+            </tr>"#,
+            user_opts
+        )
+    } else {
+        String::new()
+    };
 
     let dummy_cats: Vec<Category> = categories
         .iter()
@@ -1756,125 +1787,177 @@ pub fn render_bug_report_page(
         .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
         .unwrap_or_default();
 
+    let (created_banner, layout_flash) = if let Some(cid) = created_bug_id {
+        (
+            format!(
+                r#"<div class="flash-message"><i class="fa fa-check-circle" aria-hidden="true"></i> Issue <a href="/view_bug_page/{cid}">#{cid:07}</a> submitted successfully.</div>"#,
+                cid = cid
+            ),
+            None,
+        )
+    } else {
+        (String::new(), flash_msg)
+    };
+
     let dropzone_html = render_dropzone_html("report", "Drag and drop files here, or");
 
     let content = format!(
-        r#"{}
-        <div class="panel">
-            <div class="panel-header">Enter Issue Details</div>
-            <div class="panel-body">
-                <form method="POST" action="/bug_report" enctype="multipart/form-data">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Project</td>
-                            <td class="input-col"><select name="project_id">{}</select></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Category</td>
-                            <td class="input-col"><select name="category_id">{}</select></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Reproducibility</td>
-                            <td class="input-col">
-                                <select name="reproducibility">
-                                    <option value="10">always</option>
-                                    <option value="30">sometimes</option>
-                                    <option value="50">random</option>
-                                    <option value="70" selected>have not tried</option>
-                                    <option value="90">unable to reproduce</option>
-                                    <option value="100">N/A</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Severity</td>
-                            <td class="input-col">
-                                <select name="severity">
-                                    <option value="10">feature</option>
-                                    <option value="20">trivial</option>
-                                    <option value="30">text</option>
-                                    <option value="40">tweak</option>
-                                    <option value="50" selected>minor</option>
-                                    <option value="60">major</option>
-                                    <option value="70">crash</option>
-                                    <option value="80">block</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Priority</td>
-                            <td class="input-col">
-                                <select name="priority">
-                                    <option value="10">none</option>
-                                    <option value="20">low</option>
-                                    <option value="30" selected>normal</option>
-                                    <option value="40">high</option>
-                                    <option value="50">urgent</option>
-                                    <option value="60">immediate</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Product Version</td>
-                            <td class="input-col"><select name="version">{}</select></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Platform / OS / Build</td>
-                            <td class="input-col">
-                                <input type="text" name="platform" placeholder="Platform" style="max-width:120px;">
-                                <input type="text" name="os" placeholder="OS" style="max-width:120px;">
-                                <input type="text" name="os_build" placeholder="OS Build" style="max-width:120px;">
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Build</td>
-                            <td class="input-col"><input type="text" name="build" placeholder="Build" style="max-width:200px;"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Due Date</td>
-                            <td class="input-col"><input type="date" name="due_date" style="max-width:200px;"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Summary *</td>
-                            <td class="input-col"><input type="text" name="summary" required></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Description *</td>
-                            <td class="input-col"><textarea name="description"></textarea></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Steps To Reproduce</td>
-                            <td class="input-col"><textarea name="steps_to_reproduce"></textarea></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Additional Information</td>
-                            <td class="input-col"><textarea name="additional_information"></textarea></td>
-                        </tr>
-                        {}
-                        <tr>
-                            <td class="label-col">Attach Files</td>
-                            <td class="input-col">
+        r#"{}{}
+        <form method="POST" action="/bug_report" enctype="multipart/form-data">
+            <div class="widget-box widget-color-blue2">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-edit" aria-hidden="true"></i>
+                        Enter Issue Details
+                    </h4>
+                </div>
+                <div class="widget-body">
+                    <div class="widget-main no-padding">
+                        <div class="table-responsive">
+                            <table class="form-table form-table-left">
+                                <tr>
+                                    <th class="category"><label for="project_id">Project</label></th>
+                                    <td class="input-col"><select id="project_id" name="project_id">{}</select></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="category_id">Category</label></th>
+                                    <td class="input-col"><select id="category_id" name="category_id">{}</select></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="reproducibility">Reproducibility</label></th>
+                                    <td class="input-col">
+                                        <select id="reproducibility" name="reproducibility">
+                                            <option value="10">always</option>
+                                            <option value="30">sometimes</option>
+                                            <option value="50">random</option>
+                                            <option value="70" selected>have not tried</option>
+                                            <option value="90">unable to reproduce</option>
+                                            <option value="100">N/A</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="severity">Severity</label></th>
+                                    <td class="input-col">
+                                        <select id="severity" name="severity">
+                                            <option value="10">feature</option>
+                                            <option value="20">trivial</option>
+                                            <option value="30">text</option>
+                                            <option value="40">tweak</option>
+                                            <option value="50" selected>minor</option>
+                                            <option value="60">major</option>
+                                            <option value="70">crash</option>
+                                            <option value="80">block</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="priority">Priority</label></th>
+                                    <td class="input-col">
+                                        <select id="priority" name="priority">
+                                            <option value="10">none</option>
+                                            <option value="20">low</option>
+                                            <option value="30" selected>normal</option>
+                                            <option value="40">high</option>
+                                            <option value="50">urgent</option>
+                                            <option value="60">immediate</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="platform">Platform</label></th>
+                                    <td class="input-col"><input type="text" id="platform" name="platform" placeholder="e.g. x86_64, arm64"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="os">OS</label></th>
+                                    <td class="input-col"><input type="text" id="os" name="os" placeholder="e.g. Linux, macOS, Windows"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="os_build">OS Version</label></th>
+                                    <td class="input-col"><input type="text" id="os_build" name="os_build" placeholder="e.g. 14.5, 22.04 LTS"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="version">Product Version</label></th>
+                                    <td class="input-col"><select id="version" name="version">{}</select></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="build">Product Build</label></th>
+                                    <td class="input-col"><input type="text" id="build" name="build" placeholder="Product Build" style="max-width:220px;"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="target_version">Target Version</label></th>
+                                    <td class="input-col"><select id="target_version" name="target_version">{}</select></td>
+                                </tr>
                                 {}
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">View Status</td>
-                            <td class="input-col">
-                                <select name="view_state">
-                                    <option value="10" selected>public</option>
-                                    <option value="50">private</option>
-                                </select>
-                            </td>
-                        </tr>
-                    </table>
-                    <button type="submit" class="btn">Submit Issue</button>
-                </form>
+                                <tr>
+                                    <th class="category"><label for="due_date">Due Date</label></th>
+                                    <td class="input-col"><input type="date" id="due_date" name="due_date" style="max-width:220px;"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="summary">Summary</label></th>
+                                    <td class="input-col"><input type="text" id="summary" name="summary" required></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="description">Description</label></th>
+                                    <td class="input-col"><textarea id="description" name="description" rows="6"></textarea></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="steps_to_reproduce">Steps To Reproduce</label></th>
+                                    <td class="input-col"><textarea id="steps_to_reproduce" name="steps_to_reproduce" rows="4"></textarea></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="additional_information">Additional Information</label></th>
+                                    <td class="input-col"><textarea id="additional_information" name="additional_information" rows="4"></textarea></td>
+                                </tr>
+                                {}
+                                <tr>
+                                    <th class="category">Attach Files</th>
+                                    <td class="input-col">{}</td>
+                                </tr>
+                                <tr>
+                                    <th class="category">View Status</th>
+                                    <td class="input-col">
+                                        <label class="inline-label">
+                                            <input type="radio" name="view_state" value="10" checked> public
+                                        </label>
+                                        <label class="inline-label">
+                                            <input type="radio" name="view_state" value="50"> private
+                                        </label>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="report_stay">Report Stay</label></th>
+                                    <td class="input-col">
+                                        <label class="inline-label">
+                                            <input type="checkbox" id="report_stay" name="report_stay" value="1">
+                                            <span>Check to report more issues</span>
+                                        </label>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="widget-toolbox" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <button type="submit" class="btn btn-primary btn-white btn-round">
+                            <i class="fa fa-check" aria-hidden="true"></i> Submit Issue
+                        </button>
+                        <span class="required">* required</span>
+                    </div>
+                </div>
             </div>
-        </div>"#,
-        err_banner, proj_opts, cat_opts, ver_opts, cf_rows_html, dropzone_html
+        </form>"#,
+        err_banner,
+        created_banner,
+        proj_opts,
+        cat_opts,
+        ver_opts,
+        target_ver_opts,
+        assign_to_row,
+        cf_rows_html,
+        dropzone_html
     );
 
-    render_layout("Report Issue", ctx, flash_msg, &content)
+    render_layout("Report Issue", ctx, layout_flash, &content)
 }
 
 pub fn render_status_change_form(
@@ -1987,7 +2070,7 @@ pub fn render_status_change_form(
             <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
             <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
             {}
-            <button type="submit" class="btn btn-secondary btn-sm">Change Status</button>
+            <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-exchange" aria-hidden="true"></i> Change Status</button>
         </form>"#,
         bug.id, status_opts, res_opts, cf_inputs
     )
@@ -2042,7 +2125,7 @@ pub fn render_upload_form_html(bug_id: i64) -> String {
         r#"<form method="POST" action="/bug_file_add/{}" enctype="multipart/form-data" style="margin-top:10px;">
             {}
             <div style="margin-top:8px;">
-                <button type="submit" class="btn btn-secondary btn-sm">Upload Files</button>
+                <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-upload" aria-hidden="true"></i> Upload Files</button>
             </div>
         </form>"#,
         bug_id, dropzone
@@ -2053,37 +2136,40 @@ pub fn render_monitors_html(monitors: &[User], bug_id: i64) -> String {
     if monitors.is_empty() {
         return "<p>No users monitoring this issue.</p>".to_string();
     }
-    let mut out = String::from(
-        r#"<table class="data-table"><thead><tr><th>Username</th><th>Real Name</th><th>Actions</th></tr></thead><tbody>"#,
-    );
+    let mut out = String::from(r#"<div class="monitor-pill-list">"#);
     for m in monitors {
+        let display_name = if !m.realname.trim().is_empty() {
+            format!(
+                "{} ({})",
+                html_escape(&m.username),
+                html_escape(&m.realname)
+            )
+        } else {
+            html_escape(&m.username)
+        };
         let remove_btn = format!(
             r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
                 <input type="hidden" name="user_id" value="{}">
-                <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+                <button type="submit" class="btn btn-danger btn-white btn-round btn-sm" title="Remove monitor" aria-label="Remove {}"><i class="fa fa-times" aria-hidden="true"></i></button>
             </form>"#,
-            bug_id, m.id
+            bug_id,
+            m.id,
+            html_escape(&m.username)
         );
         out.push_str(&format!(
-            r#"<tr>
-                <td>{}</td>
-                <td>{}</td>
-                <td>{}</td>
-            </tr>"#,
-            html_escape(&m.username),
-            html_escape(&m.realname),
-            remove_btn
+            r#"<span class="monitor-pill"><i class="fa fa-user" aria-hidden="true"></i> <span>{}</span> {}</span>"#,
+            display_name, remove_btn
         ));
     }
-    out.push_str("</tbody></table>");
+    out.push_str("</div>");
     out
 }
 
 pub fn render_monitor_form_html(bug_id: i64) -> String {
     format!(
-        r#"<form method="POST" action="/bug_monitor_add/{}" style="margin-top:10px; display:flex; gap:8px; align-items:center;">
+        r#"<form method="POST" action="/bug_monitor_add/{}" style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
             <input type="text" name="username" placeholder="Username" style="max-width:200px;" required>
-            <button type="submit" class="btn btn-secondary btn-sm">Add Monitor</button>
+            <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-user-plus" aria-hidden="true"></i> Add Monitor</button>
         </form>"#,
         bug_id
     )
@@ -2129,6 +2215,80 @@ pub fn render_reminder_badge(note_type: i32) -> &'static str {
     }
 }
 
+fn priority_icon_html(priority: i32) -> &'static str {
+    match priority {
+        60 => {
+            r#"<i class="fa fa-exclamation-circle" style="color:#d15b47;" aria-hidden="true"></i> "#
+        }
+        50 => r#"<i class="fa fa-arrow-up" style="color:#d15b47;" aria-hidden="true"></i> "#,
+        40 => r#"<i class="fa fa-chevron-up" style="color:#e67e22;" aria-hidden="true"></i> "#,
+        30 => r#"<i class="fa fa-minus" style="color:#555555;" aria-hidden="true"></i> "#,
+        20 => r#"<i class="fa fa-chevron-down" style="color:#3a87ad;" aria-hidden="true"></i> "#,
+        10 => r#"<i class="fa fa-circle-o" style="color:#888888;" aria-hidden="true"></i> "#,
+        _ => "",
+    }
+}
+
+fn render_formatted_block(
+    raw: &str,
+    format_ctx: &crate::views::formatting::FormatContext,
+) -> String {
+    if format_ctx.enabled {
+        crate::views::formatting::format_text(raw, format_ctx)
+    } else {
+        format!(
+            r#"<div style="white-space:pre-wrap;">{}</div>"#,
+            html_escape(raw)
+        )
+    }
+}
+
+fn render_collapsible_widget_box(
+    widget_id: &str,
+    anchor_id: Option<&str>,
+    icon_class: &str,
+    title: &str,
+    extra_toolbar_html: &str,
+    body_html: &str,
+    toolbox_html: Option<&str>,
+) -> String {
+    let id_attr = anchor_id
+        .map(|a| format!(r#" id="{}""#, html_escape(a)))
+        .unwrap_or_default();
+    let toolbox = toolbox_html
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!(r#"<div class="widget-toolbox action-toolbar">{}</div>"#, t))
+        .unwrap_or_default();
+    format!(
+        r#"<div{id_attr} class="widget-box widget-color-blue2" data-widget-id="{wid}">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="ace-icon fa {icon}" aria-hidden="true"></i>
+                    {title}
+                </h4>
+                <div class="widget-toolbar">
+                    {extra_toolbar}
+                    <button type="button" data-action="collapse" aria-expanded="true" aria-label="Toggle {title_attr}">
+                        <i class="ace-icon fa fa-chevron-up" aria-hidden="true"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="widget-body">
+                {body}
+                {toolbox}
+            </div>
+        </div>"#,
+        id_attr = id_attr,
+        wid = html_escape(widget_id),
+        icon = html_escape(icon_class),
+        title = title,
+        title_attr = html_escape(title),
+        extra_toolbar = extra_toolbar_html,
+        body = body_html,
+        toolbox = toolbox
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_view_bug_page(
     ctx: &AuthContext,
@@ -2137,6 +2297,7 @@ pub fn render_view_bug_page(
     cat_name: &str,
     reporter_name: &str,
     handler_name: &str,
+    eff: i32,
     cf_values: &[CustomFieldValue],
     actions_html: &str,
     tags_html: &str,
@@ -2156,9 +2317,8 @@ pub fn render_view_bug_page(
     format_ctx: &crate::views::formatting::FormatContext,
 ) -> Html<String> {
     let bug = &full.bug;
-    let banner = if let Some(m) = flash_msg {
-        format!(r#"<div class="flash-success">{}</div>"#, html_escape(m))
-    } else if let Some(e) = flash_err {
+    // Note: flash_msg is rendered once by render_layout; only render flash_err here.
+    let err_banner = if let Some(e) = flash_err {
         format!(r#"<div class="flash-error">{}</div>"#, html_escape(e))
     } else {
         String::new()
@@ -2188,7 +2348,7 @@ pub fn render_view_bug_page(
         };
         cf_rows_html.push_str(&format!(
             r#"<tr>
-                <td class="label-col">{}</td>
+                <th class="category">{}</th>
                 <td class="input-col" colspan="5">{}</td>
             </tr>"#,
             html_escape(&cfv.field_name),
@@ -2228,148 +2388,114 @@ pub fn render_view_bug_page(
     };
 
     let status_badge = render_status_badge(bug.status, status_label(bug.status));
+    let priority_html = format!(
+        "{}{}",
+        priority_icon_html(bug.priority),
+        html_escape(priority_label(bug.priority))
+    );
 
-    let content = format!(
-        r#"{}
-        <div class="panel">
-            <div class="panel-header">View Issue Details [#{:07}]</div>
-            <div class="panel-body">
-                <table class="form-table" style="margin-bottom:12px;">
-                    <thead>
-                        <tr style="background:#edf3f7; font-weight:bold; color:#334e68;">
-                            <td style="width:12%;">ID</td>
-                            <td style="width:18%;">Project</td>
-                            <td style="width:18%;">Category</td>
-                            <td style="width:14%;">View Status</td>
-                            <td style="width:19%;">Date Submitted</td>
-                            <td style="width:19%;">Last Update</td>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td>{:07}{}{}</td>
-                            <td>{}</td>
-                            <td>{}</td>
-                            <td>{}</td>
-                            <td>{}</td>
-                            <td>{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Reporter</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">Assigned To</td>
-                            <td class="input-col" colspan="3">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Priority</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">Severity</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">Reproducibility</td>
-                            <td class="input-col">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Status</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">Resolution</td>
-                            <td class="input-col" colspan="3">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Platform</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">OS</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">OS Version</td>
-                            <td class="input-col">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Product Version</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">Target Version</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">Fixed in Version</td>
-                            <td class="input-col">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Build</td>
-                            <td class="input-col">{}</td>
-                            <td class="label-col">Due Date</td>
-                            <td class="input-col" colspan="3">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Summary</td>
-                            <td class="input-col" colspan="5"><strong>{:07}: {}</strong>{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Description</td>
-                            <td class="input-col" colspan="5" style="white-space:pre-wrap;">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Steps To Reproduce</td>
-                            <td class="input-col" colspan="5" style="white-space:pre-wrap;">{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Additional Information</td>
-                            <td class="input-col" colspan="5" style="white-space:pre-wrap;">{}</td>
-                        </tr>
-                        {}
-                    </tbody>
-                </table>
-                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; padding-top:8px; border-top:1px solid #e0e6ed;">
+    let mut jump_toolbar = String::new();
+    if eff >= crate::models::ACCESS_DEVELOPER {
+        jump_toolbar.push_str(&format!(
+            r#"<a class="btn btn-white btn-round btn-sm" href="/bug_reminder_page/{}"><i class="fa fa-bell" aria-hidden="true"></i> Send a Reminder</a>"#,
+            bug.id
+        ));
+    }
+    jump_toolbar.push_str(
+        r##"<a class="btn btn-white btn-round btn-sm" href="#bugnotes"><i class="fa fa-comments" aria-hidden="true"></i> Jump to Notes</a>
+        <a class="btn btn-white btn-round btn-sm" href="#history"><i class="fa fa-history" aria-hidden="true"></i> Jump to History</a>"##,
+    );
+
+    let details_body = format!(
+        r#"<div class="table-responsive">
+            <table class="form-table form-table-left bug-view-table" style="margin-bottom:0;">
+                <thead>
+                    <tr class="bug-header">
+                        <th class="category">ID</th>
+                        <th class="category">Project</th>
+                        <th class="category">Category</th>
+                        <th class="category">View Status</th>
+                        <th class="category">Date Submitted</th>
+                        <th class="category">Last Update</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>{:07}{}{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                        <td>{}</td>
+                    </tr>
+                    <tr class="spacer-row"><td colspan="6"></td></tr>
+                    <tr>
+                        <th class="category">Reporter</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">Assigned To</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">Due Date</th>
+                        <td class="input-col">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Priority</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">Severity</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">Reproducibility</th>
+                        <td class="input-col">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Status</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">Resolution</th>
+                        <td class="input-col" colspan="3">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Platform</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">OS</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">OS Version</th>
+                        <td class="input-col">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Product Version</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">Target Version</th>
+                        <td class="input-col">{}</td>
+                        <th class="category">Fixed in Version</th>
+                        <td class="input-col">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Product Build</th>
+                        <td class="input-col" colspan="5">{}</td>
+                    </tr>
+                    <tr class="spacer-row"><td colspan="6"></td></tr>
+                    <tr>
+                        <th class="category">Summary</th>
+                        <td class="input-col" colspan="5"><strong>{:07}: {}</strong>{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Description</th>
+                        <td class="input-col" colspan="5">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Steps To Reproduce</th>
+                        <td class="input-col" colspan="5">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Additional Information</th>
+                        <td class="input-col" colspan="5">{}</td>
+                    </tr>
+                    <tr>
+                        <th class="category">Tags</th>
+                        <td class="input-col" colspan="5">{}</td>
+                    </tr>
                     {}
-                </div>
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">Tags</div>
-            <div class="panel-body">
-                {}
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">Relationships</div>
-            <div class="panel-body">
-                {}
-                {}
-            </div>
-        </div>
-
-        <div id="attachments" class="panel">
-            <div class="panel-header">Attached Files</div>
-            <div class="panel-body">
-                {}
-                {}
-            </div>
-        </div>
-
-        <div id="bugnotes" class="panel">
-            <div class="panel-header">Activities / Bugnotes</div>
-            <div class="panel-body">
-                {}
-                {}
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">Users Monitoring This Issue</div>
-            <div class="panel-body">
-                {}
-                {}
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">Issue History</div>
-            <div class="panel-body">
-                {}
-            </div>
-        </div>
-
-        {}"#,
-        banner,
-        bug.id,
+                </tbody>
+            </table>
+        </div>"#,
         bug.id,
         jira_badge,
         sticky_badge,
@@ -2380,7 +2506,8 @@ pub fn render_view_bug_page(
         format_timestamp(bug.last_updated),
         html_escape(reporter_name),
         html_escape(handler_name),
-        html_escape(priority_label(bug.priority)),
+        due_date_html,
+        priority_html,
         html_escape(severity_label(bug.severity)),
         html_escape(reproducibility_label(bug.reproducibility)),
         status_badge,
@@ -2392,29 +2519,163 @@ pub fn render_view_bug_page(
         html_escape(&bug.target_version),
         html_escape(&bug.fixed_in_version),
         build_str,
-        due_date_html,
         bug.id,
         html_escape(&bug.summary),
         sticky_badge,
-        crate::views::formatting::format_text(&full.description, format_ctx),
-        crate::views::formatting::format_text(&full.steps_to_reproduce, format_ctx),
-        crate::views::formatting::format_text(&full.additional_information, format_ctx),
-        cf_rows_html,
-        actions_html,
+        render_formatted_block(&full.description, format_ctx),
+        render_formatted_block(&full.steps_to_reproduce, format_ctx),
+        render_formatted_block(&full.additional_information, format_ctx),
         tags_html,
-        rels_html,
-        rel_form_html,
-        files_html,
-        upload_form_html,
+        cf_rows_html
+    );
+
+    let details_box = render_collapsible_widget_box(
+        "view_bug_details",
+        None,
+        "fa-bars",
+        &format!("View Issue Details [#{:07}]", bug.id),
+        &jump_toolbar,
+        &details_body,
+        Some(actions_html),
+    );
+
+    let files_box = render_collapsible_widget_box(
+        "attachments",
+        Some("attachments"),
+        "fa-paperclip",
+        "Attached Files",
+        "",
+        &format!(
+            r#"<div class="table-responsive">{}{}</div>"#,
+            files_html, upload_form_html
+        ),
+        None,
+    );
+
+    let rels_box = render_collapsible_widget_box(
+        "relationships",
+        Some("relationships"),
+        "fa-sitemap",
+        "Relationships",
+        "",
+        &format!(
+            r#"<div class="table-responsive">{}{}</div>"#,
+            rels_html, rel_form_html
+        ),
+        None,
+    );
+
+    let monitors_box = if !monitors_html.is_empty() || !monitor_form_html.is_empty() {
+        render_collapsible_widget_box(
+            "monitors",
+            Some("monitors"),
+            "fa-users",
+            "Users Monitoring This Issue",
+            "",
+            &format!("{}{}", monitors_html, monitor_form_html),
+            None,
+        )
+    } else {
+        String::new()
+    };
+
+    let notes_box = render_collapsible_widget_box(
+        "bugnotes",
+        Some("bugnotes"),
+        "fa-comments",
+        "Activities / Bugnotes",
+        "",
         notes_html,
-        note_form_html,
-        monitors_html,
-        monitor_form_html,
-        history_html,
-        jira_section_html
+        None,
+    );
+
+    let add_note_box = if !note_form_html.trim().is_empty() {
+        render_collapsible_widget_box(
+            "bugnote_add",
+            Some("addbugnote"),
+            "fa-comment",
+            "Add Note",
+            "",
+            note_form_html,
+            None,
+        )
+    } else {
+        String::new()
+    };
+
+    let history_box = render_collapsible_widget_box(
+        "history",
+        Some("history"),
+        "fa-history",
+        "Issue History",
+        "",
+        &format!(r#"<div class="table-responsive">{}</div>"#, history_html),
+        None,
+    );
+
+    let content = format!(
+        r#"{}
+        {}
+        {}
+        {}
+        {}
+        {}
+        {}
+        {}
+        {}"#,
+        err_banner,
+        details_box,
+        files_box,
+        rels_box,
+        monitors_box,
+        jira_section_html,
+        notes_box,
+        add_note_box,
+        history_box
     );
 
     render_layout(&format!("Issue #{:07}", bug.id), ctx, flash_msg, &content)
+}
+
+fn render_version_select_options(
+    versions: &[ProjectVersion],
+    current_value: &str,
+    unreleased_only: bool,
+) -> String {
+    let mut out = format!(
+        r#"<option value="" {}>(none)</option>"#,
+        if current_value.is_empty() {
+            "selected"
+        } else {
+            ""
+        }
+    );
+    let mut found_current = current_value.is_empty();
+    for v in versions {
+        let is_current = v.version == current_value;
+        if !is_current && (v.obsolete != 0 || (unreleased_only && v.released != 0)) {
+            continue;
+        }
+        let sel = if is_current {
+            found_current = true;
+            "selected"
+        } else {
+            ""
+        };
+        let escaped = html_escape(&v.version);
+        out.push_str(&format!(
+            r#"<option value="{0}" {1}>{0}</option>"#,
+            escaped, sel
+        ));
+    }
+    if !found_current {
+        let escaped = html_escape(current_value);
+        out.push_str(&format!(
+            r#"<option value="{0}" selected>{0}</option>"#,
+            escaped
+        ));
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2441,124 +2702,147 @@ pub fn render_update_bug_page(
         versions,
         categories,
     );
+    let product_ver_opts = render_version_select_options(versions, &bug.version, false);
+    let fixed_ver_opts = render_version_select_options(versions, &bug.fixed_in_version, false);
+    let target_ver_opts = render_version_select_options(versions, &bug.target_version, true);
+
     let content = format!(
-        r#"<div class="panel">
-            <div class="panel-header">Update Issue #{:07}</div>
-            <div class="panel-body">
-                <form method="POST" action="/update_bug/{}">
-                    <input type="hidden" name="last_updated" value="{}">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Category</td>
-                            <td class="input-col"><select name="category_id">{}</select></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Priority</td>
-                            <td class="input-col">
-                                <select name="priority">
-                                    <option value="10" {}>none</option>
-                                    <option value="20" {}>low</option>
-                                    <option value="30" {}>normal</option>
-                                    <option value="40" {}>high</option>
-                                    <option value="50" {}>urgent</option>
-                                    <option value="60" {}>immediate</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Severity</td>
-                            <td class="input-col">
-                                <select name="severity">
-                                    <option value="10" {}>feature</option>
-                                    <option value="20" {}>trivial</option>
-                                    <option value="30" {}>text</option>
-                                    <option value="40" {}>tweak</option>
-                                    <option value="50" {}>minor</option>
-                                    <option value="60" {}>major</option>
-                                    <option value="70" {}>crash</option>
-                                    <option value="80" {}>block</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Reproducibility</td>
-                            <td class="input-col">
-                                <select name="reproducibility">
-                                    <option value="10" {}>always</option>
-                                    <option value="30" {}>sometimes</option>
-                                    <option value="50" {}>random</option>
-                                    <option value="70" {}>have not tried</option>
-                                    <option value="90" {}>unable to reproduce</option>
-                                    <option value="100" {}>N/A</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Product Version</td>
-                            <td class="input-col"><input type="text" name="version" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Fixed in Version</td>
-                            <td class="input-col"><input type="text" name="fixed_in_version" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Target Version</td>
-                            <td class="input-col"><input type="text" name="target_version" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Platform</td>
-                            <td class="input-col"><input type="text" name="platform" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">OS</td>
-                            <td class="input-col"><input type="text" name="os" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">OS Build</td>
-                            <td class="input-col"><input type="text" name="os_build" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Build</td>
-                            <td class="input-col"><input type="text" name="build" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Due Date</td>
-                            <td class="input-col"><input type="date" name="due_date" value="{}"></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">View Status</td>
-                            <td class="input-col">
-                                <select name="view_state">
-                                    <option value="10" {}>public</option>
-                                    <option value="50" {}>private</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Summary *</td>
-                            <td class="input-col"><input type="text" name="summary" value="{}" required></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Description</td>
-                            <td class="input-col"><textarea name="description">{}</textarea></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Steps To Reproduce</td>
-                            <td class="input-col"><textarea name="steps_to_reproduce">{}</textarea></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Additional Information</td>
-                            <td class="input-col"><textarea name="additional_information">{}</textarea></td>
-                        </tr>
-                        {}
-                    </table>
-                    <button type="submit" class="btn">Update Information</button>
-                </form>
+        r#"<form method="POST" action="/update_bug/{}">
+            <input type="hidden" name="last_updated" value="{}">
+            <div class="widget-box widget-color-blue2">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-pencil" aria-hidden="true"></i>
+                        Update Issue #{:07}
+                    </h4>
+                    <div class="widget-toolbar">
+                        <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back To Issue</a>
+                    </div>
+                </div>
+                <div class="widget-body">
+                    <div class="widget-main no-padding">
+                        <div class="table-responsive">
+                            <table class="form-table form-table-left">
+                                <tr>
+                                    <th class="category"><label for="category_id">Category</label></th>
+                                    <td class="input-col"><select id="category_id" name="category_id">{}</select></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="priority">Priority</label></th>
+                                    <td class="input-col">
+                                        <select id="priority" name="priority">
+                                            <option value="10" {}>none</option>
+                                            <option value="20" {}>low</option>
+                                            <option value="30" {}>normal</option>
+                                            <option value="40" {}>high</option>
+                                            <option value="50" {}>urgent</option>
+                                            <option value="60" {}>immediate</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="severity">Severity</label></th>
+                                    <td class="input-col">
+                                        <select id="severity" name="severity">
+                                            <option value="10" {}>feature</option>
+                                            <option value="20" {}>trivial</option>
+                                            <option value="30" {}>text</option>
+                                            <option value="40" {}>tweak</option>
+                                            <option value="50" {}>minor</option>
+                                            <option value="60" {}>major</option>
+                                            <option value="70" {}>crash</option>
+                                            <option value="80" {}>block</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="reproducibility">Reproducibility</label></th>
+                                    <td class="input-col">
+                                        <select id="reproducibility" name="reproducibility">
+                                            <option value="10" {}>always</option>
+                                            <option value="30" {}>sometimes</option>
+                                            <option value="50" {}>random</option>
+                                            <option value="70" {}>have not tried</option>
+                                            <option value="90" {}>unable to reproduce</option>
+                                            <option value="100" {}>N/A</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="version">Product Version</label></th>
+                                    <td class="input-col"><select id="version" name="version">{}</select></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="fixed_in_version">Fixed in Version</label></th>
+                                    <td class="input-col"><select id="fixed_in_version" name="fixed_in_version">{}</select></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="target_version">Target Version</label></th>
+                                    <td class="input-col"><select id="target_version" name="target_version">{}</select></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="platform">Platform</label></th>
+                                    <td class="input-col"><input type="text" id="platform" name="platform" value="{}"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="os">OS</label></th>
+                                    <td class="input-col"><input type="text" id="os" name="os" value="{}"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="os_build">OS Version</label></th>
+                                    <td class="input-col"><input type="text" id="os_build" name="os_build" value="{}"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="build">Product Build</label></th>
+                                    <td class="input-col"><input type="text" id="build" name="build" value="{}"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="due_date">Due Date</label></th>
+                                    <td class="input-col"><input type="date" id="due_date" name="due_date" value="{}"></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="view_state">View Status</label></th>
+                                    <td class="input-col">
+                                        <select id="view_state" name="view_state">
+                                            <option value="10" {}>public</option>
+                                            <option value="50" {}>private</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="summary">Summary</label></th>
+                                    <td class="input-col"><input type="text" id="summary" name="summary" value="{}" required></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="description">Description</label></th>
+                                    <td class="input-col"><textarea id="description" name="description" rows="6">{}</textarea></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="steps_to_reproduce">Steps To Reproduce</label></th>
+                                    <td class="input-col"><textarea id="steps_to_reproduce" name="steps_to_reproduce" rows="4">{}</textarea></td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="additional_information">Additional Information</label></th>
+                                    <td class="input-col"><textarea id="additional_information" name="additional_information" rows="4">{}</textarea></td>
+                                </tr>
+                                {}
+                            </table>
+                        </div>
+                    </div>
+                    <div class="widget-toolbox" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <button type="submit" class="btn btn-primary btn-white btn-round"><i class="fa fa-check" aria-hidden="true"></i> Update Information</button>
+                            <a href="/view_bug_page/{}" class="btn btn-white btn-round">Back To Issue</a>
+                        </div>
+                        <span class="required">* required</span>
+                    </div>
+                </div>
             </div>
-        </div>"#,
-        bug.id,
+        </form>"#,
         bug.id,
         bug.last_updated,
+        bug.id,
+        bug.id,
         cat_opts,
         if bug.priority == 10 { "selected" } else { "" },
         if bug.priority == 20 { "selected" } else { "" },
@@ -2604,9 +2888,9 @@ pub fn render_update_bug_page(
         } else {
             ""
         },
-        html_escape(&bug.version),
-        html_escape(&bug.fixed_in_version),
-        html_escape(&bug.target_version),
+        product_ver_opts,
+        fixed_ver_opts,
+        target_ver_opts,
         html_escape(&bug.platform),
         html_escape(&bug.os),
         html_escape(&bug.os_build),
@@ -2618,7 +2902,8 @@ pub fn render_update_bug_page(
         html_escape(&full.description),
         html_escape(&full.steps_to_reproduce),
         html_escape(&full.additional_information),
-        cf_rows_html
+        cf_rows_html,
+        bug.id
     );
 
     render_layout(&format!("Update Issue #{:07}", bug.id), ctx, None, &content)
@@ -2631,27 +2916,61 @@ pub fn render_bugnotes_table(
     current_user_id: i64,
     format_ctx: &crate::views::formatting::FormatContext,
 ) -> String {
+    let empty_access = HashMap::new();
+    render_bugnotes_cards(
+        notes,
+        users_map,
+        &empty_access,
+        eff,
+        current_user_id,
+        format_ctx,
+    )
+}
+
+pub fn render_bugnotes_cards(
+    notes: &[Bugnote],
+    users_map: &HashMap<i64, String>,
+    users_access_map: &HashMap<i64, i32>,
+    eff: i32,
+    current_user_id: i64,
+    format_ctx: &crate::views::formatting::FormatContext,
+) -> String {
     if notes.is_empty() {
         return "<p>No notes attached to this issue.</p>".to_string();
     }
-    let mut html = String::from(
-        r#"<table class="data-table"><thead><tr><th>Author</th><th>Note</th><th>Time Spent</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>"#,
-    );
+    let mut html =
+        String::from(r#"<div class="table-responsive"><table class="bugnote-timeline"><tbody>"#);
     for n in notes {
         let author = users_map
             .get(&n.reporter_id)
             .cloned()
             .unwrap_or_else(|| format!("user#{}", n.reporter_id));
-        let vis = if n.view_state == 50 {
-            "private"
+        let access_badge = users_access_map
+            .get(&n.reporter_id)
+            .and_then(|&lvl| crate::models::AccessLevel::from_i32(lvl))
+            .map(|al| format!(r#" <span class="badge badge-info">{}</span>"#, al.as_str()))
+            .unwrap_or_default();
+
+        let private_class = if n.view_state == 50 {
+            " bugnote-private"
         } else {
-            "public"
+            ""
         };
-        let time_str = if n.time_tracking > 0 {
-            format!("{:02}:{:02}", n.time_tracking / 60, n.time_tracking % 60)
+        let private_badge = if n.view_state == 50 {
+            r#" <span class="badge badge-warning"><i class="fa fa-lock" aria-hidden="true"></i> private</span>"#
         } else {
-            "-".to_string()
+            ""
         };
+        let time_badge = if n.time_tracking > 0 {
+            format!(
+                r#" <span class="badge badge-info"><i class="fa fa-clock-o" aria-hidden="true"></i> {:02}:{:02}</span>"#,
+                n.time_tracking / 60,
+                n.time_tracking % 60
+            )
+        } else {
+            String::new()
+        };
+
         let can_edit_note = eff >= 70 || (eff >= 25 && n.reporter_id == current_user_id);
         let can_del_note = can_edit_note;
         let can_toggle_vs = eff >= 55;
@@ -2660,62 +2979,77 @@ pub fn render_bugnotes_table(
 
         if can_edit_note {
             actions.push(format!(
-                r#"<a href="/bugnote_edit_page/{}" class="btn btn-sm">Edit</a>"#,
+                r#"<a href="/bugnote_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>"#,
                 n.id
             ));
         }
 
         if can_toggle_vs {
-            let (btn_label, next_vs) = if n.view_state == 50 {
-                ("Make Public", 10)
+            let (btn_label, next_vs, lock_icon) = if n.view_state == 50 {
+                ("Make Public", 10, "fa-unlock")
             } else {
-                ("Make Private", 50)
+                ("Make Private", 50, "fa-lock")
             };
             actions.push(format!(
-                r#"<form method="POST" action="/bugnote_set_view_state/{}" style="display:inline;"><input type="hidden" name="view_state" value="{}"><button type="submit" class="btn btn-sm">{}</button></form>"#,
-                n.id, next_vs, btn_label
+                r#"<form method="POST" action="/bugnote_set_view_state/{}" style="display:inline;"><input type="hidden" name="view_state" value="{}"><button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa {}" aria-hidden="true"></i> {}</button></form>"#,
+                n.id, next_vs, lock_icon, btn_label
             ));
         }
 
         actions.push(format!(
-            r#"<a href="/bug_revision_view_page/{}?bugnote_id={}" class="btn btn-sm">Revisions</a>"#,
+            r#"<a href="/bug_revision_view_page/{}?bugnote_id={}" class="btn btn-white btn-round btn-sm"><i class="fa fa-history" aria-hidden="true"></i> Revisions</a>"#,
             n.bug_id, n.id
         ));
 
         if can_del_note {
             actions.push(format!(
-                r#"<form method="POST" action="/bugnote_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
+                r#"<form method="POST" action="/bugnote_delete/{}" style="display:inline;"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
                 n.id
             ));
         }
 
         let actions_html = actions.join(" ");
         let reminder_badge = render_reminder_badge(n.note_type);
-
-        let formatted_note = crate::views::formatting::format_text(&n.note, format_ctx);
+        let formatted_note = render_formatted_block(&n.note, format_ctx);
 
         html.push_str(&format!(
-            r#"<tr id="c{}">
-                <td style="width:180px; background:#f2f5f8;">
-                    <strong>{}</strong>{}<br>
-                    <span style="font-size:11px; color:#666;">{}</span>
+            r#"<tr id="c{nid}" class="bugnote-card{priv_cls}">
+                <td class="bugnote-meta">
+                    <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap;">
+                        <span class="bugnote-avatar"><i class="fa fa-user" aria-hidden="true"></i></span>
+                        <strong>{author}</strong>{access_badge}
+                    </div>
+                    <div style="font-size:11px; color:#555555; margin-top:4px;">
+                        <i class="fa fa-clock-o" aria-hidden="true"></i> {ts}
+                    </div>
+                    <div style="display:flex; align-items:center; gap:6px; flex-wrap:wrap; font-size:11px; margin-top:4px;">
+                        <a rel="bookmark" href="/view_bug_page/{bid}#c{nid}" title="Direct link to note">
+                            <i class="fa fa-link" aria-hidden="true"></i> ~{nid:07}
+                        </a>
+                        {reminder_badge}{private_badge}{time_badge}
+                    </div>
+                    <div class="bugnote-actions">
+                        {actions}
+                    </div>
                 </td>
-                <td style="white-space:pre-wrap;">{}</td>
-                <td style="width:90px;">{}</td>
-                <td style="width:90px;">{}</td>
-                <td style="width:260px;">{}</td>
+                <td class="bugnote-content">
+                    {body}
+                </td>
             </tr>"#,
-            n.id,
-            html_escape(&author),
-            reminder_badge,
-            format_timestamp(n.date_submitted),
-            formatted_note,
-            time_str,
-            vis,
-            actions_html
+            nid = n.id,
+            bid = n.bug_id,
+            priv_cls = private_class,
+            author = html_escape(&author),
+            access_badge = access_badge,
+            ts = format_timestamp(n.date_submitted),
+            reminder_badge = reminder_badge,
+            private_badge = private_badge,
+            time_badge = time_badge,
+            actions = actions_html,
+            body = formatted_note
         ));
     }
-    html.push_str("</tbody></table>");
+    html.push_str("</tbody></table></div>");
     html
 }
 
@@ -2732,27 +3066,41 @@ pub fn render_bugnote_edit_page(
     };
 
     let content = format!(
-        r#"{}<div class="panel">
-            <div class="panel-header">Edit Bugnote #{:07} (Issue #{:07})</div>
-            <div class="panel-body">
-                <form method="POST" action="/bugnote_update/{}">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Bugnote *</td>
-                            <td class="input-col"><textarea name="note" rows="8" style="width:100%;" required>{}</textarea></td>
-                        </tr>
-                    </table>
-                    <div style="margin-top:12px; display:flex; gap:8px;">
-                        <button type="submit" class="btn">Update Information</button>
-                        <a href="/view_bug_page/{}" class="btn btn-secondary" style="text-decoration:none;">Cancel</a>
+        r#"{}
+        <form method="POST" action="/bugnote_update/{}">
+            <div class="widget-box widget-color-blue2">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-pencil" aria-hidden="true"></i>
+                        Edit Bugnote #{:07} (Issue #{:07})
+                    </h4>
+                    <div class="widget-toolbar">
+                        <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back To Issue</a>
                     </div>
-                </form>
+                </div>
+                <div class="widget-body">
+                    <div class="widget-main no-padding">
+                        <div class="table-responsive">
+                            <table class="form-table form-table-left">
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="note">Bugnote</label></th>
+                                    <td class="input-col"><textarea id="note" name="note" rows="8" style="width:100%;" required>{}</textarea></td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                        <button type="submit" class="btn btn-primary btn-white btn-round"><i class="fa fa-check" aria-hidden="true"></i> Update Information</button>
+                        <a href="/view_bug_page/{}" class="btn btn-white btn-round">Cancel</a>
+                    </div>
+                </div>
             </div>
-        </div>"#,
+        </form>"#,
         banner,
         note.id,
-        bug.id,
         note.id,
+        bug.id,
+        bug.id,
         html_escape(&note.note),
         bug.id
     );
@@ -2792,64 +3140,77 @@ pub fn render_bug_reminder_page(
 
     let content = format!(
         r#"{}
-        <div class="panel">
-            <div class="panel-header">Send a Reminder for Issue #{:07}: {}</div>
-            <div class="panel-body">
-                <form method="POST" action="/bug_reminder/{}">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Recipient(s) *</td>
-                            <td class="input-col">
-                                <select name="to" multiple size="8" style="min-width:280px; width:100%;" required>
-                                    {}
-                                </select>
-                                <span style="font-size:11px; color:#666; display:block; margin-top:4px;">Hold Ctrl/Cmd to select multiple recipients.</span>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Reminder Message *</td>
-                            <td class="input-col">
-                                <textarea name="body" rows="6" style="width:100%;" required placeholder="Enter reminder message here..."></textarea>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Store as Note</td>
-                            <td class="input-col">
-                                <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
-                                    <input type="hidden" name="store_as_note" value="0">
-                                    <input type="checkbox" name="store_as_note" value="1" checked>
-                                    <span>Store reminder as an issue note</span>
-                                </label>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">View Status</td>
-                            <td class="input-col">
-                                <select name="view_state" style="width:auto;">
-                                    <option value="10" selected>public</option>
-                                    <option value="50">private</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Add to Monitors</td>
-                            <td class="input-col">
-                                <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
-                                    <input type="hidden" name="add_monitors" value="0">
-                                    <input type="checkbox" name="add_monitors" value="1" checked>
-                                    <span>Add recipients to monitoring list</span>
-                                </label>
-                            </td>
-                        </tr>
-                    </table>
-                    <div style="margin-top:12px; display:flex; gap:8px;">
-                        <button type="submit" class="btn">Send Reminder</button>
-                        <a href="/view_bug_page/{}" class="btn btn-secondary">Cancel</a>
+        <form method="POST" action="/bug_reminder/{}">
+            <div class="widget-box widget-color-blue2">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-bell" aria-hidden="true"></i>
+                        Send a Reminder for Issue #{:07}: {}
+                    </h4>
+                    <div class="widget-toolbar">
+                        <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back To Issue</a>
                     </div>
-                </form>
+                </div>
+                <div class="widget-body">
+                    <div class="widget-main no-padding">
+                        <div class="table-responsive">
+                            <table class="form-table form-table-left">
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="to">Recipient(s)</label></th>
+                                    <td class="input-col">
+                                        <select id="to" name="to" multiple size="8" style="min-width:280px; width:100%;" required>
+                                            {}
+                                        </select>
+                                        <span style="font-size:11px; color:#666; display:block; margin-top:4px;">Hold Ctrl/Cmd to select multiple recipients.</span>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="body">Reminder Message</label></th>
+                                    <td class="input-col">
+                                        <textarea id="body" name="body" rows="6" style="width:100%;" required placeholder="Enter reminder message here..."></textarea>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Store as Note</th>
+                                    <td class="input-col">
+                                        <label class="inline-label">
+                                            <input type="hidden" name="store_as_note" value="0">
+                                            <input type="checkbox" name="store_as_note" value="1" checked>
+                                            <span>Store reminder as an issue note</span>
+                                        </label>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><label for="view_state">View Status</label></th>
+                                    <td class="input-col">
+                                        <select id="view_state" name="view_state" style="width:auto;">
+                                            <option value="10" selected>public</option>
+                                            <option value="50">private</option>
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Add to Monitors</th>
+                                    <td class="input-col">
+                                        <label class="inline-label">
+                                            <input type="hidden" name="add_monitors" value="0">
+                                            <input type="checkbox" name="add_monitors" value="1" checked>
+                                            <span>Add recipients to monitoring list</span>
+                                        </label>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                        <button type="submit" class="btn btn-primary btn-white btn-round"><i class="fa fa-bell" aria-hidden="true"></i> Send Reminder</button>
+                        <a href="/view_bug_page/{}" class="btn btn-white btn-round">Cancel</a>
+                    </div>
+                </div>
             </div>
-        </div>"#,
+        </form>"#,
         err_banner,
+        bug.id,
         bug.id,
         html_escape(&bug.summary),
         bug.id,
@@ -2890,7 +3251,7 @@ pub fn render_bug_revision_view_page(
         "<p>No revisions found.</p>".to_string()
     } else {
         let mut table = String::from(
-            r#"<table class="data-table"><thead><tr><th>Timestamp</th><th>Username</th><th>Revision Type</th><th>Previous Content</th>"#,
+            r#"<div class="table-responsive"><table class="data-table"><thead><tr><th>Timestamp</th><th>Username</th><th>Revision Type</th><th>Previous Content</th>"#,
         );
         if can_drop {
             table.push_str("<th>Actions</th>");
@@ -2907,7 +3268,7 @@ pub fn render_bug_revision_view_page(
 
             let drop_btn = if can_drop {
                 format!(
-                    r#"<td style="width:120px;"><form method="POST" action="/bug_revision_drop/{}" style="display:inline;" onsubmit="return confirm('Are you sure you want to drop this revision?');"><button type="submit" class="btn btn-danger btn-sm">Drop Revision</button></form></td>"#,
+                    r#"<td style="width:140px;"><form method="POST" action="/bug_revision_drop/{}" style="display:inline;" onsubmit="return confirm('Are you sure you want to drop this revision?');"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Drop Revision</button></form></td>"#,
                     r.id
                 )
             } else {
@@ -2918,7 +3279,7 @@ pub fn render_bug_revision_view_page(
                 r#"<tr>
                     <td style="width:160px; white-space:nowrap;">{}</td>
                     <td style="width:140px;">{}</td>
-                    <td style="width:160px;"><span class="badge">{}</span></td>
+                    <td style="width:160px;"><span class="badge badge-info">{}</span></td>
                     <td style="white-space:pre-wrap; word-break:break-word;">{}</td>
                     {}
                 </tr>"#,
@@ -2930,17 +3291,23 @@ pub fn render_bug_revision_view_page(
             ));
         }
 
-        table.push_str("</tbody></table>");
+        table.push_str("</tbody></table></div>");
         table
     };
 
     let content = format!(
-        r#"{}<div class="panel">
-            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
-                <span>Revisions {}</span>
-                <a href="/view_bug_page/{}" class="btn btn-secondary btn-sm" style="text-decoration:none;">Back to Issue</a>
+        r#"{}
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="ace-icon fa fa-history" aria-hidden="true"></i>
+                    Revisions {}
+                </h4>
+                <div class="widget-toolbar">
+                    <a href="/view_bug_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back to Issue</a>
+                </div>
             </div>
-            <div class="panel-body">
+            <div class="widget-body">
                 {}
             </div>
         </div>"#,
@@ -2953,14 +3320,23 @@ pub fn render_bug_revision_view_page(
 pub fn render_conflict_page(ctx: &AuthContext, bug_id: i64, message: &str) -> Html<String> {
     let content = format!(
         r#"<div class="flash-error" style="margin-bottom:16px;"><strong>Conflict:</strong> {}</div>
-<div class="well">
-    <p>This issue has been modified by another user or session since you loaded the update page. Please reload the issue to review the latest changes and re-apply your updates.</p>
-    <div style="margin-top:16px;">
-        <a href="/view_bug_page/{}" class="btn btn-primary btn-sm"><i class="fa fa-refresh"></i> Reload Issue Details</a>
-        <a href="/update_bug_page/{}" class="btn btn-secondary btn-sm" style="margin-left:8px;"><i class="fa fa-pencil"></i> Return to Edit Page</a>
-    </div>
-</div>"#,
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="ace-icon fa fa-exclamation-triangle" aria-hidden="true"></i>
+                    Edit Conflict - Issue #{:07}
+                </h4>
+            </div>
+            <div class="widget-body">
+                <p>This issue has been modified by another user or session since you loaded the update page. Please reload the issue to review the latest changes and re-apply your updates.</p>
+            </div>
+            <div class="widget-toolbox" style="display:flex; gap:8px; flex-wrap:wrap;">
+                <a href="/view_bug_page/{}" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-refresh" aria-hidden="true"></i> Reload Issue Details</a>
+                <a href="/update_bug_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Return to Edit Page</a>
+            </div>
+        </div>"#,
         html_escape(message),
+        bug_id,
         bug_id,
         bug_id,
     );
@@ -2999,56 +3375,66 @@ pub fn render_bug_clone_page(
 
     let content = format!(
         r#"{}
-        <div class="panel">
-            <div class="panel-header">Clone Issue #{:07}: {}</div>
-            <div class="panel-body">
-                <form method="POST" action="/bug_clone/{}">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Source Project</td>
-                            <td>{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Target Project <span class="required">*</span></td>
-                            <td>
-                                <select name="target_project_id" style="max-width:320px;" required>
-                                    {}
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Summary</td>
-                            <td>{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Priority / Severity</td>
-                            <td>{} / {}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Copy Options</td>
-                            <td>
-                                <div style="display:flex; flex-direction:column; gap:6px;">
-                                    <label style="display:inline-flex; align-items:center; gap:6px;">
-                                        <input type="checkbox" name="copy_relationships" value="1" checked> Copy Relationships
-                                    </label>
-                                    <label style="display:inline-flex; align-items:center; gap:6px;">
-                                        <input type="checkbox" name="copy_files" value="1" checked> Copy File Attachments
-                                    </label>
-                                </div>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td></td>
-                            <td>
-                                <button type="submit" class="btn btn-primary btn-sm">Clone Issue</button>
-                                <a class="btn btn-secondary btn-sm" href="/view_bug_page/{}" style="margin-left:8px;">Cancel</a>
-                            </td>
-                        </tr>
-                    </table>
-                </form>
+        <form method="POST" action="/bug_clone/{}">
+            <div class="widget-box widget-color-blue2">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-clone" aria-hidden="true"></i>
+                        Clone Issue #{:07}: {}
+                    </h4>
+                    <div class="widget-toolbar">
+                        <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back To Issue</a>
+                    </div>
+                </div>
+                <div class="widget-body">
+                    <div class="widget-main no-padding">
+                        <div class="table-responsive">
+                            <table class="form-table form-table-left">
+                                <tr>
+                                    <th class="category">Source Project</th>
+                                    <td class="input-col">{}</td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="target_project_id">Target Project</label></th>
+                                    <td class="input-col">
+                                        <select id="target_project_id" name="target_project_id" style="max-width:320px;" required>
+                                            {}
+                                        </select>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Summary</th>
+                                    <td class="input-col">{}</td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Priority / Severity</th>
+                                    <td class="input-col">{} / {}</td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Copy Options</th>
+                                    <td class="input-col">
+                                        <div style="display:flex; flex-direction:column; gap:6px;">
+                                            <label class="inline-label">
+                                                <input type="checkbox" name="copy_relationships" value="1" checked> Copy Relationships
+                                            </label>
+                                            <label class="inline-label">
+                                                <input type="checkbox" name="copy_files" value="1" checked> Copy File Attachments
+                                            </label>
+                                        </div>
+                                    </td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                        <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-clone" aria-hidden="true"></i> Clone Issue</button>
+                        <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}">Cancel</a>
+                    </div>
+                </div>
             </div>
-        </div>"#,
+        </form>"#,
         err_banner,
+        bug.id,
         bug.id,
         html_escape(&bug.summary),
         bug.id,
@@ -3094,42 +3480,52 @@ pub fn render_bug_move_page(
 
     let content = format!(
         r#"{}
-        <div class="panel">
-            <div class="panel-header">Move Issue #{:07}: {}</div>
-            <div class="panel-body">
-                <form method="POST" action="/bug_move/{}">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Current Project</td>
-                            <td>{}</td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Target Project <span class="required">*</span></td>
-                            <td>
-                                <select name="target_project_id" style="max-width:320px;" required>
-                                    {}
-                                </select>
-                                <div style="margin-top:6px; color:#666; font-size:12px;">
-                                    If the issue's current category is not available in the target project, it will be automatically reset to the target project's default category.
-                                </div>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Summary</td>
-                            <td>{}</td>
-                        </tr>
-                        <tr>
-                            <td></td>
-                            <td>
-                                <button type="submit" class="btn btn-primary btn-sm">Move Issue</button>
-                                <a class="btn btn-secondary btn-sm" href="/view_bug_page/{}" style="margin-left:8px;">Cancel</a>
-                            </td>
-                        </tr>
-                    </table>
-                </form>
+        <form method="POST" action="/bug_move/{}">
+            <div class="widget-box widget-color-blue2">
+                <div class="widget-header widget-header-small">
+                    <h4 class="widget-title lighter">
+                        <i class="ace-icon fa fa-arrows" aria-hidden="true"></i>
+                        Move Issue #{:07}: {}
+                    </h4>
+                    <div class="widget-toolbar">
+                        <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back To Issue</a>
+                    </div>
+                </div>
+                <div class="widget-body">
+                    <div class="widget-main no-padding">
+                        <div class="table-responsive">
+                            <table class="form-table form-table-left">
+                                <tr>
+                                    <th class="category">Current Project</th>
+                                    <td class="input-col">{}</td>
+                                </tr>
+                                <tr>
+                                    <th class="category"><span class="required">*</span> <label for="target_project_id">Target Project</label></th>
+                                    <td class="input-col">
+                                        <select id="target_project_id" name="target_project_id" style="max-width:320px;" required>
+                                            {}
+                                        </select>
+                                        <div style="margin-top:6px; color:#666; font-size:12px;">
+                                            If the issue's current category is not available in the target project, it will be automatically reset to the target project's default category.
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th class="category">Summary</th>
+                                    <td class="input-col">{}</td>
+                                </tr>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                        <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-arrows" aria-hidden="true"></i> Move Issue</button>
+                        <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}">Cancel</a>
+                    </div>
+                </div>
             </div>
-        </div>"#,
+        </form>"#,
         err_banner,
+        bug.id,
         bug.id,
         html_escape(&bug.summary),
         bug.id,

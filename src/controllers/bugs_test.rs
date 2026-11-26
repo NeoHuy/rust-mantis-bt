@@ -1180,4 +1180,54 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
     .unwrap();
     assert!(!closed_view_html.contains("Close</button>"));
     assert!(closed_view_html.contains("Delete Issue</button>"));
+
+    // 4. Assign To dropdown on view_bug_page excludes reporters but preserves disabled/former current assignee
+    let rep_view_id = db
+        .create_user(
+            "rep_no_assign",
+            "Rep NoAssign",
+            "rep_no@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let former_dev_id = db
+        .create_user(
+            "former_dev",
+            "Former Dev",
+            "former@example.com",
+            "pw",
+            55,
+            false,
+            false,
+        )
+        .unwrap();
+    let _ = rep_view_id;
+    db.assign_bug(bug_id, 1, former_dev_id).unwrap();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_bug_page/{}", bug_id))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let assign_view_html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!assign_view_html.contains("rep_no_assign"));
+    assert!(assign_view_html.contains(&format!(
+        r#"<option value="{}" selected>former_dev</option>"#,
+        former_dev_id
+    )));
 }

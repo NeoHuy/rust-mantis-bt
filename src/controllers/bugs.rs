@@ -1317,6 +1317,7 @@ pub async fn view_bug_page(
         bug,
         eff,
         ctx.user.id,
+        &handler_name,
         &assignable_users,
         is_monitoring,
         can_clone,

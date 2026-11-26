@@ -2316,6 +2316,7 @@ pub fn render_bug_action_toolbar(
     bug: &Bug,
     eff: i32,
     current_user_id: i64,
+    handler_name: &str,
     users: &[User],
     is_monitoring: bool,
     can_clone: bool,
@@ -2336,8 +2337,10 @@ pub fn render_bug_action_toolbar(
 
     if eff >= 55 {
         let mut user_opts = String::from(r#"<option value="0">(Unassigned)</option>"#);
+        let mut found_handler = bug.handler_id <= 0;
         for u in users {
             let sel = if u.id == bug.handler_id {
+                found_handler = true;
                 "selected"
             } else {
                 ""
@@ -2347,6 +2350,13 @@ pub fn render_bug_action_toolbar(
                 u.id,
                 sel,
                 html_escape(&u.username)
+            ));
+        }
+        if !found_handler {
+            user_opts.push_str(&format!(
+                r#"<option value="{}" selected>{}</option>"#,
+                bug.handler_id,
+                html_escape(handler_name)
             ));
         }
         actions_html.push_str(&format!(

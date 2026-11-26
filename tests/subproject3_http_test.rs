@@ -3,7 +3,7 @@ use axum::http::{Request, StatusCode};
 use rust_mantis_bt::{build_router, db::Db};
 use tower::ServiceExt;
 
-async fn login_as_admin(app: &axum::Router) -> String {
+async fn login_user(app: &axum::Router, username: &str, password: &str) -> String {
     let res = app
         .clone()
         .oneshot(
@@ -11,7 +11,10 @@ async fn login_as_admin(app: &axum::Router) -> String {
                 .method("POST")
                 .uri("/login")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("username=administrator&password=root"))
+                .body(Body::from(format!(
+                    "username={}&password={}",
+                    username, password
+                )))
                 .unwrap(),
         )
         .await
@@ -26,6 +29,10 @@ async fn login_as_admin(app: &axum::Router) -> String {
         .next()
         .unwrap()
         .to_string()
+}
+
+async fn login_as_admin(app: &axum::Router) -> String {
+    login_user(app, "administrator", "root").await
 }
 
 async fn set_project_cookie(app: &axum::Router, auth_cookie: &str, proj_id: i64) -> String {
@@ -333,4 +340,104 @@ async fn test_search_saved_filters_and_csv_export_sanitization() {
     .unwrap();
     assert!(csv.contains("Id,Project,Reporter,Assigned To"));
     assert!(csv.contains("'=CMD|' /C calc'!A0"));
+}
+
+#[tokio::test]
+async fn test_http_my_view_timeline_rbac_hides_private_issues_and_notes() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("TimelineProj", 10, 10, "", true).unwrap();
+    let rep_id = db
+        .create_user(
+            "rep_tl_http",
+            "Reporter",
+            "rep_tl@test.com",
+            "pass123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let dev_id = db
+        .create_user(
+            "dev_tl_http",
+            "Developer",
+            "dev_tl@test.com",
+            "pass123",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let pub_bug = db
+        .create_bug(
+            proj_id,
+            dev_id,
+            1,
+            "Public Visible Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let priv_bug = db
+        .create_bug(
+            proj_id,
+            dev_id,
+            1,
+            "Secret Private Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+    db.add_bugnote(pub_bug, dev_id, "Private dev note only", 50)
+        .unwrap();
+    let _ = rep_id;
+
+    let app = build_router(db.clone());
+    let rep_cookie = login_user(&app, "rep_tl_http", "pass123").await;
+    let full_rep_cookie = set_project_cookie(&app, &rep_cookie, proj_id).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/my_view_page")
+                .header("cookie", &full_rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert!(html.contains("Timeline"));
+    assert!(html.contains("Public Visible Issue"));
+    assert!(!html.contains("Secret Private Issue"));
+    assert!(!html.contains(&format!("{:07}", priv_bug)));
+    assert!(!html.contains("commented on issue"));
 }

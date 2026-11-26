@@ -4346,181 +4346,117 @@ impl Db {
         project_id: Option<i64>,
         limit: usize,
     ) -> rusqlite::Result<Vec<TimelineEvent>> {
-        if limit == 0 {
+        if limit == 0 || user.access_level < 10 {
             return Ok(Vec::new());
         }
 
-        let allowed_pids: Option<Vec<i64>> = if let Some(pid) = project_id.filter(|&p| p > 0) {
+        let mut visible_pids = Vec::new();
+        let mut dev_pids = Vec::new();
+
+        if let Some(pid) = project_id.filter(|&p| p > 0) {
             let eff = self.effective_access_level(user, pid)?;
             if eff < 10 {
                 return Ok(Vec::new());
             }
-            let descendants = self.list_project_descendant_ids(pid)?;
-            let mut visible = Vec::new();
-            for sub_pid in descendants {
-                if self.effective_access_level(user, sub_pid)? >= 10 {
-                    visible.push(sub_pid);
+            for sub_pid in self.list_project_descendant_ids(pid)? {
+                let sub_eff = self.effective_access_level(user, sub_pid)?;
+                if sub_eff >= 10 {
+                    visible_pids.push(sub_pid);
+                    if sub_eff >= 55 {
+                        dev_pids.push(sub_pid);
+                    }
                 }
             }
-            if visible.is_empty() {
-                return Ok(Vec::new());
-            }
-            Some(visible)
         } else {
-            None
+            for (proj, _) in self.list_visible_projects(user)? {
+                let proj_eff = self.effective_access_level(user, proj.id)?;
+                if proj_eff >= 10 {
+                    visible_pids.push(proj.id);
+                    if proj_eff >= 55 {
+                        dev_pids.push(proj.id);
+                    }
+                }
+            }
+        }
+
+        if visible_pids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut bound_values: Vec<i64> =
+            Vec::with_capacity(2 + visible_pids.len() + dev_pids.len());
+        bound_values.push(user.id);
+        bound_values.push(limit as i64);
+
+        let vis_start = 3;
+        let vis_placeholders: Vec<String> = (vis_start..vis_start + visible_pids.len())
+            .map(|i| format!("?{}", i))
+            .collect();
+        bound_values.extend(&visible_pids);
+
+        let dev_cond = if dev_pids.is_empty() {
+            "0 = 1".to_string()
+        } else {
+            let dev_start = vis_start + visible_pids.len();
+            let dev_placeholders: Vec<String> = (dev_start..dev_start + dev_pids.len())
+                .map(|i| format!("?{}", i))
+                .collect();
+            bound_values.extend(&dev_pids);
+            format!("b.project_id IN ({})", dev_placeholders.join(","))
         };
+
+        let sql = format!(
+            "SELECT h.id, h.bug_id, b.summary, b.status, b.project_id,
+                    h.user_id, COALESCE(u.username, ''), h.date_modified,
+                    h.field_name, h.old_value, h.new_value, h.type
+             FROM mantis_bug_history_table h
+             JOIN mantis_bug_table b ON h.bug_id = b.id
+             LEFT JOIN mantis_user_table u ON h.user_id = u.id
+             LEFT JOIN mantis_bugnote_table n
+               ON (h.field_name = 'bugnote_added' AND CAST(h.new_value AS INTEGER) > 0 AND n.id = CAST(h.new_value AS INTEGER))
+               OR (h.field_name = 'bugnote_updated' AND CAST(h.old_value AS INTEGER) > 0 AND n.id = CAST(h.old_value AS INTEGER))
+             WHERE b.project_id IN ({vis_in})
+               AND (b.view_state = 10 OR b.reporter_id = ?1 OR b.handler_id = ?1 OR {dev_cond})
+               AND (h.field_name != 'bugnote_view_state' OR {dev_cond})
+               AND (
+                   h.field_name NOT IN ('bugnote_added', 'bugnote_updated')
+                   OR (n.id IS NOT NULL AND (n.view_state = 10 OR {dev_cond}))
+               )
+             ORDER BY h.date_modified DESC, h.id DESC
+             LIMIT ?2",
+            vis_in = vis_placeholders.join(","),
+            dev_cond = dev_cond
+        );
 
         let conn = self.conn();
-        let mut eff_cache: HashMap<i64, i32> = HashMap::new();
-        let mut note_stmt =
-            conn.prepare("SELECT view_state FROM mantis_bugnote_table WHERE id = ?1")?;
-
-        let (sql, bound_pids): (String, Vec<i64>) = if let Some(pids) = allowed_pids {
-            let placeholders: Vec<String> = (1..=pids.len()).map(|i| format!("?{}", i)).collect();
-            (
-                format!(
-                    "SELECT h.id, h.bug_id, b.summary, b.status, b.project_id,
-                            b.reporter_id, b.handler_id, b.view_state,
-                            h.user_id, COALESCE(u.username, ''), h.date_modified,
-                            h.field_name, h.old_value, h.new_value, h.type
-                     FROM mantis_bug_history_table h
-                     JOIN mantis_bug_table b ON h.bug_id = b.id
-                     LEFT JOIN mantis_user_table u ON h.user_id = u.id
-                     WHERE b.project_id IN ({})
-                     ORDER BY h.date_modified DESC, h.id DESC",
-                    placeholders.join(",")
-                ),
-                pids,
-            )
-        } else {
-            (
-                "SELECT h.id, h.bug_id, b.summary, b.status, b.project_id,
-                        b.reporter_id, b.handler_id, b.view_state,
-                        h.user_id, COALESCE(u.username, ''), h.date_modified,
-                        h.field_name, h.old_value, h.new_value, h.type
-                 FROM mantis_bug_history_table h
-                 JOIN mantis_bug_table b ON h.bug_id = b.id
-                 LEFT JOIN mantis_user_table u ON h.user_id = u.id
-                 ORDER BY h.date_modified DESC, h.id DESC"
-                    .to_string(),
-                Vec::new(),
-            )
-        };
-
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = bound_pids
+        let params: Vec<&dyn rusqlite::ToSql> = bound_values
             .iter()
             .map(|id| id as &dyn rusqlite::ToSql)
             .collect();
-        let mut rows = stmt.query(params.as_slice())?;
-        let mut events = Vec::new();
-
-        while let Some(row) = rows.next()? {
-            let hid: i64 = row.get(0)?;
-            let bug_id: i64 = row.get(1)?;
-            let bug_summary: String = row.get(2)?;
-            let bug_status: i32 = row.get(3)?;
-            let bug_project_id: i64 = row.get(4)?;
-            let bug_reporter_id: i64 = row.get(5)?;
-            let bug_handler_id: i64 = row.get(6)?;
-            let bug_view_state: i32 = row.get(7)?;
-            let actor_id: i64 = row.get(8)?;
-            let username: String = row.get(9)?;
-            let date_modified: i64 = row.get(10)?;
-            let field_name: String = row.get(11)?;
-            let old_value: String = row.get(12)?;
-            let new_value: String = row.get(13)?;
-            let type_: i32 = row.get(14)?;
-
-            let eff = if let Some(&cached) = eff_cache.get(&bug_project_id) {
-                cached
-            } else {
-                let computed = Self::query_effective_access_level(&conn, user, bug_project_id)?;
-                eff_cache.insert(bug_project_id, computed);
-                computed
-            };
-
-            let bug_stub = Bug {
-                id: bug_id,
-                project_id: bug_project_id,
-                reporter_id: bug_reporter_id,
-                handler_id: bug_handler_id,
-                duplicate_id: 0,
-                priority: 30,
-                severity: 50,
-                reproducibility: 70,
-                status: bug_status,
-                resolution: 10,
-                category_id: 0,
-                date_submitted: 0,
-                last_updated: 0,
-                os: String::new(),
-                os_build: String::new(),
-                platform: String::new(),
-                version: String::new(),
-                fixed_in_version: String::new(),
-                target_version: String::new(),
-                build: String::new(),
-                summary: bug_summary.clone(),
-                view_state: bug_view_state,
-                sticky: 0,
-                due_date: 0,
-            };
-
-            if !Self::can_view_bug(user.id, eff, &bug_stub) {
-                continue;
-            }
-
-            if field_name == "bugnote_view_state" && eff < 55 {
-                continue;
-            }
-
-            if field_name == "bugnote_added" || field_name == "bugnote_updated" {
-                let note_id_opt = if field_name == "bugnote_added" {
-                    new_value.trim().parse::<i64>().ok()
-                } else {
-                    old_value.trim().parse::<i64>().ok()
-                };
-                let Some(note_id) = note_id_opt else {
-                    continue;
-                };
-                let note_vs: Option<i32> =
-                    match note_stmt.query_row(params![note_id], |r| r.get::<_, i32>(0)) {
-                        Ok(vs) => Some(vs),
-                        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                        Err(e) => return Err(e),
-                    };
-                match note_vs {
-                    Some(vs) if vs == 10 || eff >= 55 => {}
-                    _ => continue,
-                }
-            }
-
-            events.push(TimelineEvent {
-                id: hid,
-                bug_id,
-                bug_summary,
-                bug_status,
-                project_id: bug_project_id,
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let actor_id: i64 = row.get(5)?;
+            let username: String = row.get(6)?;
+            Ok(TimelineEvent {
+                id: row.get(0)?,
+                bug_id: row.get(1)?,
+                bug_summary: row.get(2)?,
+                bug_status: row.get(3)?,
+                project_id: row.get(4)?,
                 user_id: actor_id,
                 username: if username.is_empty() {
                     format!("user#{}", actor_id)
                 } else {
                     username
                 },
-                date_modified,
-                field_name,
-                old_value,
-                new_value,
-                type_,
-            });
-
-            if events.len() >= limit {
-                break;
-            }
-        }
-
-        Ok(events)
+                date_modified: row.get(7)?,
+                field_name: row.get(8)?,
+                old_value: row.get(9)?,
+                new_value: row.get(10)?,
+                type_: row.get(11)?,
+            })
+        })?;
+        rows.collect()
     }
 
     pub fn add_bug_relationship(

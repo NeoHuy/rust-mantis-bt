@@ -2369,7 +2369,7 @@ pub fn render_view_bug_page(
             </div>
         </div>
 
-        <div class="panel">
+        <div id="attachments" class="panel">
             <div class="panel-header">Attached Files</div>
             <div class="panel-body">
                 {}
@@ -2377,7 +2377,7 @@ pub fn render_view_bug_page(
             </div>
         </div>
 
-        <div class="panel">
+        <div id="bugnotes" class="panel">
             <div class="panel-header">Activities / Bugnotes</div>
             <div class="panel-body">
                 {}

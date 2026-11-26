@@ -4478,14 +4478,24 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
         .unwrap();
 
     // Public note and private note on pub_bug
-    db.add_bugnote(pub_bug, rep_id, "Public comment", 10)
+    let pub_note_id = db
+        .add_bugnote(pub_bug, rep_id, "Public comment", 10)
         .unwrap();
-    db.add_bugnote(pub_bug, dev_id, "Private dev comment", 50)
+    let priv_note_id = db
+        .add_bugnote(pub_bug, dev_id, "Private dev comment", 50)
         .unwrap();
 
+    // Update both notes and toggle view_state on public note (then toggle back to public)
+    db.update_bugnote(pub_note_id, rep_id, "Public comment edited")
+        .unwrap();
+    db.update_bugnote(priv_note_id, dev_id, "Private dev comment edited")
+        .unwrap();
+    db.set_bugnote_view_state(pub_note_id, dev_id, 50).unwrap();
+    db.set_bugnote_view_state(pub_note_id, dev_id, 10).unwrap();
+
     // Timeline for rep_user across All Projects (None):
-    // - Sees pub_bug creation & public bugnote_added
-    // - Must NOT see priv_bug, priv_proj_bug, or private bugnote_added
+    // - Sees pub_bug creation, public bugnote_added, and public bugnote_updated
+    // - Must NOT see priv_bug, priv_proj_bug, private bugnote_added, private bugnote_updated, or bugnote_view_state
     let rep_events = db.list_timeline_events(&rep_user, None, 50).unwrap();
     assert!(rep_events
         .iter()
@@ -4500,6 +4510,20 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
             .count(),
         1,
         "Reporter must only see 1 public bugnote_added event"
+    );
+    assert_eq!(
+        rep_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_updated")
+            .count(),
+        1,
+        "Reporter must only see 1 public bugnote_updated event"
+    );
+    assert!(
+        !rep_events
+            .iter()
+            .any(|e| e.field_name == "bugnote_view_state"),
+        "Reporter must not see bugnote_view_state events"
     );
     assert!(
         !rep_events.iter().any(|e| e.bug_id == priv_bug),
@@ -4529,6 +4553,73 @@ fn test_timeline_events_rbac_isolation_and_note_counts() {
         2,
         "Developer must see both public and private bugnote_added events"
     );
+    assert_eq!(
+        dev_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_updated")
+            .count(),
+        2,
+        "Developer must see both public and private bugnote_updated events"
+    );
+    assert_eq!(
+        dev_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_view_state")
+            .count(),
+        2,
+        "Developer must see bugnote_view_state events"
+    );
+
+    // Subproject scoping: parent pub_proj includes visible child subproject events, excludes non-member private subproject
+    let sub_pub = db.create_project("Sub Public", 10, 10, "", true).unwrap();
+    let sub_priv = db.create_project("Sub Private", 10, 50, "", true).unwrap();
+    db.add_subproject(pub_proj, sub_pub, true).unwrap();
+    db.add_subproject(pub_proj, sub_priv, true).unwrap();
+
+    let sub_pub_bug = db
+        .create_bug(
+            sub_pub,
+            dev_id,
+            1,
+            "Subproject Public Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let sub_priv_bug = db
+        .create_bug(
+            sub_priv,
+            dev_id,
+            1,
+            "Subproject Private Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let scoped_rep_events = db
+        .list_timeline_events(&rep_user, Some(pub_proj), 50)
+        .unwrap();
+    assert!(scoped_rep_events.iter().any(|e| e.bug_id == sub_pub_bug));
+    assert!(!scoped_rep_events.iter().any(|e| e.bug_id == sub_priv_bug));
 
     // Verify batch note counts respect private note visibility
     let mut rep_levels = HashMap::new();

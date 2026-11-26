@@ -4371,6 +4371,8 @@ fn test_change_bug_status_note_mentions_and_exclude_dedup() {
         .collect();
     assert_eq!(dev_emails.len(), 1);
     assert!(dev_emails[0].subject.contains("Mentioned by actor_u"));
+    assert!(dev_emails[0].body.contains("[Status changed to resolved]"));
+    assert!(dev_emails[0].body.contains("Fixed; please verify @dev_u"));
 
     let obs_emails: Vec<_> = queued
         .iter()
@@ -4378,6 +4380,7 @@ fn test_change_bug_status_note_mentions_and_exclude_dedup() {
         .collect();
     assert_eq!(obs_emails.len(), 1);
     assert!(obs_emails[0].subject.contains("Mentioned by actor_u"));
+    assert!(obs_emails[0].body.contains("[Status changed to resolved]"));
 
     let rep_emails: Vec<_> = queued
         .iter()

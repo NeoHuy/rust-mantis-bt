@@ -964,3 +964,40 @@ fn test_formatter_edge_cases_polish() {
     assert!(rendered_dot.contains(r#"<span class="mention">@bob</span>."#));
     assert!(!rendered_dot.contains(r#"<span class="mention">@bob.</span>"#));
 }
+
+#[test]
+fn test_highlight_unclosed_quote_and_rust_lifetimes() {
+    use super::highlight_code_block;
+
+    // 1. Unclosed single quote in bash stops at newline so subsequent lines still highlight
+    let bash_hl = highlight_code_block("bash", "echo don't\nif true; then echo ok; fi");
+    assert!(bash_hl.contains(r#"<span class="hl-kw">if</span>"#));
+    assert!(bash_hl.contains(r#"<span class="hl-kw">true</span>"#));
+
+    // 2. Rust lifetimes ('a, 'static) are NOT misread as char literals, while char literals ('z', '\n', '🦀') are
+    let rust_hl = highlight_code_block(
+        "rust",
+        "fn f<'a>(x: &'a str) -> char {\n    let c = 'z';\n    let nl = '\\n';\n    let crab = '🦀';\n    c\n}",
+    );
+    assert!(!rust_hl.contains(r#"<span class="hl-str">'a"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;z&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;\n&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;🦀&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-ty">str</span>"#));
+}
+
+#[test]
+fn test_markdown_http_scheme_spam_performance() {
+    let ctx = sample_context(true);
+    let input = "[](http://".repeat(20_000);
+    let start = std::time::Instant::now();
+    let res = format_text(&input, &ctx);
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(200),
+        "20k [](http:// spam took {:?}, must stay under 200ms",
+        elapsed
+    );
+    assert!(!res.contains("<a href"));
+}

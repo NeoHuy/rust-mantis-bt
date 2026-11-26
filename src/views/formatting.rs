@@ -551,11 +551,23 @@ const C_CPP_JAVA_SPEC: LangSpec = LangSpec {
     ],
 };
 
-fn scan_quoted_string(bytes: &[u8], start: usize, quote: u8, sql_doubled_quote: bool) -> usize {
+fn scan_quoted_string(
+    bytes: &[u8],
+    start: usize,
+    quote: u8,
+    sql_doubled_quote: bool,
+    allow_multiline: bool,
+) -> usize {
     let len = bytes.len();
     let mut i = start + 1;
     while i < len {
+        if !allow_multiline && (bytes[i] == b'\n' || bytes[i] == b'\r') {
+            return i;
+        }
         if bytes[i] == b'\\' && i + 1 < len {
+            if !allow_multiline && (bytes[i + 1] == b'\n' || bytes[i + 1] == b'\r') {
+                return i;
+            }
             i += 2;
             continue;
         }
@@ -682,7 +694,7 @@ fn highlight_code_spec(raw_code: &str, spec: &LangSpec) -> String {
             continue;
         }
 
-        // Triple-quoted strings (Python)
+        // Triple-quoted strings (Python, may span lines)
         if spec.triple_quotes
             && (bytes[i..].starts_with(b"\"\"\"") || bytes[i..].starts_with(b"'''"))
         {
@@ -709,24 +721,24 @@ fn highlight_code_spec(raw_code: &str, spec: &LangSpec) -> String {
             continue;
         }
 
-        // Double-quoted strings
+        // Double-quoted strings (stop at newline so unclosed quotes don't color the rest of the block)
         if bytes[i] == b'"' {
             if i > plain_start {
                 out.push_str(&html_escape(&raw_code[plain_start..i]));
             }
-            let end = scan_quoted_string(bytes, i, b'"', false);
+            let end = scan_quoted_string(bytes, i, b'"', false, false);
             push_hl_span(&mut out, "hl-str", &raw_code[i..end]);
             i = end;
             plain_start = i;
             continue;
         }
 
-        // Backtick strings (JS/TS/Go)
+        // Backtick strings (JS/TS/Go, may span lines)
         if spec.backtick_strings && bytes[i] == b'`' {
             if i > plain_start {
                 out.push_str(&html_escape(&raw_code[plain_start..i]));
             }
-            let end = scan_quoted_string(bytes, i, b'`', false);
+            let end = scan_quoted_string(bytes, i, b'`', false, true);
             push_hl_span(&mut out, "hl-str", &raw_code[i..end]);
             i = end;
             plain_start = i;
@@ -739,30 +751,46 @@ fn highlight_code_spec(raw_code: &str, spec: &LangSpec) -> String {
                 if i > plain_start {
                     out.push_str(&html_escape(&raw_code[plain_start..i]));
                 }
-                let end = scan_quoted_string(bytes, i, b'\'', spec.case_insensitive_kw);
+                let end = scan_quoted_string(bytes, i, b'\'', spec.case_insensitive_kw, false);
                 push_hl_span(&mut out, "hl-str", &raw_code[i..end]);
                 i = end;
                 plain_start = i;
                 continue;
             } else {
-                // Bounded char literal check (e.g. 'a', '\n', '\x7f') vs Rust lifetime ('static)
-                let mut k = i + 1;
-                let limit = (i + 12).min(len);
-                let mut found_close = None;
-                while k < limit {
-                    if bytes[k] == b'\n' || bytes[k] == b'\r' {
-                        break;
+                // Match single-char literal ('a', '🦀', '\n', '\x7f', '\u{...}') without matching Rust lifetimes ('a, 'static)
+                let found_close = if i + 1 < len && bytes[i + 1] == b'\\' {
+                    let mut k = i + 2;
+                    let limit = (i + 12).min(len);
+                    let mut close = None;
+                    while k < limit {
+                        if bytes[k] == b'\n' || bytes[k] == b'\r' {
+                            break;
+                        }
+                        if bytes[k] == b'\\' && k + 1 < limit {
+                            k += 2;
+                            continue;
+                        }
+                        if bytes[k] == b'\'' {
+                            close = Some(k + 1);
+                            break;
+                        }
+                        k += 1;
                     }
-                    if bytes[k] == b'\\' && k + 1 < limit {
-                        k += 2;
-                        continue;
+                    close
+                } else if i + 1 < len && !matches!(bytes[i + 1], b'\'' | b'\n' | b'\r') {
+                    let mut next = i + 2;
+                    while next < len && (bytes[next] & 0xC0) == 0x80 {
+                        next += 1;
                     }
-                    if bytes[k] == b'\'' {
-                        found_close = Some(k + 1);
-                        break;
+                    if next < len && bytes[next] == b'\'' {
+                        Some(next + 1)
+                    } else {
+                        None
                     }
-                    k += 1;
-                }
+                } else {
+                    None
+                };
+
                 if let Some(end) = found_close {
                     if i > plain_start {
                         out.push_str(&html_escape(&raw_code[plain_start..i]));
@@ -948,7 +976,7 @@ fn highlight_json(raw_code: &str) -> String {
             if i > plain_start {
                 out.push_str(&html_escape(&raw_code[plain_start..i]));
             }
-            let end = scan_quoted_string(bytes, i, b'"', false);
+            let end = scan_quoted_string(bytes, i, b'"', false, false);
             // Bounded lookahead (max 64 bytes) for ':' so adversarial whitespace stays O(N)
             let mut look = end;
             let look_limit = (end + 64).min(len);
@@ -1088,7 +1116,7 @@ fn highlight_html_xml(raw_code: &str) -> String {
                     if i > tag_plain {
                         out.push_str(&html_escape(&raw_code[tag_plain..i]));
                     }
-                    let end = scan_quoted_string(bytes, i, bytes[i], false);
+                    let end = scan_quoted_string(bytes, i, bytes[i], false, false);
                     push_hl_span(&mut out, "hl-str", &raw_code[i..end]);
                     i = end;
                     tag_plain = i;
@@ -1164,7 +1192,7 @@ fn highlight_css(raw_code: &str) -> String {
             if i > plain_start {
                 out.push_str(&html_escape(&raw_code[plain_start..i]));
             }
-            let end = scan_quoted_string(bytes, i, bytes[i], false);
+            let end = scan_quoted_string(bytes, i, bytes[i], false, false);
             push_hl_span(&mut out, "hl-str", &raw_code[i..end]);
             i = end;
             plain_start = i;
@@ -1712,12 +1740,18 @@ fn format_inline(raw_line: &str, ctx: &FormatContext, placeholders: &mut Vec<Str
     let b = escaped_line.as_bytes();
     let blen = b.len();
 
-    // Pre-index all `](` locations in a single O(N) pass to guarantee strictly linear O(N) bracket scanning
+    // Pre-index all `](` and `)` locations in a single O(N) pass to guarantee strictly linear O(N) scanning
     let mid_indices: Vec<usize> = escaped_line
         .match_indices("](")
         .map(|(idx, _)| idx)
         .collect();
     let mut mid_ptr = 0;
+
+    let close_paren_indices: Vec<usize> = escaped_line
+        .match_indices(')')
+        .map(|(idx, _)| idx)
+        .collect();
+    let mut paren_ptr = 0;
 
     while cursor < blen {
         if b[cursor] == b'[' {
@@ -1746,46 +1780,58 @@ fn format_inline(raw_line: &str, ctx: &FormatContext, placeholders: &mut Vec<Str
                 });
 
                 if starts_http {
-                    // Track balanced parentheses inside the URL up to 2048 bytes
+                    while paren_ptr < close_paren_indices.len()
+                        && close_paren_indices[paren_ptr] < scheme_start
+                    {
+                        paren_ptr += 1;
+                    }
                     let scan_limit = (url_start + 2048).min(blen);
-                    let mut depth = 1usize;
-                    let mut p = url_start;
-                    let mut close_paren_opt = None;
-                    while p < scan_limit {
-                        if b[p] == b'(' {
-                            depth += 1;
-                        } else if b[p] == b')' {
-                            depth -= 1;
-                            if depth == 0 {
-                                close_paren_opt = Some(p);
+                    if paren_ptr < close_paren_indices.len()
+                        && close_paren_indices[paren_ptr] < scan_limit
+                    {
+                        // Track balanced parentheses inside the URL, stopping early on whitespace/sentinels
+                        let mut depth = 1usize;
+                        let mut p = scheme_start;
+                        let mut close_paren_opt = None;
+                        while p < scan_limit {
+                            if b[p].is_ascii_whitespace() || b[p] == b'\x01' || b[p] == b'\x02' {
                                 break;
                             }
+                            if b[p] == b'(' {
+                                depth += 1;
+                            } else if b[p] == b')' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close_paren_opt = Some(p);
+                                    break;
+                                }
+                            }
+                            p += 1;
                         }
-                        p += 1;
-                    }
 
-                    if let Some(close_paren) = close_paren_opt {
-                        let label = &escaped_line[cursor + 1..close_bracket];
-                        let url = escaped_line[url_start..close_paren].trim();
+                        if let Some(close_paren) = close_paren_opt {
+                            let label = &escaped_line[cursor + 1..close_bracket];
+                            let url = escaped_line[url_start..close_paren].trim();
 
-                        if !url.contains(char::is_whitespace)
-                            && !url.contains('\x01')
-                            && !url.contains('\x02')
-                        {
-                            // Expand any inline code placeholders inside the link label immediately
-                            let expanded_label = expand_placeholders(label, placeholders);
-                            let safe_url = url.replace('"', "&quot;").replace('\'', "&#x27;");
-                            let link_html = format!(
-                                r#"<a href="{}" target="_blank" rel="noopener noreferrer nofollow">{}</a>"#,
-                                safe_url, expanded_label
-                            );
-                            let idx = placeholders.len();
-                            placeholders.push(link_html);
-                            with_md_links.push_str(&escaped_line[last..cursor]);
-                            with_md_links.push_str(&format!("\x01P{}X\x02", idx));
-                            cursor = close_paren + 1;
-                            last = cursor;
-                            continue;
+                            if !url.contains(char::is_whitespace)
+                                && !url.contains('\x01')
+                                && !url.contains('\x02')
+                            {
+                                // Expand any inline code placeholders inside the link label immediately
+                                let expanded_label = expand_placeholders(label, placeholders);
+                                let safe_url = url.replace('"', "&quot;").replace('\'', "&#x27;");
+                                let link_html = format!(
+                                    r#"<a href="{}" target="_blank" rel="noopener noreferrer nofollow">{}</a>"#,
+                                    safe_url, expanded_label
+                                );
+                                let idx = placeholders.len();
+                                placeholders.push(link_html);
+                                with_md_links.push_str(&escaped_line[last..cursor]);
+                                with_md_links.push_str(&format!("\x01P{}X\x02", idx));
+                                cursor = close_paren + 1;
+                                last = cursor;
+                                continue;
+                            }
                         }
                     }
                 }

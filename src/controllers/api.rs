@@ -714,6 +714,15 @@ pub async fn rest_update_issue(
         .filter(|&new_st| new_st != bug.status);
 
     if let Some(new_st) = requested_status_change {
+        if bug.status == 90 && new_st != 20 && new_st != 90 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "Closed bug can only be reopened to feedback (status 20)"
+                })),
+            )
+                .into_response();
+        }
         let is_reporter_reopen =
             bug.status == 80 && new_st == 20 && eff >= 25 && bug.reporter_id == auth.user.id;
         if !is_reporter_reopen {
@@ -789,7 +798,7 @@ pub async fn rest_update_issue(
     ]);
     let newly_added = crate::models::diff_new_mentions(&old_mentions, &updated_mentions);
     if !newly_added.is_empty() {
-        let context = crate::models::combine_context(
+        let base_context = crate::models::combine_context(
             &effective_summary,
             &[
                 new_desc.as_deref().unwrap_or(""),
@@ -797,6 +806,14 @@ pub async fn rest_update_issue(
                 new_add.as_deref().unwrap_or(""),
             ],
         );
+        let context = if let Some(new_st) = requested_status_change {
+            let status_name = BugStatus::from_i32(new_st)
+                .map(|s| s.as_str())
+                .unwrap_or("updated");
+            format!("[Status changed to {}]\n\n{}", status_name, base_context)
+        } else {
+            base_context
+        };
         if let Err(e) = db.notify_bug_mentions(id, auth.user.id, &newly_added, false, &context) {
             eprintln!("[rest] failed to notify mentions on issue update: {}", e);
         }

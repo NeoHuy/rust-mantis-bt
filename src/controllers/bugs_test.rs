@@ -516,3 +516,88 @@ fn test_parse_multipart_data_preserves_more_than_ten_files_for_controller_valida
         "parse_multipart_data must not truncate files, letting controllers validate limit"
     );
 }
+
+#[test]
+fn test_build_format_context_visibility_and_toggle() {
+    let db = Db::open_in_memory().unwrap();
+    let pub_proj = db.create_project("PubFmt", 10, 10, "", true).unwrap();
+    let priv_proj = db.create_project("PrivFmt", 50, 10, "", true).unwrap();
+
+    let rep_id = db
+        .create_user("fmt_rep", "Rep", "fmtrep@x.com", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("fmt_dev", "Dev", "fmtdev@x.com", "pw", 55, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    let pub_bug = db
+        .create_bug(
+            pub_proj,
+            rep_id,
+            1,
+            "Public bug",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let priv_bug = db
+        .create_bug(
+            priv_proj,
+            dev_id,
+            1,
+            "Secret bug",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+    let pub_note = db.add_bugnote(pub_bug, dev_id, "Public note", 10).unwrap();
+    let priv_note = db.add_bugnote(pub_bug, dev_id, "Private note", 50).unwrap();
+
+    let corpus_str = format!(
+        "See #{} #{} ~{} ~{}",
+        pub_bug, priv_bug, pub_note, priv_note
+    );
+    let users = db.list_users(None, false).unwrap();
+
+    // Reporter sees public bug & public note only (not private bug or private note)
+    let rep_ctx = build_format_context(&db, &rep, &[&corpus_str], &users);
+    assert!(rep_ctx.enabled);
+    assert!(rep_ctx.issue_refs.contains_key(&pub_bug));
+    assert!(!rep_ctx.issue_refs.contains_key(&priv_bug));
+    assert!(rep_ctx.note_refs.contains_key(&pub_note));
+    assert!(!rep_ctx.note_refs.contains_key(&priv_note));
+    assert!(rep_ctx.valid_usernames.contains("fmt_dev"));
+
+    // Developer sees all
+    let dev_ctx = build_format_context(&db, &dev, &[&corpus_str], &users);
+    assert!(dev_ctx.issue_refs.contains_key(&priv_bug));
+    assert!(dev_ctx.note_refs.contains_key(&priv_note));
+
+    // When MantisCoreFormatting is disabled, build_format_context skips DB lookups
+    db.set_plugin_enabled_admin(crate::models::PLUGIN_CORE_FORMATTING, false)
+        .unwrap();
+    let off_ctx = build_format_context(&db, &dev, &[&corpus_str], &users);
+    assert!(!off_ctx.enabled);
+    assert!(off_ctx.issue_refs.is_empty());
+    assert!(off_ctx.note_refs.is_empty());
+}

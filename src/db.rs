@@ -3066,13 +3066,24 @@ impl Db {
         if let (Some(_), Some(nt)) = (note_id_opt, note) {
             let trimmed = nt.trim();
             if !note_mentions.is_empty() {
+                let mention_ctx = if bug.status != new_status {
+                    let new_status_name = crate::views::bugs::status_label(new_status);
+                    format!("[Status changed to {}]\n\n{}", new_status_name, trimmed)
+                } else if bug.resolution != resolution {
+                    let res_name = BugResolution::from_i32(resolution)
+                        .map(|r| r.as_str())
+                        .unwrap_or("updated");
+                    format!("[Resolution changed to {}]\n\n{}", res_name, trimmed)
+                } else {
+                    trimmed.to_string()
+                };
                 if let Err(e) = self.notify_bug_mentions_with_conn(
                     &conn,
                     bug_id,
                     user_id,
                     &note_mentions,
                     false,
-                    trimmed,
+                    &mention_ctx,
                 ) {
                     eprintln!(
                         "[mentions] failed to send mention notifications on change_bug_status: {}",

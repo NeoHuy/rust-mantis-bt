@@ -855,6 +855,9 @@ async fn test_phase2_m3_core_formatting_mentions_end_to_end() {
         "Newly mentioned monitor @reporter_alice must receive 1 mention email and NO duplicate status email on combined PATCH"
     );
     assert!(alice_patch_emails[0].subject.contains("Mentioned by"));
+    assert!(alice_patch_emails[0]
+        .body
+        .contains("[Status changed to assigned]"));
     assert!(
         !patch_emails.iter().any(|e| e.email == "bob@example.com"),
         "Previously mentioned @developer_bob must not be re-notified"

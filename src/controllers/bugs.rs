@@ -893,6 +893,101 @@ pub async fn bug_report(
     }
 }
 
+fn build_format_context(
+    db: &Db,
+    viewer: &User,
+    text_corpus: &[&str],
+    users: &[User],
+) -> views::formatting::FormatContext {
+    let formatting_enabled = db.is_plugin_enabled(crate::models::PLUGIN_CORE_FORMATTING);
+    let mut format_ctx = views::formatting::FormatContext {
+        enabled: formatting_enabled,
+        ..Default::default()
+    };
+
+    if !formatting_enabled {
+        return format_ctx;
+    }
+
+    let mut issue_ids = std::collections::BTreeSet::new();
+    let mut note_ids = std::collections::BTreeSet::new();
+
+    for text in text_corpus {
+        for id in crate::models::scan_issue_refs(text) {
+            issue_ids.insert(id);
+        }
+        for id in crate::models::scan_note_refs(text) {
+            note_ids.insert(id);
+        }
+    }
+
+    // Cap batch DB lookups to 100 unique IDs per type in deterministic order to bound query size and prevent N+1/DoS amplification.
+    let target_issue_ids: Vec<i64> = issue_ids.into_iter().take(100).collect();
+    let target_note_ids: Vec<i64> = note_ids.into_iter().take(100).collect();
+
+    let mut project_eff_cache: HashMap<i64, i32> = HashMap::new();
+
+    match db.get_bugs_by_ids(&target_issue_ids) {
+        Ok(target_bugs) => {
+            for (&id, target_bug) in &target_bugs {
+                let target_eff = *project_eff_cache
+                    .entry(target_bug.project_id)
+                    .or_insert_with(|| {
+                        db.effective_access_level(viewer, target_bug.project_id)
+                            .unwrap_or(0)
+                    });
+                if Db::can_view_bug(viewer.id, target_eff, target_bug) {
+                    format_ctx.issue_refs.insert(
+                        id,
+                        views::formatting::IssueRefInfo {
+                            id: target_bug.id,
+                            status: target_bug.status,
+                            summary: target_bug.summary.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        Err(e) => eprintln!("[formatting] error batch fetching target bugs: {}", e),
+    }
+
+    match db.get_bugnotes_by_ids(&target_note_ids) {
+        Ok(target_notes) => {
+            let parent_bug_ids: Vec<i64> = target_notes.values().map(|n| n.bug_id).collect();
+            let parent_bugs = db.get_bugs_by_ids(&parent_bug_ids).unwrap_or_default();
+
+            for (&nid, target_note) in &target_notes {
+                if let Some(target_bug) = parent_bugs.get(&target_note.bug_id) {
+                    let target_eff = *project_eff_cache
+                        .entry(target_bug.project_id)
+                        .or_insert_with(|| {
+                            db.effective_access_level(viewer, target_bug.project_id)
+                                .unwrap_or(0)
+                        });
+                    if Db::can_view_bug(viewer.id, target_eff, target_bug)
+                        && (target_note.view_state != crate::models::VIEW_STATE_PRIVATE
+                            || target_eff >= crate::models::ACCESS_DEVELOPER)
+                    {
+                        format_ctx.note_refs.insert(nid, target_note.bug_id);
+                    }
+                }
+            }
+        }
+        Err(e) => eprintln!("[formatting] error batch fetching target bugnotes: {}", e),
+    }
+
+    for u in users {
+        if u.enabled != 0 {
+            format_ctx.valid_usernames.insert(u.username.clone());
+            format_ctx
+                .valid_usernames
+                .insert(u.username.to_ascii_lowercase());
+        }
+    }
+
+    format_ctx
+}
+
 pub async fn view_bug_page(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -1349,101 +1444,6 @@ pub async fn view_bug_page(
     } else {
         String::new()
     };
-
-    fn build_format_context(
-        db: &Db,
-        viewer: &User,
-        text_corpus: &[&str],
-        users: &[User],
-    ) -> views::formatting::FormatContext {
-        let formatting_enabled = db.is_plugin_enabled(crate::models::PLUGIN_CORE_FORMATTING);
-        let mut format_ctx = views::formatting::FormatContext {
-            enabled: formatting_enabled,
-            ..Default::default()
-        };
-
-        if !formatting_enabled {
-            return format_ctx;
-        }
-
-        let mut issue_ids = std::collections::BTreeSet::new();
-        let mut note_ids = std::collections::BTreeSet::new();
-
-        for text in text_corpus {
-            for id in crate::models::scan_issue_refs(text) {
-                issue_ids.insert(id);
-            }
-            for id in crate::models::scan_note_refs(text) {
-                note_ids.insert(id);
-            }
-        }
-
-        // Cap batch DB lookups to 100 unique IDs per type in deterministic order to bound query size and prevent N+1/DoS amplification.
-        let target_issue_ids: Vec<i64> = issue_ids.into_iter().take(100).collect();
-        let target_note_ids: Vec<i64> = note_ids.into_iter().take(100).collect();
-
-        let mut project_eff_cache: HashMap<i64, i32> = HashMap::new();
-
-        match db.get_bugs_by_ids(&target_issue_ids) {
-            Ok(target_bugs) => {
-                for (&id, target_bug) in &target_bugs {
-                    let target_eff = *project_eff_cache
-                        .entry(target_bug.project_id)
-                        .or_insert_with(|| {
-                            db.effective_access_level(viewer, target_bug.project_id)
-                                .unwrap_or(0)
-                        });
-                    if Db::can_view_bug(viewer.id, target_eff, target_bug) {
-                        format_ctx.issue_refs.insert(
-                            id,
-                            views::formatting::IssueRefInfo {
-                                id: target_bug.id,
-                                status: target_bug.status,
-                                summary: target_bug.summary.clone(),
-                            },
-                        );
-                    }
-                }
-            }
-            Err(e) => eprintln!("[formatting] error batch fetching target bugs: {}", e),
-        }
-
-        match db.get_bugnotes_by_ids(&target_note_ids) {
-            Ok(target_notes) => {
-                let parent_bug_ids: Vec<i64> = target_notes.values().map(|n| n.bug_id).collect();
-                let parent_bugs = db.get_bugs_by_ids(&parent_bug_ids).unwrap_or_default();
-
-                for (&nid, target_note) in &target_notes {
-                    if let Some(target_bug) = parent_bugs.get(&target_note.bug_id) {
-                        let target_eff = *project_eff_cache
-                            .entry(target_bug.project_id)
-                            .or_insert_with(|| {
-                                db.effective_access_level(viewer, target_bug.project_id)
-                                    .unwrap_or(0)
-                            });
-                        if Db::can_view_bug(viewer.id, target_eff, target_bug)
-                            && (target_note.view_state != crate::models::VIEW_STATE_PRIVATE
-                                || target_eff >= crate::models::ACCESS_DEVELOPER)
-                        {
-                            format_ctx.note_refs.insert(nid, target_note.bug_id);
-                        }
-                    }
-                }
-            }
-            Err(e) => eprintln!("[formatting] error batch fetching target bugnotes: {}", e),
-        }
-
-        for u in users {
-            if u.enabled != 0 {
-                format_ctx.valid_usernames.insert(u.username.clone());
-                format_ctx
-                    .valid_usernames
-                    .insert(u.username.to_ascii_lowercase());
-            }
-        }
-
-        format_ctx
-    }
 
     let mut text_corpus = Vec::new();
     text_corpus.push(full.description.as_str());

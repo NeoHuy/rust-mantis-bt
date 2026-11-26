@@ -57,6 +57,52 @@
     text-decoration: underline;
   }
 
+  img {
+    display: inline-block;
+  }
+
+  :focus-visible {
+    outline: 2px solid #2b7dbc;
+    outline-offset: 2px;
+  }
+
+  /* Restore heading and list semantics inside .page-container after Tailwind Preflight */
+  .page-container h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  .page-container h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+  }
+
+  .page-container h3 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    margin-bottom: 0.4rem;
+  }
+
+  .page-container h4 {
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+  }
+
+  .page-container ul:not(.nav-tabs):not(.sub-nav-tabs) {
+    list-style-type: disc;
+    margin: 0.5rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .page-container ol {
+    list-style-type: decimal;
+    margin: 0.5rem 0;
+    padding-left: 1.5rem;
+  }
+
   input[type="text"],
   input[type="password"],
   input[type="email"],
@@ -142,7 +188,11 @@
   .navbar-toggle:hover,
   .navbar-toggle:focus {
     background-color: #5782a7;
-    outline: none;
+  }
+
+  .navbar-toggle:focus-visible {
+    outline: 2px solid #ffffff;
+    outline-offset: 2px;
   }
 
   .navbar-brand {
@@ -272,7 +322,8 @@
     padding: 4px 0;
   }
 
-  .nav-dropdown.open .nav-dropdown-menu {
+  .nav-dropdown.open .nav-dropdown-menu,
+  .nav-dropdown:focus-within .nav-dropdown-menu {
     display: block;
   }
 
@@ -360,7 +411,7 @@
   .dropdown-user-meta {
     padding: 6px 14px;
     font-size: 11px;
-    color: #777777;
+    color: #555555;
     background-color: #f8f8f8;
     border-bottom: 1px solid #e5e5e5;
   }
@@ -495,27 +546,33 @@
   }
 
   /* Collapsed Sidebar (.menu-min = 43px icon-only) */
-  aside.sidebar.menu-min {
+  aside.sidebar.menu-min,
+  html.sidebar-collapsed-init aside.sidebar {
     width: 43px;
     min-width: 43px;
   }
 
-  aside.sidebar.menu-min .sidebar-inner {
+  aside.sidebar.menu-min .sidebar-inner,
+  html.sidebar-collapsed-init aside.sidebar .sidebar-inner {
     overflow: visible;
     max-height: none;
   }
 
-  aside.sidebar.menu-min ul.nav-list li a {
+  aside.sidebar.menu-min ul.nav-list li a,
+  html.sidebar-collapsed-init aside.sidebar ul.nav-list li a {
     padding: 10px 0;
     height: 40px;
   }
 
   aside.sidebar.menu-min ul.nav-list li a .menu-icon,
-  aside.sidebar.menu-min ul.nav-list li a .nav-icon {
+  aside.sidebar.menu-min ul.nav-list li a .nav-icon,
+  html.sidebar-collapsed-init aside.sidebar ul.nav-list li a .menu-icon,
+  html.sidebar-collapsed-init aside.sidebar ul.nav-list li a .nav-icon {
     font-size: 16px;
   }
 
-  aside.sidebar.menu-min ul.nav-list li a .menu-text {
+  aside.sidebar.menu-min ul.nav-list li a .menu-text,
+  html.sidebar-collapsed-init aside.sidebar ul.nav-list li a .menu-text {
     display: none;
     position: absolute;
     left: 42px;
@@ -533,7 +590,8 @@
     box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.12);
   }
 
-  aside.sidebar.menu-min ul.nav-list li:hover a .menu-text {
+  aside.sidebar.menu-min ul.nav-list li:hover a .menu-text,
+  html.sidebar-collapsed-init aside.sidebar ul.nav-list li:hover a .menu-text {
     display: block;
   }
 
@@ -1293,9 +1351,9 @@
   }
 
   .login-header {
-    color: #478fca;
+    color: #2b6cb0;
     font-size: 18px;
-    font-weight: 400;
+    font-weight: 600;
     border-bottom: 1px solid #d5e3ef;
     padding: 14px 22px 10px 22px;
     background-color: #f7f7f7;
@@ -1385,7 +1443,7 @@
   }
 
   .login-toolbar a {
-    color: #337ab7;
+    color: #23527c;
     font-weight: 600;
   }
 }
@@ -1412,13 +1470,15 @@
     width: 190px !important;
     min-width: 190px !important;
     transform: translateX(-100%);
-    transition: transform 0.2s ease;
+    visibility: hidden;
+    transition: transform 0.2s ease, visibility 0.2s ease;
     box-shadow: 2px 0 12px rgba(0, 0, 0, 0.22);
     z-index: 1040;
   }
 
   aside.sidebar.mobile-open {
     transform: translateX(0);
+    visibility: visible;
   }
 
   aside.sidebar .sidebar-inner {

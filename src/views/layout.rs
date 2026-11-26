@@ -215,6 +215,7 @@ pub fn render_layout(
     };
 
     let csrf_token = crate::auth::csrf_token_for_session(&ctx.user.cookie_string);
+    let asset_ver = env!("CARGO_PKG_VERSION");
 
     let html = format!(
         r#"<!DOCTYPE html>
@@ -225,11 +226,12 @@ pub fn render_layout(
     <meta name="csrf-token" content="{csrf_token}">
     <title>{title} - MantisBT</title>
     <link rel="icon" type="image/png" href="/images/mantis_logo.png">
-    <link rel="stylesheet" href="/assets/tailwind.css">
-    <link rel="stylesheet" href="/assets/font-awesome.min.css">
-    <script src="/assets/mantis.js" defer></script>
+    <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
+    <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
+    <script>try{{if(localStorage.getItem('mantis_sidebar_collapsed')==='1')document.documentElement.classList.add('sidebar-collapsed-init');}}catch(_){{}}</script>
+    <script src="/assets/mantis.js?v={asset_ver}" defer></script>
 </head>
-<body class="skin-3">
+<body class="skin-3" data-username="{username}">
     <header class="navbar">
         <div class="navbar-left">
             <button id="menu-toggler" type="button" class="navbar-toggle" aria-label="Toggle sidebar" aria-expanded="false">
@@ -244,11 +246,11 @@ pub fn render_layout(
             {report_top_btn}
             {invite_top_btn}
             <div class="nav-dropdown" id="dropdown_projects_menu">
-                <button type="button" class="nav-dropdown-toggle" data-dropdown-toggle="projects" aria-expanded="false">
+                <button type="button" class="nav-dropdown-toggle" data-dropdown-toggle="projects" aria-haspopup="true" aria-controls="projects-dropdown-menu" aria-expanded="false">
                     <span class="active-project-label">{active_project_name}</span>
                     <i class="fa fa-angle-down" aria-hidden="true"></i>
                 </button>
-                <div class="nav-dropdown-menu projects-dropdown-menu">
+                <div id="projects-dropdown-menu" class="nav-dropdown-menu projects-dropdown-menu">
                     <div class="projects-searchbox">
                         <input type="text" data-project-search placeholder="Search projects..." aria-label="Search projects" autocomplete="off">
                     </div>
@@ -264,12 +266,12 @@ pub fn render_layout(
                 </noscript>
             </div>
             <div class="nav-dropdown" id="dropdown_user_menu">
-                <button type="button" class="nav-dropdown-toggle" data-dropdown-toggle="user" aria-expanded="false">
+                <button type="button" class="nav-dropdown-toggle" data-dropdown-toggle="user" aria-haspopup="true" aria-controls="user-dropdown-menu" aria-expanded="false">
                     <i class="fa fa-user" aria-hidden="true"></i>
                     <span class="user-info">{username}</span>
                     <i class="fa fa-angle-down" aria-hidden="true"></i>
                 </button>
-                <div class="nav-dropdown-menu">
+                <div id="user-dropdown-menu" class="nav-dropdown-menu">
                     <div class="dropdown-user-meta">{username} ({role})</div>
                     <a href="/account_page" class="dropdown-item-link"><i class="fa fa-user" aria-hidden="true"></i> My Account</a>
                     <a href="/account_manage_api_tokens_page" class="dropdown-item-link"><i class="fa fa-key" aria-hidden="true"></i> API Tokens</a>
@@ -278,6 +280,11 @@ pub fn render_layout(
                         <button type="submit" class="dropdown-logout-btn"><i class="fa fa-sign-out" aria-hidden="true"></i> Logout</button>
                     </form>
                 </div>
+                <noscript>
+                    <form action="/logout" method="POST" style="display:inline; margin:0;">
+                        <button type="submit" class="nav-dropdown-toggle">Logout</button>
+                    </form>
+                </noscript>
             </div>
         </div>
     </header>
@@ -305,10 +312,10 @@ pub fn render_layout(
                 </div>
                 <div class="breadcrumbs-right">
                     <div id="nav-recent" class="nav-recent" hidden></div>
-                    <div class="nav-search">
+                    <form id="nav-search-form" class="nav-search" action="/view_all_bug_page" method="GET">
                         <i class="fa fa-search nav-search-icon" aria-hidden="true"></i>
-                        <input type="text" id="jump_bug_id" placeholder="Issue #" aria-label="Jump to Issue ID" autocomplete="off">
-                    </div>
+                        <input type="text" id="jump_bug_id" name="q" placeholder="Issue #" aria-label="Jump to Issue ID" autocomplete="off">
+                    </form>
                 </div>
             </div>
             <div class="page-container">
@@ -352,6 +359,7 @@ pub fn render_unauthenticated_layout(
         None => String::new(),
     };
 
+    let asset_ver = env!("CARGO_PKG_VERSION");
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -360,8 +368,8 @@ pub fn render_unauthenticated_layout(
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{title} - MantisBT</title>
     <link rel="icon" type="image/png" href="/images/mantis_logo.png">
-    <link rel="stylesheet" href="/assets/tailwind.css">
-    <link rel="stylesheet" href="/assets/font-awesome.min.css">
+    <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
+    <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
 </head>
 <body class="login-layout light-login">
     <div class="login-container">

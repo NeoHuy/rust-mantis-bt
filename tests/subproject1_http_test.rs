@@ -1176,7 +1176,7 @@ async fn test_top_project_selector_fetch_and_reload() {
 
     assert!(html.contains(r#"id="dropdown_projects_menu""#));
     assert!(html.contains(r#"data-project-search"#));
-    assert!(html.contains(r#"src="/assets/mantis.js""#));
+    assert!(html.contains(r#"src="/assets/mantis.js?v="#));
     assert!(!html.contains(r#"id="top_project_id" onchange="this.form.submit()""#));
 
     let js_res = app

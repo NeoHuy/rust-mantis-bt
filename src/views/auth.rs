@@ -187,6 +187,7 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
         html_escape(username)
     );
 
+    let asset_ver = env!("CARGO_PKG_VERSION");
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -196,8 +197,8 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Registration Successful - MantisBT</title>
     <link rel="icon" type="image/png" href="/images/mantis_logo.png">
-    <link rel="stylesheet" href="/assets/tailwind.css">
-    <link rel="stylesheet" href="/assets/font-awesome.min.css">
+    <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
+    <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
 </head>
 <body class="login-layout light-login">
     <div class="login-container">

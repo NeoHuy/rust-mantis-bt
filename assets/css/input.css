@@ -973,6 +973,8 @@
     padding: 6px 10px;
     vertical-align: middle;
     font-size: 12px;
+    border: 1px solid #e4e4e4;
+    background-color: #ffffff;
   }
 
   .form-table td.label-col,
@@ -982,7 +984,23 @@
     color: #336199;
     background-color: #edf3f4;
     border: 1px solid #dcebf7;
+    padding: 6px 10px;
+    vertical-align: middle;
+    font-size: 12px;
     text-align: right;
+  }
+
+  .form-table.form-table-left td.label-col,
+  .form-table.form-table-left th.category {
+    text-align: left;
+  }
+
+  .form-table.bug-view-table th.category {
+    width: 14%;
+  }
+
+  .form-table.bug-view-table tr.bug-header th.category {
+    width: auto;
   }
 
   .form-table td.input-col {
@@ -991,15 +1009,221 @@
   }
 
   .form-table tr.spacer-row td {
-    padding: 2px;
+    padding: 3px;
     background-color: #f5f5f5;
     border-left: none;
     border-right: none;
   }
 
+  .inline-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-right: 14px;
+    cursor: pointer;
+    font-weight: 400;
+  }
+
+  .action-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  /* Activities / Bugnotes Card Timeline */
+  table.bugnote-timeline {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0 10px;
+  }
+
+  .bugnote-meta {
+    width: 260px;
+    vertical-align: top;
+    background-color: #edf3f4;
+    border: 1px solid #dcebf7;
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+
+  .bugnote-content {
+    vertical-align: top;
+    border: 1px solid #dcebf7;
+    border-left: none;
+    padding: 12px 14px;
+    overflow-wrap: anywhere;
+    background-color: #ffffff;
+  }
+
+  tr.bugnote-card.bugnote-private td.bugnote-meta {
+    background-color: #fcf4d9;
+    border-color: #eedc94;
+  }
+
+  tr.bugnote-card.bugnote-private td.bugnote-content {
+    background-color: #fffdf5;
+    border-color: #eedc94;
+  }
+
+  .bugnote-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background-color: #d9e6f2;
+    color: #336199;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+
+  .bugnote-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+  }
+
+  /* Monitors Pill List */
+  .monitor-pill-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .monitor-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background-color: #edf3f4;
+    border: 1px solid #c5d0dc;
+    border-radius: 16px;
+    font-size: 12px;
+    color: #333333;
+  }
+
   .required {
     color: #d15b47;
     font-weight: 700;
+  }
+
+  .inline-form {
+    display: inline;
+  }
+
+  .inline-flex-form {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .inline-flex-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .select-auto {
+    width: auto !important;
+  }
+
+  .input-w-140 {
+    width: 140px !important;
+  }
+
+  .input-w-160 {
+    width: 160px !important;
+  }
+
+  .input-w-220 {
+    max-width: 220px !important;
+  }
+
+  .input-w-240 {
+    width: 240px !important;
+  }
+
+  .mt-8 {
+    margin-top: 8px;
+  }
+
+  .mt-10 {
+    margin-top: 10px;
+  }
+
+  .mb-8 {
+    margin-bottom: 8px;
+  }
+
+  .mb-0 {
+    margin-bottom: 0 !important;
+  }
+
+  .toolbox-split {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .bugnote-meta-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .bugnote-meta-time {
+    font-size: 11px;
+    color: #555555;
+    margin-top: 4px;
+  }
+
+  .bugnote-meta-links {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    margin-top: 4px;
+  }
+
+  .badge-jira {
+    background: #0052cc;
+    color: #ffffff;
+    text-decoration: none;
+    margin-left: 8px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+
+  .badge-sticky {
+    background: #e0a800;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+  }
+
+  .badge-overdue {
+    background: #d9534f;
+    color: #ffffff;
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin-left: 6px;
+  }
+
+  .badge-tag {
+    margin-right: 6px;
   }
 
   /* ================================================================
@@ -1080,14 +1304,50 @@
   .btn-white.btn-round {
     background-color: #ffffff;
     border: 1px solid #8fbcd9;
-    color: #3a87ad !important;
+    color: #2e6e8e !important;
     border-radius: 4px;
   }
 
   .btn-white.btn-round:hover {
     background-color: #eef5fa;
     border-color: #5a9bc4;
-    color: #245c78 !important;
+    color: #1f4f68 !important;
+  }
+
+  .btn-primary.btn-white.btn-round {
+    background-color: #ffffff;
+    border-color: #428bca;
+    color: #25639a !important;
+  }
+
+  .btn-primary.btn-white.btn-round:hover {
+    background-color: #eaf3fb;
+    border-color: #1b6aaa;
+    color: #164b78 !important;
+  }
+
+  .btn-danger.btn-white.btn-round {
+    background-color: #ffffff;
+    border-color: #d15b47;
+    color: #b74635 !important;
+  }
+
+  .btn-danger.btn-white.btn-round:hover {
+    background-color: #fdf2f0;
+    border-color: #a94442;
+    color: #8f3533 !important;
+  }
+
+  .btn-warning.btn-white.btn-round {
+    background-color: #ffffff;
+    border-color: #d59a00;
+    color: #8a5a00 !important;
+  }
+
+  .btn-warning.btn-white.btn-round:hover {
+    background-color: #fff9e6;
+    border-color: #b38000;
+    color: #6b4500 !important;
   }
 
   .btn-sm {
@@ -1557,6 +1817,23 @@
 
   .nav-recent {
     display: none !important;
+  }
+
+  tr.bugnote-card,
+  td.bugnote-meta,
+  td.bugnote-content {
+    display: block;
+    width: 100%;
+  }
+
+  td.bugnote-content {
+    border-left: 1px solid #dcebf7;
+    border-top: none;
+  }
+
+  tr.bugnote-card.bugnote-private td.bugnote-content {
+    border-left: 1px solid #eedc94;
+    border-top: none;
   }
 }
 

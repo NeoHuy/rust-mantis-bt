@@ -32,6 +32,14 @@ impl Drop for DiskFileCleanupGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BugCreateExtras<'a> {
+    pub build: &'a str,
+    pub target_version: &'a str,
+    pub due_date: i64,
+    pub handler_id: Option<i64>,
+}
+
 impl Db {
     pub(crate) fn from_connection(conn: Connection) -> Self {
         Self {
@@ -986,6 +994,131 @@ impl Db {
             params_vec.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_refs.as_slice(), Self::map_user_row)?;
         rows.collect()
+    }
+
+    pub fn list_assignable_users_for_project(
+        &self,
+        project_id: i64,
+        min_access: i32,
+    ) -> rusqlite::Result<Vec<User>> {
+        let conn = self.conn();
+        if project_id <= 0 {
+            let mut stmt = conn.prepare(
+                "SELECT id, username, realname, email, password, enabled, protected, access_level,
+                        login_count, lost_password_request_count, failed_login_count, cookie_string,
+                        last_visit, date_created
+                 FROM mantis_user_table
+                 WHERE enabled = 1 AND access_level >= ?1
+                 ORDER BY username ASC",
+            )?;
+            let rows = stmt.query_map(params![min_access], Self::map_user_row)?;
+            return rows.collect();
+        }
+
+        let proj_row = conn
+            .query_row(
+                "SELECT enabled, view_state, access_min FROM mantis_project_table WHERE id = ?1",
+                params![project_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)?,
+                        row.get::<_, i32>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        let Some((enabled, view_state, access_min)) = proj_row else {
+            return Ok(Vec::new());
+        };
+        if enabled == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT u.id, u.username, u.realname, u.email, u.password, u.enabled, u.protected, u.access_level,
+                    u.login_count, u.lost_password_request_count, u.failed_login_count, u.cookie_string,
+                    u.last_visit, u.date_created
+             FROM mantis_user_table u
+             LEFT JOIN mantis_project_user_list_table pul
+               ON pul.user_id = u.id AND pul.project_id = ?1
+             WHERE u.enabled = 1
+               AND (
+                   CASE
+                       WHEN u.access_level >= 90 THEN 90
+                       WHEN pul.access_level IS NOT NULL THEN pul.access_level
+                       WHEN ?2 = 10 AND u.access_level >= ?3 THEN u.access_level
+                       WHEN ?2 = 50 AND u.access_level >= 70 THEN u.access_level
+                       ELSE 0
+                   END
+               ) >= ?4
+             ORDER BY u.username ASC",
+        )?;
+        let rows = stmt.query_map(
+            params![project_id, view_state, access_min, min_access],
+            Self::map_user_row,
+        )?;
+        rows.collect()
+    }
+
+    pub fn list_project_user_access_map(
+        &self,
+        project_id: i64,
+    ) -> rusqlite::Result<std::collections::HashMap<i64, i32>> {
+        let conn = self.conn();
+        let mut map = std::collections::HashMap::new();
+        if project_id <= 0 {
+            let mut stmt = conn.prepare("SELECT id, access_level FROM mantis_user_table")?;
+            let rows =
+                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?)))?;
+            for r in rows {
+                let (uid, lvl) = r?;
+                map.insert(uid, lvl);
+            }
+            return Ok(map);
+        }
+
+        let proj_row = conn
+            .query_row(
+                "SELECT enabled, view_state, access_min FROM mantis_project_table WHERE id = ?1",
+                params![project_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)?,
+                        row.get::<_, i32>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
+                },
+            )
+            .ok();
+        let Some((enabled, view_state, access_min)) = proj_row else {
+            return Ok(map);
+        };
+        if enabled == 0 {
+            return Ok(map);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT u.id,
+                    CASE
+                        WHEN u.access_level >= 90 THEN 90
+                        WHEN pul.access_level IS NOT NULL THEN pul.access_level
+                        WHEN ?2 = 10 AND u.access_level >= ?3 THEN u.access_level
+                        WHEN ?2 = 50 AND u.access_level >= 70 THEN u.access_level
+                        ELSE 0
+                    END AS eff_level
+             FROM mantis_user_table u
+             LEFT JOIN mantis_project_user_list_table pul
+               ON pul.user_id = u.id AND pul.project_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![project_id, view_state, access_min], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
+        })?;
+        for r in rows {
+            let (uid, lvl) = r?;
+            map.insert(uid, lvl);
+        }
+        Ok(map)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2348,6 +2481,48 @@ impl Db {
         view_state: i32,
         mentioned_usernames: &[String],
     ) -> Result<i64, String> {
+        self.create_bug_full_with_mentions(
+            project_id,
+            reporter_id,
+            category_id,
+            summary,
+            description,
+            steps_to_reproduce,
+            additional_information,
+            priority,
+            severity,
+            reproducibility,
+            version,
+            os,
+            os_build,
+            platform,
+            view_state,
+            mentioned_usernames,
+            BugCreateExtras::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_bug_full_with_mentions(
+        &self,
+        project_id: i64,
+        reporter_id: i64,
+        category_id: i64,
+        summary: &str,
+        description: &str,
+        steps_to_reproduce: &str,
+        additional_information: &str,
+        priority: i32,
+        severity: i32,
+        reproducibility: i32,
+        version: &str,
+        os: &str,
+        os_build: &str,
+        platform: &str,
+        view_state: i32,
+        mentioned_usernames: &[String],
+        extras: BugCreateExtras<'_>,
+    ) -> Result<i64, String> {
         let trimmed_summary = summary.trim();
         if trimmed_summary.is_empty() {
             return Err("Summary cannot be empty".to_string());
@@ -2362,7 +2537,20 @@ impl Db {
         let mut initial_handler_id = 0i64;
         let mut initial_status = 10i32;
 
-        if category_id > 0 {
+        if let Some(hid) = extras.handler_id.filter(|&h| h > 0) {
+            let u = Self::query_user_by_id(&conn, hid)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Assigned user {} not found", hid))?;
+            if u.enabled != 1 {
+                return Err("Assigned user is disabled".to_string());
+            }
+            let eff = Self::query_effective_access_level(&conn, &u, project_id).unwrap_or(0);
+            if eff < 55 {
+                return Err("Assigned user lacks Developer access".to_string());
+            }
+            initial_handler_id = hid;
+            initial_status = 50;
+        } else if category_id > 0 {
             let cat_user_id: Option<i64> = conn
                 .query_row(
                     "SELECT user_id FROM mantis_category_table WHERE id = ?1",
@@ -2394,7 +2582,7 @@ impl Db {
                 category_id, date_submitted, last_updated, os, os_build,
                 platform, version, fixed_in_version, target_version, build,
                 summary, view_state, sticky, due_date
-            ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, 10, ?8, ?9, ?9, ?10, ?11, ?12, ?13, '', '', '', ?14, ?15, 0, 0)",
+            ) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6, ?7, 10, ?8, ?9, ?9, ?10, ?11, ?12, ?13, '', ?14, ?15, ?16, ?17, 0, ?18)",
             params![
                 project_id,
                 reporter_id,
@@ -2409,8 +2597,11 @@ impl Db {
                 os_build,
                 platform,
                 version,
+                extras.target_version,
+                extras.build,
                 trimmed_summary,
                 view_state,
+                extras.due_date,
             ],
         )
         .map_err(|e| e.to_string())?;

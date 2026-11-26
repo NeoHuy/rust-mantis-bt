@@ -37,6 +37,22 @@ impl AccessLevel {
             Self::Nobody => "nobody",
         }
     }
+
+    pub fn label_for_level(value: i32) -> Option<&'static str> {
+        if let Some(level) = Self::from_i32(value) {
+            return Some(level.as_str());
+        }
+        match value {
+            v if v >= 100 => Some("nobody"),
+            v if v >= 90 => Some("administrator"),
+            v if v >= 70 => Some("manager"),
+            v if v >= 55 => Some("developer"),
+            v if v >= 40 => Some("updater"),
+            v if v >= 25 => Some("reporter"),
+            v if v >= 10 => Some("viewer"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

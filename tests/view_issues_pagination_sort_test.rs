@@ -476,9 +476,10 @@ async fn test_http_saved_filter_delete_ui_and_permissions() {
             .to_vec(),
     )
     .unwrap();
-    // Priority column header must show asc arrow '&#9650;' and target 'dir=desc' when clicked
+    // Priority column header must show asc caret ('fa-caret-up') and target 'dir=desc' when clicked
     assert!(
-        html_filter_view.contains("Priority &#9650;") || html_filter_view.contains("Priority ▲")
+        html_filter_view.contains(r#"title="Priority""#)
+            && html_filter_view.contains("fa-caret-up")
     );
     assert!(html_filter_view.contains(&format!("filter_id={}", fid_pub)));
     assert!(html_filter_view.contains("sort=priority"));

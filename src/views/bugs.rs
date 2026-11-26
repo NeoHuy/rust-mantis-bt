@@ -3,7 +3,7 @@ use crate::models::{
     build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFilter, BugFull,
     BugHistory, BugPriority, BugReproducibility, BugResolution, BugRevision, BugSeverity,
     BugStatus, Bugnote, Category, CustomField, CustomFieldValue, JiraLink, ListBugsQuery,
-    ProjectVersion, RelationshipType, SavedFilter, Tag, User, ViewState,
+    ProjectVersion, RelationshipType, SavedFilter, Tag, TimelineEvent, User, ViewState,
 };
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
@@ -11,7 +11,7 @@ use crate::views::{
     format_date, format_timestamp, render_status_badge, render_status_legend, status_color,
 };
 use axum::response::Html;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn format_history_value(
     field_name: &str,
@@ -238,49 +238,391 @@ pub fn relationship_label(v: i32) -> &'static str {
         .unwrap_or("related to")
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MyViewMeta {
+    pub categories_map: HashMap<i64, String>,
+    pub projects_map: HashMap<i64, String>,
+    pub editable_bug_ids: HashSet<i64>,
+    pub timeline_events: Vec<TimelineEvent>,
+    pub users_map: HashMap<i64, String>,
+    pub active_project_id: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ViewIssuesMeta {
+    pub note_counts: HashMap<i64, usize>,
+    pub file_counts: HashMap<i64, usize>,
+    pub editable_bug_ids: HashSet<i64>,
+}
+
+pub fn render_priority_icon(priority: i32) -> String {
+    let label = priority_label(priority);
+    match priority {
+        20 => format!(
+            r#"<i class="fa fa-chevron-down text-emerald-600" title="{}" aria-hidden="true"></i>"#,
+            label
+        ),
+        30 => format!(
+            r#"<i class="fa fa-minus text-amber-500" title="{}" aria-hidden="true"></i>"#,
+            label
+        ),
+        40 => format!(
+            r#"<i class="fa fa-chevron-up text-red-600" title="{}" aria-hidden="true"></i>"#,
+            label
+        ),
+        50 => format!(
+            r#"<i class="fa fa-arrow-up text-red-600" title="{}" aria-hidden="true"></i>"#,
+            label
+        ),
+        60 => format!(
+            r#"<i class="fa fa-exclamation-triangle text-red-600" title="{}" aria-hidden="true"></i>"#,
+            label
+        ),
+        _ => format!(
+            r#"<span class="inline-block w-3 text-center text-gray-400" title="{}">&nbsp;</span>"#,
+            label
+        ),
+    }
+}
+
+pub fn render_status_square(status: i32) -> String {
+    let color = status_color(status);
+    let label = status_label(status);
+    format!(
+        r#"<i class="fa fa-square fa-status-box" style="color:{};" title="{}" aria-hidden="true"></i>"#,
+        color,
+        html_escape(label)
+    )
+}
+
+fn my_view_box_meta_attrs(title: &str) -> (&'static str, &'static str) {
+    match title {
+        "Assigned to Me (Unresolved)" => ("my_view_assigned", "fa-user"),
+        "Unassigned" => ("my_view_unassigned", "fa-inbox"),
+        "Reported by Me" => ("my_view_reported", "fa-bug"),
+        "Resolved" => ("my_view_resolved", "fa-check-square-o"),
+        "Recently Modified" => ("my_view_recent", "fa-history"),
+        "Monitored by Me" => ("my_view_monitored", "fa-eye"),
+        _ => ("my_view_box", "fa-list-alt"),
+    }
+}
+
 pub fn render_my_view_box(title: &str, link: &str, bugs: &[Bug]) -> String {
+    let (widget_id, icon) = my_view_box_meta_attrs(title);
+    render_my_view_box_with_meta(title, link, bugs, widget_id, icon, &MyViewMeta::default())
+}
+
+pub fn render_my_view_box_with_meta(
+    title: &str,
+    link: &str,
+    bugs: &[Bug],
+    widget_id: &str,
+    icon: &str,
+    meta: &MyViewMeta,
+) -> String {
     let mut rows = String::new();
+    let shown_count = bugs.len().min(10);
+    let range_badge = if bugs.is_empty() {
+        "0".to_string()
+    } else {
+        format!("1 - {} / {}", shown_count, bugs.len())
+    };
+
     if bugs.is_empty() {
         rows.push_str(
-            r#"<tr><td colspan="3" style="text-align:center; padding:10px; color:#777;">No issues found.</td></tr>"#,
+            r#"<tr><td colspan="2" class="text-center py-3 text-xs text-gray-500">No issues found.</td></tr>"#,
         );
     } else {
         for b in bugs.iter().take(10) {
-            let color = status_color(b.status);
+            let status_square = render_status_square(b.status);
+            let priority_icon = render_priority_icon(b.priority);
+            let edit_link = if meta.editable_bug_ids.contains(&b.id) {
+                format!(
+                    r#"<a href="/update_bug_page/{}" class="text-gray-600 hover:text-blue-600" title="Edit"><i class="fa fa-pencil" aria-hidden="true"></i></a>"#,
+                    b.id
+                )
+            } else {
+                String::new()
+            };
+            let priv_icon = if b.view_state == 50 {
+                r#"<i class="fa fa-lock text-gray-400" title="private" aria-hidden="true"></i>"#
+            } else {
+                ""
+            };
+            let sticky_icon = if b.sticky == 1 {
+                r#" <i class="fa fa-thumb-tack text-amber-600" title="Sticky" aria-hidden="true"></i>"#
+            } else {
+                ""
+            };
+            let resolved_cls = if b.status >= 80 {
+                " issue-link-resolved"
+            } else {
+                ""
+            };
+            let cat_name = meta
+                .categories_map
+                .get(&b.category_id)
+                .map(|s| s.as_str())
+                .unwrap_or("General");
+            let proj_prefix = if meta.active_project_id == 0 {
+                meta.projects_map
+                    .get(&b.project_id)
+                    .map(|p| format!("[{}] ", html_escape(p)))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
             rows.push_str(&format!(
                 r#"<tr>
-                    <td style="width:95px; border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a><br><span style="font-size:11px; color:#555;">{}</span></td>
-                    <td><a href="/view_bug_page/{}" style="font-weight:bold;">{}</a><br><span style="font-size:11px; color:#777;">Updated: {}</span></td>
+                    <td class="w-32 whitespace-nowrap align-top">
+                        <div class="flex items-center gap-1.5">
+                            {}
+                            {}
+                            {}
+                            {}
+                        </div>
+                        <div class="mt-0.5">
+                            <a href="/view_bug_page/{}" class="font-bold{}">{:07}</a>
+                        </div>
+                    </td>
+                    <td class="align-top">
+                        <div>
+                            <a href="/view_bug_page/{}" class="font-semibold hover:underline{}">{}</a>{}
+                        </div>
+                        <div class="text-[11px] text-gray-500 mt-0.5">
+                            {}{} &middot; {} &middot; Updated: {}
+                        </div>
+                    </td>
                 </tr>"#,
-                color,
+                status_square,
+                edit_link,
+                priority_icon,
+                priv_icon,
+                b.id,
+                resolved_cls,
                 b.id,
                 b.id,
-                html_escape(status_label(b.status)),
-                b.id,
+                resolved_cls,
                 html_escape(&b.summary),
+                sticky_icon,
+                proj_prefix,
+                html_escape(cat_name),
+                html_escape(status_label(b.status)),
                 format_timestamp(b.last_updated)
             ));
         }
     }
+
     format!(
-        r#"<div class="panel">
-            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
-                <span>{} ({})</span>
-                <a class="btn btn-secondary btn-sm" href="{}">View Issues</a>
+        r#"<div class="widget-box widget-color-blue2 !mb-0" data-widget-id="{}">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="fa {}" aria-hidden="true"></i>
+                    <a href="{}" class="text-white hover:text-white hover:underline">{} ({})</a>
+                    <span class="badge" style="background:rgba(0,0,0,0.22); color:#ffffff;">{}</span>
+                </h4>
+                <div class="widget-toolbar">
+                    <div class="widget-menu">
+                        <a class="btn btn-white btn-round btn-sm" href="{}">View Issues</a>
+                    </div>
+                    <button type="button" data-action="collapse" aria-expanded="true" title="Toggle section">
+                        <i class="fa fa-chevron-up" aria-hidden="true"></i>
+                    </button>
+                </div>
             </div>
-            <div class="panel-body" style="padding:0;">
-                <table class="data-table" style="margin-bottom:0; border:none;">
-                    <tbody>{}</tbody>
-                </table>
+            <div class="widget-body !p-0">
+                <div class="widget-main !p-0">
+                    <div class="table-responsive">
+                        <table class="data-table !mb-0 !border-0">
+                            <tbody>{}</tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
         </div>"#,
+        html_escape(widget_id),
+        html_escape(icon),
+        html_escape(link),
         html_escape(title),
         bugs.len(),
-        link,
+        range_badge,
+        html_escape(link),
         rows
     )
 }
 
+fn describe_timeline_event(
+    ev: &TimelineEvent,
+    users_map: &HashMap<i64, String>,
+) -> (&'static str, &'static str, String) {
+    if ev.type_ == 1 && ev.field_name.is_empty() {
+        return ("fa-plus", "bg-emerald-600", "created issue".to_string());
+    }
+    match ev.field_name.as_str() {
+        "bugnote_added" => (
+            "fa-comment-o",
+            "bg-sky-600",
+            "commented on issue".to_string(),
+        ),
+        "bugnote_updated" => (
+            "fa-pencil",
+            "bg-sky-600",
+            "edited a note on issue".to_string(),
+        ),
+        "bugnote_view_state" => (
+            "fa-eye-slash",
+            "bg-slate-600",
+            "updated note visibility on issue".to_string(),
+        ),
+        "status" => {
+            let old_code = ev.old_value.trim().parse::<i32>().unwrap_or(0);
+            let new_code = ev.new_value.trim().parse::<i32>().unwrap_or(0);
+            if old_code < 90 && new_code >= 90 {
+                ("fa-power-off", "bg-gray-600", "closed issue".to_string())
+            } else if old_code < 80 && new_code >= 80 {
+                (
+                    "fa-thumbs-o-up",
+                    "bg-green-600",
+                    "resolved issue".to_string(),
+                )
+            } else if old_code >= 80 && new_code < 80 {
+                ("fa-refresh", "bg-amber-600", "reopened issue".to_string())
+            } else {
+                (
+                    "fa-exchange",
+                    "bg-blue-600",
+                    format!(
+                        "set status to {} on issue",
+                        html_escape(status_label(new_code))
+                    ),
+                )
+            }
+        }
+        "handler_id" => {
+            let new_uid = ev.new_value.trim().parse::<i64>().unwrap_or(0);
+            if new_uid > 0 {
+                let target = users_map
+                    .get(&new_uid)
+                    .cloned()
+                    .unwrap_or_else(|| format!("user#{}", new_uid));
+                (
+                    "fa-user",
+                    "bg-indigo-600",
+                    format!("assigned to {} on issue", html_escape(&target)),
+                )
+            } else {
+                ("fa-user", "bg-slate-500", "unassigned issue".to_string())
+            }
+        }
+        "file_added" => (
+            "fa-paperclip",
+            "bg-teal-600",
+            format!("attached {} to issue", html_escape(&ev.new_value)),
+        ),
+        "file_deleted" => (
+            "fa-trash-o",
+            "bg-red-600",
+            format!("removed {} from issue", html_escape(&ev.old_value)),
+        ),
+        "tag_attached" => (
+            "fa-tag",
+            "bg-purple-600",
+            format!("tagged {} on issue", html_escape(&ev.new_value)),
+        ),
+        "tag_detached" => (
+            "fa-tag",
+            "bg-slate-500",
+            format!("untagged {} on issue", html_escape(&ev.old_value)),
+        ),
+        "monitor_added" => (
+            "fa-eye",
+            "bg-cyan-600",
+            "added monitor on issue".to_string(),
+        ),
+        "monitor_removed" => (
+            "fa-eye-slash",
+            "bg-slate-500",
+            "removed monitor on issue".to_string(),
+        ),
+        "project_id" => ("fa-arrows", "bg-amber-600", "moved issue".to_string()),
+        "created_from" | "cloned_to" => ("fa-copy", "bg-blue-600", "cloned issue".to_string()),
+        other if !other.is_empty() => (
+            "fa-edit",
+            "bg-blue-500",
+            format!("updated {} on issue", html_escape(other)),
+        ),
+        _ => ("fa-info-circle", "bg-blue-500", "updated issue".to_string()),
+    }
+}
+
+pub fn render_timeline_widget(
+    events: &[TimelineEvent],
+    users_map: &HashMap<i64, String>,
+) -> String {
+    let body_html = if events.is_empty() {
+        r#"<div class="widget-main"><p class="text-xs text-gray-500 text-center py-6 m-0">No recent activity found.</p></div>"#.to_string()
+    } else {
+        let mut items = String::new();
+        for ev in events {
+            let (icon, bg_cls, action_desc) = describe_timeline_event(ev, users_map);
+            let resolved_cls = if ev.bug_status >= 80 {
+                " issue-link-resolved"
+            } else {
+                ""
+            };
+            items.push_str(&format!(
+                r#"<div class="profile-activity flex items-start gap-2.5 px-3 py-2.5 text-xs">
+                    <span class="thumbicon {} text-white shrink-0"><i class="fa {}" aria-hidden="true"></i></span>
+                    <div class="min-w-0 flex-1">
+                        <div>
+                            <strong>{}</strong> {} <a href="/view_bug_page/{}" class="font-bold{}">{:07}</a>
+                        </div>
+                        <div class="text-gray-600 truncate mt-0.5" title="{}">{}</div>
+                        <div class="text-[11px] text-gray-400 mt-0.5">
+                            <i class="fa fa-clock-o" aria-hidden="true"></i> {}
+                        </div>
+                    </div>
+                </div>"#,
+                bg_cls,
+                icon,
+                html_escape(&ev.username),
+                action_desc,
+                ev.bug_id,
+                resolved_cls,
+                ev.bug_id,
+                html_escape(&ev.bug_summary),
+                html_escape(&ev.bug_summary),
+                format_timestamp(ev.date_modified)
+            ));
+        }
+        format!(
+            r#"<div class="widget-main !p-0"><div class="profile-feed divide-y divide-gray-200">{}</div></div>"#,
+            items
+        )
+    };
+
+    format!(
+        r#"<div id="timeline" class="widget-box widget-color-blue2 !mb-0" data-widget-id="my_view_timeline">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="fa fa-clock-o" aria-hidden="true"></i> Timeline
+                </h4>
+                <div class="widget-toolbar">
+                    <button type="button" data-action="collapse" aria-expanded="true" title="Toggle Timeline">
+                        <i class="fa fa-chevron-up" aria-hidden="true"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="widget-body !p-0">
+                {}
+            </div>
+        </div>"#,
+        body_html
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn render_my_view_page(
     ctx: &AuthContext,
     assigned_to_me: &[Bug],
@@ -289,49 +631,91 @@ pub fn render_my_view_page(
     resolved: &[Bug],
     recently_modified: &[Bug],
     monitored_by_me: &[Bug],
+    meta: &MyViewMeta,
 ) -> Html<String> {
+    let assigned_link = format!(
+        "/view_all_bug_page?handler_id={}&hide_status=80",
+        ctx.user.id
+    );
+    let reported_link = format!("/view_all_bug_page?reporter_id={}", ctx.user.id);
+    let monitored_link = format!("/view_all_bug_page?monitored_by={}", ctx.user.id);
+
     let content = format!(
-        r#"<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); gap:16px;">
-            {}
-            {}
-            {}
-            {}
-            {}
-            {}
+        r#"<div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+            <div class="lg:col-span-7 space-y-4">
+                {}
+                {}
+                {}
+                {}
+                {}
+                {}
+            </div>
+            <div class="lg:col-span-5">
+                {}
+            </div>
         </div>
         {}"#,
-        render_my_view_box(
+        render_my_view_box_with_meta(
             "Assigned to Me (Unresolved)",
-            &format!(
-                "/view_all_bug_page?handler_id={}&hide_status=80",
-                ctx.user.id
-            ),
-            assigned_to_me
+            &assigned_link,
+            assigned_to_me,
+            "my_view_assigned",
+            "fa-user",
+            meta
         ),
-        render_my_view_box(
+        render_my_view_box_with_meta(
             "Unassigned",
             "/view_all_bug_page?handler_id=-1&hide_status=80",
-            unassigned
+            unassigned,
+            "my_view_unassigned",
+            "fa-inbox",
+            meta
         ),
-        render_my_view_box(
+        render_my_view_box_with_meta(
             "Reported by Me",
-            &format!("/view_all_bug_page?reporter_id={}", ctx.user.id),
-            reported_by_me
+            &reported_link,
+            reported_by_me,
+            "my_view_reported",
+            "fa-bug",
+            meta
         ),
-        render_my_view_box("Resolved", "/view_all_bug_page?status=80", resolved),
-        render_my_view_box("Recently Modified", "/view_all_bug_page", recently_modified),
-        render_my_view_box(
+        render_my_view_box_with_meta(
+            "Resolved",
+            "/view_all_bug_page?status=80",
+            resolved,
+            "my_view_resolved",
+            "fa-check-square-o",
+            meta
+        ),
+        render_my_view_box_with_meta(
+            "Recently Modified",
+            "/view_all_bug_page",
+            recently_modified,
+            "my_view_recent",
+            "fa-history",
+            meta
+        ),
+        render_my_view_box_with_meta(
             "Monitored by Me",
-            &format!("/view_all_bug_page?monitored_by={}", ctx.user.id),
-            monitored_by_me
+            &monitored_link,
+            monitored_by_me,
+            "my_view_monitored",
+            "fa-eye",
+            meta
         ),
+        render_timeline_widget(&meta.timeline_events, &meta.users_map),
         render_status_legend()
     );
 
     render_layout("My View", ctx, None, &content)
 }
 
-fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String {
+fn render_sortable_th_with_title(
+    q: &ListBugsQuery,
+    sort_key: &str,
+    label: &str,
+    title: Option<&str>,
+) -> String {
     let current_sort = q.sort.as_deref().unwrap_or("last_updated");
     let current_dir = q.dir.as_deref().unwrap_or("desc");
     let is_active = current_sort == sort_key;
@@ -346,11 +730,11 @@ fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String 
         "desc"
     };
 
-    let arrow = if is_active {
+    let caret_icon = if is_active {
         if current_dir.eq_ignore_ascii_case("asc") {
-            " &#9650;"
+            r#" <i class="fa fa-caret-up text-blue-600" aria-hidden="true"></i>"#
         } else {
-            " &#9660;"
+            r#" <i class="fa fa-caret-down text-blue-600" aria-hidden="true"></i>"#
         }
     } else {
         ""
@@ -360,11 +744,61 @@ fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String 
     target_q.sort = Some(sort_key.to_string());
     target_q.dir = Some(next_dir.to_string());
     let url = build_view_all_bug_page_url(&target_q, 1);
+    let title_attr = title
+        .map(|t| format!(r#" title="{}""#, html_escape(t)))
+        .unwrap_or_default();
 
     format!(
-        r#"<th><a href="{}" style="color:inherit; text-decoration:none;">{}{}</a></th>"#,
-        url, label, arrow
+        r#"<th class="whitespace-nowrap"{}><a href="{}" class="inline-flex items-center gap-1 text-inherit no-underline hover:underline">{}{}</a></th>"#,
+        title_attr, url, label, caret_icon
     )
+}
+
+fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String {
+    render_sortable_th_with_title(q, sort_key, label, None)
+}
+
+fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
+    let mut count = 0;
+    if filter
+        .search
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        count += 1;
+    }
+    if filter.status.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if filter.hide_status.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if filter.priority.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if filter.severity.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if filter.category_id.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if filter.reporter_id.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if filter.handler_id.unwrap_or(0) != 0 {
+        count += 1;
+    }
+    if filter.tag_id.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if filter.monitored_by.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    if query.filter_id.unwrap_or(0) > 0 {
+        count += 1;
+    }
+    count
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -386,13 +820,18 @@ pub fn render_view_all_bug_page(
     flash_msg: Option<&str>,
     flash_err: Option<&str>,
     query: &ListBugsQuery,
+    meta: &ViewIssuesMeta,
 ) -> Html<String> {
     let offset = (page - 1) * per_page;
+    let show_project_col = ctx.active_project_id == 0;
+    let col_count = if show_project_col { 12 } else { 11 };
+
     let mut rows_html = String::new();
     if bugs.is_empty() {
-        rows_html.push_str(
-            r#"<tr><td colspan="9" style="text-align:center; padding:16px;">No issues found.</td></tr>"#,
-        );
+        rows_html.push_str(&format!(
+            r#"<tr><td colspan="{}" class="text-center py-4 text-gray-500">No issues found.</td></tr>"#,
+            col_count
+        ));
     } else {
         for (idx, b) in bugs.iter().enumerate() {
             let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
@@ -412,6 +851,71 @@ pub fn render_view_all_bug_page(
             } else {
                 String::new()
             };
+
+            let edit_cell = if meta.editable_bug_ids.contains(&b.id) {
+                format!(
+                    r#"<a href="/update_bug_page/{}" class="text-gray-600 hover:text-blue-600" title="Edit"><i class="fa fa-pencil" aria-hidden="true"></i></a>"#,
+                    b.id
+                )
+            } else {
+                "&nbsp;".to_string()
+            };
+
+            let priority_icon = render_priority_icon(b.priority);
+            let resolved_cls = if b.status >= 80 {
+                " issue-link-resolved"
+            } else {
+                ""
+            };
+            let sticky_pin = if b.sticky == 1 {
+                r#" <i class="fa fa-thumb-tack text-amber-600" title="Sticky" aria-hidden="true"></i>"#
+            } else {
+                ""
+            };
+
+            let note_cnt = meta.note_counts.get(&b.id).copied().unwrap_or(0);
+            let note_cell = if note_cnt > 0 {
+                format!(
+                    r#"<a href="/view_bug_page/{}#bugnotes" class="font-semibold text-blue-700 hover:underline" title="{} note(s)">{}</a>"#,
+                    b.id, note_cnt, note_cnt
+                )
+            } else {
+                "&nbsp;".to_string()
+            };
+
+            let file_cnt = meta.file_counts.get(&b.id).copied().unwrap_or(0);
+            let file_cell = if file_cnt > 0 {
+                format!(
+                    r#"<a href="/view_bug_page/{}#attachments" class="inline-flex items-center gap-0.5 text-blue-700 hover:underline" title="{} attachment(s)"><i class="fa fa-paperclip text-gray-500" aria-hidden="true"></i>{}</a>"#,
+                    b.id, file_cnt, file_cnt
+                )
+            } else {
+                "&nbsp;".to_string()
+            };
+
+            let proj_cell = if show_project_col {
+                format!(
+                    r#"<td class="whitespace-nowrap">{}</td>"#,
+                    html_escape(&proj_name)
+                )
+            } else {
+                String::new()
+            };
+
+            let sev_str = html_escape(severity_label(b.severity));
+            let severity_cell = if b.severity >= 60 {
+                format!(r#"<span class="font-bold text-red-700">{}</span>"#, sev_str)
+            } else {
+                sev_str
+            };
+
+            let status_square = render_status_square(b.status);
+            let handler_suffix = if !handler_name.is_empty() {
+                format!(" ({})", html_escape(&handler_name))
+            } else {
+                String::new()
+            };
+
             let priv_badge = if b.view_state == 50 {
                 r#" <span class="badge badge-warning">private</span>"#
             } else {
@@ -431,43 +935,45 @@ pub fn render_view_all_bug_page(
             } else {
                 String::new()
             };
-            let status_badge = render_status_badge(b.status, status_label(b.status));
 
             rows_html.push_str(&format!(
                 r#"<tr class="{}">
-                    <td style="text-align:center;"><input type="checkbox" name="bug_arr" value="{}"></td>
-                    <td style="border-left:5px solid {};"><a href="/view_bug_page/{}" style="font-weight:bold;">{:07}</a>{}</td>
-                    <td>{}</td>
-                    <td>{}</td>
-                    <td>{}</td>
-                    <td>{}</td>
-                    <td>{}{}{}</td>
-                    <td><a href="/view_bug_page/{}">{}</a>{}{}{}</td>
-                    <td style="white-space:nowrap;">{}</td>
+                    <td class="text-center"><input type="checkbox" name="bug_arr" value="{}"></td>
+                    <td class="text-center">{}</td>
+                    <td class="text-center">{}</td>
+                    <td class="whitespace-nowrap"><a href="/view_bug_page/{}" class="font-bold{}">{:07}</a>{}</td>
+                    <td class="text-center">{}</td>
+                    <td class="text-center">{}</td>
+                    {}
+                    <td class="whitespace-nowrap">{}</td>
+                    <td class="whitespace-nowrap">{}</td>
+                    <td class="whitespace-nowrap"><span class="inline-flex items-center gap-1.5">{}<span>{}{}</span></span></td>
+                    <td class="whitespace-nowrap">{}</td>
+                    <td class="min-w-[200px]"><a href="/view_bug_page/{}" class="font-medium hover:underline{}">{}</a>{}{}{}</td>
                 </tr>"#,
                 row_class,
                 b.id,
-                status_color(b.status),
+                edit_cell,
+                priority_icon,
                 b.id,
+                resolved_cls,
                 b.id,
-                sticky_badge,
-                html_escape(&proj_name),
+                sticky_pin,
+                note_cell,
+                file_cell,
+                proj_cell,
                 html_escape(&cat_name),
-                html_escape(severity_label(b.severity)),
-                html_escape(priority_label(b.priority)),
-                status_badge,
-                if !handler_name.is_empty() { " (" } else { "" },
-                if !handler_name.is_empty() {
-                    format!("{})", html_escape(&handler_name))
-                } else {
-                    String::new()
-                },
+                severity_cell,
+                status_square,
+                html_escape(status_label(b.status)),
+                handler_suffix,
+                format_timestamp(b.last_updated),
                 b.id,
+                resolved_cls,
                 html_escape(&b.summary),
                 priv_badge,
                 sticky_badge,
-                jira_badge,
-                format_timestamp(b.last_updated)
+                jira_badge
             ));
         }
     }
@@ -478,7 +984,7 @@ pub fn render_view_all_bug_page(
 
     let prev_link = if page > 1 {
         format!(
-            r#"<a class="btn btn-secondary btn-sm" href="{}">« Prev</a>"#,
+            r#"<a class="btn btn-white btn-round btn-sm" href="{}">« Prev</a>"#,
             build_view_all_bug_page_url(query, page - 1)
         )
     } else {
@@ -486,7 +992,7 @@ pub fn render_view_all_bug_page(
     };
     let next_link = if (offset as usize) + bugs.len() < total {
         format!(
-            r#"<a class="btn btn-secondary btn-sm" href="{}">Next »</a>"#,
+            r#"<a class="btn btn-white btn-round btn-sm" href="{}">Next »</a>"#,
             build_view_all_bug_page_url(query, page + 1)
         )
     } else {
@@ -643,30 +1149,55 @@ pub fn render_view_all_bug_page(
     }
 
     let mut saved_filters_html = String::new();
+    let mut saved_filter_select_opts =
+        String::from(r#"<option value="0">-- Load Saved Filter --</option>"#);
     for sf in saved_filters {
+        let sf_sel = if query.filter_id == Some(sf.id) {
+            "selected"
+        } else {
+            ""
+        };
+        saved_filter_select_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            sf.id,
+            sf_sel,
+            html_escape(&sf.name)
+        ));
         let delete_btn = if sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
             format!(
-                r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Delete filter?');" title="Delete filter">Delete</button></form>"#,
+                r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" data-confirm="Delete filter?" title="Delete filter">Delete</button></form>"#,
                 sf.id
             )
         } else {
             String::new()
         };
         saved_filters_html.push_str(&format!(
-            r#"<span class="saved-filter-item" style="display:inline-flex; align-items:center; gap:2px; margin-right:8px;"><a class="btn btn-secondary btn-sm" href="/view_all_bug_page?filter_id={}">{}</a>{}</span>"#,
+            r#"<span class="saved-filter-item inline-flex items-center gap-1 mr-2 mb-1"><a class="btn btn-white btn-round btn-sm" href="/view_all_bug_page?filter_id={}">{}</a>{}</span>"#,
             sf.id,
             html_escape(&sf.name),
             delete_btn
         ));
     }
+    let saved_filters_section = if saved_filters.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="flex flex-wrap items-center gap-2 mb-2">
+                <label class="text-xs font-semibold text-gray-700" for="saved_filter_select">Saved Filters:</label>
+                <select id="saved_filter_select" class="!w-auto text-xs">{}</select>
+                <div class="flex flex-wrap items-center">{}</div>
+            </div>"#,
+            saved_filter_select_opts, saved_filters_html
+        )
+    };
 
     let active_per_page = clamp_per_page(query.per_page.or(filter.per_page));
     let mut per_page_html =
-        String::from(r#"<span style="font-size:12px; margin-right:6px;">Per page:</span>"#);
+        String::from(r#"<span class="text-xs font-medium text-gray-700 mr-1.5">Per page:</span>"#);
     for &cnt in &[10, 25, 50, 100] {
         if cnt == active_per_page {
             per_page_html.push_str(&format!(
-                r#"<span class="btn btn-secondary btn-sm" style="font-weight:bold; background:#e0e0e0; pointer-events:none;">{}</span> "#,
+                r#"<span class="btn btn-primary btn-sm font-bold pointer-events-none">{}</span> "#,
                 cnt
             ));
         } else {
@@ -674,7 +1205,7 @@ pub fn render_view_all_bug_page(
             pp_q.per_page = Some(cnt);
             let url = build_view_all_bug_page_url(&pp_q, 1);
             per_page_html.push_str(&format!(
-                r#"<a class="btn btn-secondary btn-sm" href="{}">{}</a> "#,
+                r#"<a class="btn btn-white btn-round btn-sm" href="{}">{}</a> "#,
                 url, cnt
             ));
         }
@@ -719,35 +1250,129 @@ pub fn render_view_all_bug_page(
         .map(|(_, qs)| qs)
         .unwrap_or("");
 
+    let th_priority = render_sortable_th_with_title(query, "priority", "P", Some("Priority"));
     let th_id = render_sortable_th(query, "id", "ID");
-    let th_project = "<th>Project</th>";
-    let th_category = "<th>Category</th>";
+    let th_project = if show_project_col {
+        r#"<th class="whitespace-nowrap">Project</th>"#
+    } else {
+        ""
+    };
+    let th_category = r#"<th class="whitespace-nowrap">Category</th>"#;
     let th_severity = render_sortable_th(query, "severity", "Severity");
-    let th_priority = render_sortable_th(query, "priority", "Priority");
     let th_status = render_sortable_th(query, "status", "Status");
-    let th_summary = render_sortable_th(query, "summary", "Summary");
     let th_updated = render_sortable_th(query, "last_updated", "Updated");
+    let th_summary = render_sortable_th(query, "summary", "Summary");
 
     let search_val = filter.search.as_deref().unwrap_or("");
+    let active_filter_count = count_active_filters(filter, query);
+    let active_filter_badge = if active_filter_count > 0 {
+        format!(
+            r#"<span class="badge" style="background:#f89406; color:#ffffff;">Active ({})</span>"#,
+            active_filter_count
+        )
+    } else {
+        String::new()
+    };
+
+    let mut quick_hidden_inputs = String::new();
+    if !cur_sort.is_empty() {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="sort" value="{}">"#,
+            html_escape(cur_sort)
+        ));
+    }
+    if !cur_dir.is_empty() {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="dir" value="{}">"#,
+            html_escape(cur_dir)
+        ));
+    }
+    quick_hidden_inputs.push_str(&format!(
+        r#"<input type="hidden" name="per_page" value="{}">"#,
+        cur_per_page_str
+    ));
+    if let Some(v) = filter.reporter_id.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="reporter_id" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.handler_id.filter(|&x| x != 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="handler_id" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.monitored_by.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="monitored_by" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.category_id.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="category_id" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.severity.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="severity" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.priority.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="priority" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.status.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="status" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.hide_status.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="hide_status" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.tag_id.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="tag_id" value="{}">"#,
+            v
+        ));
+    }
+
     let save_filter_form = if ctx.user.access_level >= 25 {
         format!(
-            r#"<form method="POST" action="/filter_save" style="display:flex; gap:6px; align-items:center; margin-top:8px;">
+            r#"<form method="POST" action="/filter_save" class="flex flex-wrap gap-2 items-center mt-2">
                 <input type="hidden" name="search" value="{}">
                 <input type="hidden" name="status" value="{}">
+                <input type="hidden" name="hide_status" value="{}">
                 <input type="hidden" name="priority" value="{}">
                 <input type="hidden" name="severity" value="{}">
+                <input type="hidden" name="category_id" value="{}">
+                <input type="hidden" name="reporter_id" value="{}">
+                <input type="hidden" name="handler_id" value="{}">
                 <input type="hidden" name="tag_id" value="{}">
                 <input type="hidden" name="sort" value="{}">
                 <input type="hidden" name="dir" value="{}">
                 <input type="hidden" name="per_page" value="{}">
-                <input type="text" name="name" placeholder="Saved filter name" style="max-width:180px;" required>
-                <label><input type="checkbox" name="is_public" value="1"> Public</label>
-                <button type="submit" class="btn btn-secondary btn-sm">Save Current Filter</button>
+                <input type="text" name="name" placeholder="Saved filter name" class="!max-w-[180px]" required>
+                <label class="text-xs inline-flex items-center gap-1"><input type="checkbox" name="is_public" value="1"> Public</label>
+                <button type="submit" class="btn btn-primary btn-sm">Save Current Filter</button>
             </form>"#,
             html_escape(search_val),
             filter.status.unwrap_or(0),
+            filter.hide_status.unwrap_or(0),
             filter.priority.unwrap_or(0),
             filter.severity.unwrap_or(0),
+            filter.category_id.unwrap_or(0),
+            filter.reporter_id.unwrap_or(0),
+            filter.handler_id.unwrap_or(0),
             filter.tag_id.unwrap_or(0),
             html_escape(cur_sort),
             html_escape(cur_dir),
@@ -757,19 +1382,42 @@ pub fn render_view_all_bug_page(
         String::new()
     };
 
+    let range_badge = if bugs.is_empty() {
+        format!("0 / {}", total)
+    } else {
+        let start = (offset as usize) + 1;
+        let end = (offset as usize) + bugs.len();
+        format!("{} - {} / {}", start, end, total)
+    };
+
     let content = format!(
         r#"{}
-        <div class="panel">
-            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
-                <span>Filters</span>
-                <a class="btn btn-secondary btn-sm" href="/view_all_bug_page">Reset Filter</a>
+        <noscript><style>#filter.collapsed > .widget-body {{ display: block; }}</style></noscript>
+        <div id="filter" class="widget-box widget-color-blue2 collapsed" data-widget-id="view_issues_filter">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <button type="button" data-action="collapse" aria-expanded="false" title="Toggle Filters" class="bg-transparent border-0 text-white cursor-pointer p-0 mr-1">
+                        <i class="fa fa-chevron-down" aria-hidden="true"></i>
+                    </button>
+                    <i class="fa fa-filter" aria-hidden="true"></i> Filters {}
+                </h4>
+                <div class="widget-toolbar flex-wrap">
+                    <form method="GET" action="/view_all_bug_page" class="inline-flex items-center gap-1.5 m-0">
+                        {}
+                        <input type="text" name="q" value="{}" placeholder="Search..." aria-label="Quick search" class="!w-36 sm:!w-44 !py-1 !px-2 text-xs text-gray-800 bg-white">
+                        <button type="submit" class="btn btn-white btn-round btn-sm">Apply Filter</button>
+                    </form>
+                    <a class="btn btn-white btn-round btn-sm" href="/view_all_bug_page" title="Reset Filter">
+                        <i class="fa fa-times" aria-hidden="true"></i> Reset
+                    </a>
+                </div>
             </div>
-            <div class="panel-body">
+            <div class="widget-body">
                 <form method="GET" action="/view_all_bug_page">
                     <input type="hidden" name="sort" value="{}">
                     <input type="hidden" name="dir" value="{}">
                     <input type="hidden" name="per_page" value="{}">
-                    <div class="filter-grid">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3 pb-3 border-b border-gray-200">
                         <div class="filter-cell">
                             <span class="filter-label">Reporter</span>
                             <select name="reporter_id">{}</select>
@@ -807,214 +1455,201 @@ pub fn render_view_all_bug_page(
                             <select name="tag_id">{}</select>
                         </div>
                     </div>
-                    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-                        <label style="display:inline-flex; align-items:center; gap:6px; font-weight:bold; font-size:12px;">Search:
-                            <input type="text" name="q" value="{}" placeholder="Search summary, description, id..." style="width:240px;">
+                    <div class="flex flex-wrap gap-2 items-center">
+                        <label class="inline-flex items-center gap-1.5 font-semibold text-xs text-gray-700">Search:
+                            <input type="text" name="q" value="{}" placeholder="Search summary, description, id..." class="!w-60">
                         </label>
-                        <button type="submit" class="btn btn-sm">Apply Filter</button>
+                        <button type="submit" class="btn btn-primary btn-sm">Apply Filter</button>
+                        <a class="btn btn-white btn-round btn-sm" href="/view_all_bug_page">Reset Filter</a>
                     </div>
                 </form>
-                <div style="margin-top:8px;">
+                <div class="mt-3 pt-2 border-t border-gray-200">
                     {}
                     {}
                 </div>
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
-                <span>Viewing Issues ({})</span>
-                <div style="display:flex; gap:8px;">
-                    <a class="btn btn-secondary btn-sm" href="{}">CSV Export</a>
-                    <a class="btn btn-sm" href="/bug_report_page">Report Issue</a>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="fa fa-columns" aria-hidden="true"></i>
+                    Viewing Issues ({})
+                    <span class="badge" style="background:rgba(0,0,0,0.22); color:#ffffff;">{}</span>
+                </h4>
+                <div class="widget-toolbar">
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-download" aria-hidden="true"></i> CSV Export</a>
+                    <a class="btn btn-success btn-sm" href="/bug_report_page"><i class="fa fa-edit" aria-hidden="true"></i> Report Issue</a>
                 </div>
             </div>
-            <div class="panel-body">
-                <form method="POST" action="/bug_actiongroup" onsubmit="return handleBulkSubmit();">
+            <div class="widget-body !p-0">
+                <form id="bulk_action_form" method="POST" action="/bug_actiongroup">
                     <input type="hidden" name="return_query" value="{}">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th style="width:28px; text-align:center;"><input type="checkbox" id="select_all_bugs" onclick="var c=document.querySelectorAll('input[name=\'bug_arr\']');for(var i=0;i<c.length;i++)c[i].checked=this.checked;" title="Select All"></th>
-                                {}
-                                {}
-                                {}
-                                {}
-                                {}
-                                {}
-                                {}
-                                {}
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {}
-                        </tbody>
-                    </table>
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
-                        <div style="display:flex; align-items:center;">
+                    <div class="widget-toolbox flex flex-wrap items-center justify-between gap-2">
+                        <div class="flex flex-wrap items-center gap-1">
                             {}
                         </div>
-                        <div style="display:flex; gap:8px;">
+                        <div class="flex items-center gap-1.5">
                             {} {}
                         </div>
                     </div>
-                    <div class="bulk-action-bar" style="margin-top:12px; padding:10px 12px; background:#f5f5f5; border:1px solid #ddd; border-radius:3px; display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
-                        <span style="font-weight:bold; font-size:12px;">Action:</span>
-                        <select name="action" id="bulk_action_select" onchange="updateBulkActionInputs(this.value)" style="width:auto; font-weight:600;">
-                            <option value="" selected disabled>-- Select Action --</option>
-                            <option value="MOVE">Move</option>
-                            <option value="COPY">Copy</option>
-                            <option value="ASSIGN">Assign</option>
-                            <option value="CLOSE">Close</option>
-                            <option value="DELETE">Delete</option>
-                            <option value="RESOLVE">Resolve</option>
-                            <option value="UP_STATUS">Update Status</option>
-                            <option value="UP_PRIOR">Update Priority</option>
-                            <option value="UP_SEV">Update Severity</option>
-                            <option value="UP_CATEGORY">Update Category</option>
-                            <option value="UP_TARGET_VERSION">Update Target Version</option>
-                            <option value="UP_DUE_DATE">Update Due Date</option>
-                            <option value="VIEW_STATUS">Update View Status</option>
-                            <option value="SET_STICKY">Set Sticky</option>
-                            <option value="ADD_NOTE">Add Note</option>
-                            <option value="ATTACH_TAGS">Attach Tags</option>
-                        </select>
-                        <div class="bulk-input-group" data-actions="MOVE,COPY" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Project:</span>
-                            <select name="target_project_id" style="width:auto;">{}</select>
+                    <div class="widget-main !p-0">
+                        <div class="table-responsive">
+                            <table id="buglist" class="data-table !mb-0 !border-0">
+                                <thead>
+                                    <tr>
+                                        <th class="w-7 text-center"><input type="checkbox" id="select_all_bugs" title="Select All"></th>
+                                        <th class="w-7 text-center" title="Edit">&nbsp;</th>
+                                        {}
+                                        {}
+                                        <th class="w-8 text-center" title="Notes"><i class="fa fa-comment-o" aria-hidden="true"></i></th>
+                                        <th class="w-8 text-center" title="Attachments"><i class="fa fa-paperclip" aria-hidden="true"></i></th>
+                                        {}
+                                        {}
+                                        {}
+                                        {}
+                                        {}
+                                        {}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {}
+                                </tbody>
+                            </table>
                         </div>
-                        <div class="bulk-input-group" data-actions="ASSIGN" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Assign To:</span>
-                            <select name="handler_id" style="width:auto;">{}</select>
-                        </div>
-                        <div class="bulk-input-group" data-actions="UP_STATUS" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Status:</span>
-                            <select name="status" style="width:auto;">
-                                <option value="10">new</option>
-                                <option value="20">feedback</option>
-                                <option value="30">acknowledged</option>
-                                <option value="40">confirmed</option>
-                                <option value="50">assigned</option>
-                                <option value="80">resolved</option>
-                                <option value="90">closed</option>
+                    </div>
+                    <div class="widget-toolbox flex flex-wrap items-center justify-between gap-3">
+                        <div class="bulk-action-bar flex flex-wrap gap-2 items-center">
+                            <span class="font-bold text-xs text-gray-700">Action:</span>
+                            <select name="action" id="bulk_action_select" class="!w-auto font-semibold text-xs">
+                                <option value="" selected disabled>-- Select Action --</option>
+                                <option value="MOVE">Move</option>
+                                <option value="COPY">Copy</option>
+                                <option value="ASSIGN">Assign</option>
+                                <option value="CLOSE">Close</option>
+                                <option value="DELETE">Delete</option>
+                                <option value="RESOLVE">Resolve</option>
+                                <option value="UP_STATUS">Update Status</option>
+                                <option value="UP_PRIOR">Update Priority</option>
+                                <option value="UP_SEV">Update Severity</option>
+                                <option value="UP_CATEGORY">Update Category</option>
+                                <option value="UP_TARGET_VERSION">Update Target Version</option>
+                                <option value="UP_DUE_DATE">Update Due Date</option>
+                                <option value="VIEW_STATUS">Update View Status</option>
+                                <option value="SET_STICKY">Set Sticky</option>
+                                <option value="ADD_NOTE">Add Note</option>
+                                <option value="ATTACH_TAGS">Attach Tags</option>
                             </select>
+                            <div class="bulk-input-group" data-actions="MOVE,COPY" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Project:</span>
+                                <select name="target_project_id" class="!w-auto">{}</select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="ASSIGN" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Assign To:</span>
+                                <select name="handler_id" class="!w-auto">{}</select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="UP_STATUS" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Status:</span>
+                                <select name="status" class="!w-auto">
+                                    <option value="10">new</option>
+                                    <option value="20">feedback</option>
+                                    <option value="30">acknowledged</option>
+                                    <option value="40">confirmed</option>
+                                    <option value="50">assigned</option>
+                                    <option value="80">resolved</option>
+                                    <option value="90">closed</option>
+                                </select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="RESOLVE,UP_STATUS" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Resolution:</span>
+                                <select name="resolution" class="!w-auto">
+                                    <option value="20" selected>fixed</option>
+                                    <option value="10">open</option>
+                                    <option value="30">reopened</option>
+                                    <option value="40">unable to reproduce</option>
+                                    <option value="50">not fixable</option>
+                                    <option value="60">duplicate</option>
+                                    <option value="70">not a bug</option>
+                                    <option value="80">suspended</option>
+                                    <option value="90">won't fix</option>
+                                </select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="UP_PRIOR" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Priority:</span>
+                                <select name="priority" class="!w-auto">
+                                    <option value="10">none</option>
+                                    <option value="20">low</option>
+                                    <option value="30" selected>normal</option>
+                                    <option value="40">high</option>
+                                    <option value="50">urgent</option>
+                                    <option value="60">immediate</option>
+                                </select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="UP_SEV" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Severity:</span>
+                                <select name="severity" class="!w-auto">
+                                    <option value="10">feature</option>
+                                    <option value="20">trivial</option>
+                                    <option value="30">text</option>
+                                    <option value="40">tweak</option>
+                                    <option value="50" selected>minor</option>
+                                    <option value="60">major</option>
+                                    <option value="70">crash</option>
+                                    <option value="80">block</option>
+                                </select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="UP_CATEGORY" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Category:</span>
+                                <select name="category_id" class="!w-auto">{}</select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="UP_TARGET_VERSION" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Target Version:</span>
+                                <input type="text" name="target_version" placeholder="Version string" class="!w-[140px]">
+                            </div>
+                            <div class="bulk-input-group" data-actions="UP_DUE_DATE" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Due Date:</span>
+                                <input type="date" name="due_date" class="!w-[140px]">
+                            </div>
+                            <div class="bulk-input-group" data-actions="VIEW_STATUS" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">View Status:</span>
+                                <select name="view_state" class="!w-auto">
+                                    <option value="10">public</option>
+                                    <option value="50">private</option>
+                                </select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="SET_STICKY" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Sticky:</span>
+                                <select name="sticky" class="!w-auto">
+                                    <option value="0">no</option>
+                                    <option value="1">yes</option>
+                                </select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="ADD_NOTE" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Note:</span>
+                                <input type="text" name="bugnote_text" placeholder="Enter note text..." class="!w-[200px]">
+                                <select name="note_view_state" class="!w-auto">
+                                    <option value="10">public</option>
+                                    <option value="50">private</option>
+                                </select>
+                            </div>
+                            <div class="bulk-input-group" data-actions="ATTACH_TAGS" style="display:none; align-items:center; gap:6px;">
+                                <span class="text-xs">Tags:</span>
+                                <input type="text" name="tag_string" placeholder="Comma-separated tags" class="!w-[180px]">
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm">Apply</button>
                         </div>
-                        <div class="bulk-input-group" data-actions="RESOLVE,UP_STATUS" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Resolution:</span>
-                            <select name="resolution" style="width:auto;">
-                                <option value="20" selected>fixed</option>
-                                <option value="10">open</option>
-                                <option value="30">reopened</option>
-                                <option value="40">unable to reproduce</option>
-                                <option value="50">not fixable</option>
-                                <option value="60">duplicate</option>
-                                <option value="70">not a bug</option>
-                                <option value="80">suspended</option>
-                                <option value="90">won't fix</option>
-                            </select>
+                        <div class="flex items-center gap-1.5 ml-auto">
+                            {} {}
                         </div>
-                        <div class="bulk-input-group" data-actions="UP_PRIOR" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Priority:</span>
-                            <select name="priority" style="width:auto;">
-                                <option value="10">none</option>
-                                <option value="20">low</option>
-                                <option value="30" selected>normal</option>
-                                <option value="40">high</option>
-                                <option value="50">urgent</option>
-                                <option value="60">immediate</option>
-                            </select>
-                        </div>
-                        <div class="bulk-input-group" data-actions="UP_SEV" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Severity:</span>
-                            <select name="severity" style="width:auto;">
-                                <option value="10">feature</option>
-                                <option value="20">trivial</option>
-                                <option value="30">text</option>
-                                <option value="40">tweak</option>
-                                <option value="50" selected>minor</option>
-                                <option value="60">major</option>
-                                <option value="70">crash</option>
-                                <option value="80">block</option>
-                            </select>
-                        </div>
-                        <div class="bulk-input-group" data-actions="UP_CATEGORY" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Category:</span>
-                            <select name="category_id" style="width:auto;">{}</select>
-                        </div>
-                        <div class="bulk-input-group" data-actions="UP_TARGET_VERSION" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Target Version:</span>
-                            <input type="text" name="target_version" placeholder="Version string" style="width:140px;">
-                        </div>
-                        <div class="bulk-input-group" data-actions="UP_DUE_DATE" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Due Date:</span>
-                            <input type="date" name="due_date" style="width:140px;">
-                        </div>
-                        <div class="bulk-input-group" data-actions="VIEW_STATUS" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">View Status:</span>
-                            <select name="view_state" style="width:auto;">
-                                <option value="10">public</option>
-                                <option value="50">private</option>
-                            </select>
-                        </div>
-                        <div class="bulk-input-group" data-actions="SET_STICKY" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Sticky:</span>
-                            <select name="sticky" style="width:auto;">
-                                <option value="0">no</option>
-                                <option value="1">yes</option>
-                            </select>
-                        </div>
-                        <div class="bulk-input-group" data-actions="ADD_NOTE" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Note:</span>
-                            <input type="text" name="bugnote_text" placeholder="Enter note text..." style="width:200px;">
-                            <select name="note_view_state" style="width:auto;">
-                                <option value="10">public</option>
-                                <option value="50">private</option>
-                            </select>
-                        </div>
-                        <div class="bulk-input-group" data-actions="ATTACH_TAGS" style="display:none; align-items:center; gap:6px;">
-                            <span style="font-size:12px;">Tags:</span>
-                            <input type="text" name="tag_string" placeholder="Comma-separated tags" style="width:180px;">
-                        </div>
-                        <button type="submit" class="btn btn-primary btn-sm">Apply</button>
                     </div>
                 </form>
-                <script>
-                function updateBulkActionInputs(act) {{
-                    var groups = document.querySelectorAll('.bulk-input-group');
-                    for (var i = 0; i < groups.length; i++) {{
-                        var grp = groups[i];
-                        var acts = grp.getAttribute('data-actions') || '';
-                        if (acts.split(',').indexOf(act) !== -1) {{
-                            grp.style.display = 'inline-flex';
-                        }} else {{
-                            grp.style.display = 'none';
-                        }}
-                    }}
-                }}
-                function handleBulkSubmit() {{
-                    var sel = document.getElementById('bulk_action_select');
-                    if (!sel || !sel.value) {{
-                        alert('Please select an action.');
-                        return false;
-                    }}
-                    var checked = document.querySelectorAll('input[name=\'bug_arr\']:checked');
-                    if (checked.length === 0) {{
-                        alert('Please select at least one issue.');
-                        return false;
-                    }}
-                    if (sel.value === 'DELETE') {{
-                        return confirm('Are you sure you want to permanently delete ' + checked.length + ' selected issue(s)?');
-                    }}
-                    return true;
-                }}
-                if (document.getElementById('bulk_action_select')) {{
-                    updateBulkActionInputs(document.getElementById('bulk_action_select').value);
-                }}
-                </script>
             </div>
         </div>
         {}"#,
         err_banner,
+        active_filter_badge,
+        quick_hidden_inputs,
+        html_escape(search_val),
         html_escape(cur_sort),
         html_escape(cur_dir),
         cur_per_page_str,
@@ -1028,26 +1663,29 @@ pub fn render_view_all_bug_page(
         hide_status_opts,
         tag_opts,
         html_escape(search_val),
-        saved_filters_html,
+        saved_filters_section,
         save_filter_form,
         total,
+        range_badge,
         build_csv_export_url(query),
         html_escape(return_query),
+        per_page_html,
+        prev_link,
+        next_link,
+        th_priority,
         th_id,
         th_project,
         th_category,
         th_severity,
-        th_priority,
         th_status,
-        th_summary,
         th_updated,
+        th_summary,
         rows_html,
-        per_page_html,
-        prev_link,
-        next_link,
         bulk_proj_opts,
         bulk_handler_opts,
         bulk_cat_opts,
+        prev_link,
+        next_link,
         render_status_legend()
     );
 
@@ -1698,7 +2336,7 @@ pub fn render_view_bug_page(
             </div>
         </div>
 
-        <div class="panel">
+        <div id="attachments" class="panel">
             <div class="panel-header">Attached Files</div>
             <div class="panel-body">
                 {}
@@ -1706,7 +2344,7 @@ pub fn render_view_bug_page(
             </div>
         </div>
 
-        <div class="panel">
+        <div id="bugnotes" class="panel">
             <div class="panel-header">Activities / Bugnotes</div>
             <div class="panel-body">
                 {}

@@ -853,7 +853,7 @@
     margin-left: auto;
   }
 
-  .widget-toolbar > a,
+  .widget-toolbar > a:not(.btn),
   .widget-toolbar > button[data-action="collapse"] {
     color: #ffffff;
     background: transparent;
@@ -864,9 +864,14 @@
     line-height: 1;
   }
 
-  .widget-toolbar > a:hover,
+  .widget-toolbar > a:not(.btn):hover,
   .widget-toolbar > button[data-action="collapse"]:hover {
     color: #e6f2fa;
+  }
+
+  .widget-toolbar .widget-menu {
+    display: inline-flex;
+    align-items: center;
   }
 
   /* Fix .panel-header a specificity: never override .btn / .btn-secondary / .btn-white */
@@ -1129,6 +1134,27 @@
     border: 1px solid rgba(0, 0, 0, 0.2);
     vertical-align: middle;
     margin-right: 6px;
+  }
+
+  .fa-status-box {
+    font-size: 1.35em;
+    line-height: 0.85em;
+    vertical-align: -12%;
+    text-shadow: 0 0 1px rgba(0, 0, 0, 0.45);
+  }
+
+  .thumbicon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 9999px;
+    font-size: 13px;
+  }
+
+  .profile-activity:hover {
+    background-color: #f4f9fd;
   }
 
   .status-legend-bar {

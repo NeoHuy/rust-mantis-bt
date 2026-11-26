@@ -542,13 +542,41 @@ async fn test_roadmap_ordering_badges_and_fallback() {
     )
     .unwrap();
 
-    // 3. GET /roadmap_page
-    let res = app
+    // 3. GET /roadmap_page (default: unreleased only)
+    let res_unrel = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/roadmap_page")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_unrel.status(), StatusCode::OK);
+    let html_unrel = String::from_utf8(
+        axum::body::to_bytes(res_unrel.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_unrel.contains("Target Version: v2.0"));
+    assert!(html_unrel.contains("Target Version: v-legacy-target"));
+    assert!(!html_unrel.contains("Target Version: v1.0"));
+    assert!(!html_unrel.contains("Target Version: v0.9"));
+    assert!(html_unrel.contains("/roadmap_page?show_released=1"));
+    assert!(html_unrel.contains("/changelog_page"));
+
+    // 4. GET /roadmap_page?show_released=1
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/roadmap_page?show_released=1")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -987,7 +1015,7 @@ async fn test_roadmap_subproject_versions_rollup_and_private_subproject_isolatio
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/roadmap_page")
+                .uri("/roadmap_page?show_released=1")
                 .header("cookie", &admin_proj_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1034,7 +1062,7 @@ async fn test_roadmap_subproject_versions_rollup_and_private_subproject_isolatio
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/roadmap_page")
+                .uri("/roadmap_page?show_released=1")
                 .header("cookie", &rep_proj_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1182,4 +1210,150 @@ async fn test_roadmap_all_projects_obsolete_scoping_per_project() {
         !html.contains("Alpha issue for obsolete 1.0"),
         "Issue for Project Alpha obsolete 1.0 must be excluded from roadmap"
     );
+}
+
+#[tokio::test]
+async fn test_ui_m4_manage_overview_rbac_and_no_secret_leakage() {
+    let db = Db::open_in_memory().unwrap();
+    db.create_user("mgr1", "Manager", "mgr1@x.com", "pw123", 70, true, false)
+        .unwrap();
+    db.create_user("dev1", "Developer", "dev1@x.com", "pw123", 55, true, false)
+        .unwrap();
+    db.create_user("rep1", "Reporter", "rep1@x.com", "pw123", 25, true, false)
+        .unwrap();
+    db.save_jira_global_config(
+        true,
+        "https://jira.example.com",
+        "bot@example.com",
+        Some("SUPER_SECRET_JIRA_TOKEN_XYZ"),
+        "Bug",
+        "MANTIS",
+    )
+    .unwrap();
+
+    let app = rust_mantis_bt::controllers::build_router(db);
+    let (admin_cookie, _) = get_cookie(&app, "administrator", "root", false).await;
+    let (mgr_cookie, _) = get_cookie(&app, "mgr1", "pw123", false).await;
+    let (dev_cookie, _) = get_cookie(&app, "dev1", "pw123", false).await;
+    let (rep_cookie, _) = get_cookie(&app, "rep1", "pw123", false).await;
+
+    // Admin gets 200 OK with Site Information and zero secrets
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_overview_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Site Information"));
+    assert!(html.contains(env!("CARGO_PKG_VERSION")));
+    assert!(html.contains(r#"class="nav-tabs""#));
+    assert!(html.contains("/manage_overview_page"));
+    assert!(!html.contains("SUPER_SECRET_JIRA_TOKEN_XYZ"));
+
+    // Manager, Developer, Reporter get 403 Forbidden
+    for c in [&mgr_cookie, &dev_cookie, &rep_cookie] {
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/manage_overview_page")
+                    .header("cookie", c)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn test_ui_m4_subproject_dropdown_excludes_ancestors_and_manage_users_prefix_filter() {
+    let db = Db::open_in_memory().unwrap();
+    let grandparent = db.create_project("GrandParent", 10, 10, "", true).unwrap();
+    let parent = db.create_project("ParentProj", 10, 10, "", true).unwrap();
+    let child = db.create_project("ChildProj", 10, 10, "", true).unwrap();
+    let unrelated = db
+        .create_project("UnrelatedProj", 10, 10, "", true)
+        .unwrap();
+    db.add_subproject(grandparent, parent, true).unwrap();
+    db.add_subproject(parent, child, true).unwrap();
+
+    db.create_user("alpha_user", "Alpha", "a@x.com", "pw123", 25, true, false)
+        .unwrap();
+    db.create_user("zulu_user", "Zulu", "z@x.com", "pw123", 25, true, false)
+        .unwrap();
+
+    let app = rust_mantis_bt::controllers::build_router(db);
+    let (admin_cookie, _) = get_cookie(&app, "administrator", "root", false).await;
+
+    // Edit ChildProj: GrandParent, ParentProj, and ChildProj itself must NOT appear in Add Subproject dropdown
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/manage_proj_edit_page/{}", child))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let subproj_select = html
+        .split(r#"name="child_id""#)
+        .nth(1)
+        .and_then(|s| s.split("</select>").next())
+        .expect("child_id select must exist");
+    assert!(!subproj_select.contains(&format!(r#"value="{}""#, grandparent)));
+    assert!(!subproj_select.contains(&format!(r#"value="{}""#, parent)));
+    assert!(!subproj_select.contains(&format!(r#"value="{}""#, child)));
+    assert!(subproj_select.contains(&format!(r#"value="{}""#, unrelated)));
+
+    // Manage Users A-Z prefix filter: ?prefix=Z shows zulu_user, not alpha_user
+    let res_z = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_user_page?prefix=Z")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_z.status(), StatusCode::OK);
+    let html_z = String::from_utf8(
+        axum::body::to_bytes(res_z.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_z.contains("zulu_user"));
+    assert!(!html_z.contains("alpha_user"));
 }

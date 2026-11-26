@@ -4690,3 +4690,37 @@ fn test_project_access_queries_match_effective_access_on_disabled_and_private_pr
     assert_eq!(priv_map.get(&dev_id).copied(), Some(0));
     assert_eq!(priv_map.get(&rep_id).copied(), Some(25));
 }
+
+#[test]
+fn test_ui_m4_db_helpers_prefix_ancestors_and_overview_stats() {
+    let db = Db::open_in_memory().unwrap();
+    db.create_user("alice", "Alice", "a@x.com", "pw", 25, true, false)
+        .unwrap();
+    db.create_user("bob", "Bob", "b@x.com", "pw", 25, true, false)
+        .unwrap();
+    db.create_user("99bot", "Bot", "99@x.com", "pw", 25, true, false)
+        .unwrap();
+
+    let a_users = db.list_users_filtered(None, false, Some("A")).unwrap();
+    assert!(a_users.iter().any(|u| u.username == "alice"));
+    assert!(!a_users.iter().any(|u| u.username == "bob"));
+
+    let num_users = db.list_users_filtered(None, false, Some("0-9")).unwrap();
+    assert_eq!(num_users.len(), 1);
+    assert_eq!(num_users[0].username, "99bot");
+
+    let gp = db.create_project("GP", 10, 10, "", true).unwrap();
+    let p = db.create_project("P", 10, 10, "", true).unwrap();
+    let c = db.create_project("C", 10, 10, "", true).unwrap();
+    db.add_subproject(gp, p, true).unwrap();
+    db.add_subproject(p, c, true).unwrap();
+
+    let ancestors = db.list_project_ancestor_ids(c).unwrap();
+    assert!(ancestors.contains(&gp));
+    assert!(ancestors.contains(&p));
+    assert!(!ancestors.contains(&c));
+
+    let stats = db.get_site_overview_stats().unwrap();
+    assert_eq!(stats.projects_count, 3);
+    assert!(stats.users_count >= 4);
+}

@@ -12,6 +12,31 @@ pub struct RoadmapVersionGroup {
     pub project_name: Option<String>,
     #[serde(default)]
     pub project_id: Option<i64>,
+    #[serde(default)]
+    pub date_order: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SummaryCounts {
+    pub open: usize,
+    pub resolved: usize,
+    pub closed: usize,
+}
+
+impl SummaryCounts {
+    pub fn record_status(&mut self, status: i32) {
+        if status == 90 {
+            self.closed += 1;
+        } else if status >= 80 {
+            self.resolved += 1;
+        } else {
+            self.open += 1;
+        }
+    }
+
+    pub fn total(&self) -> usize {
+        self.open + self.resolved + self.closed
+    }
 }
 
 /// Pure domain helper that groups bugs by active project versions,
@@ -74,6 +99,7 @@ pub fn build_roadmap_groups(
                 bugs: v_bugs,
                 project_name,
                 project_id: Some(v.project_id),
+                date_order: v.date_order,
             });
         }
     }
@@ -91,6 +117,7 @@ pub fn build_roadmap_groups(
             bugs: v_bugs,
             project_name,
             project_id: Some(key.0),
+            date_order: 0,
         });
     }
 

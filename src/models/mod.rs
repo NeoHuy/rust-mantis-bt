@@ -45,6 +45,17 @@ pub const STATUS_CLOSED: i32 = 90;
 pub const PLUGIN_CORE_FORMATTING: &str = "MantisCoreFormatting";
 pub const TOGGLEABLE_CORE_PLUGINS: &[&str] = &[PLUGIN_CORE_FORMATTING];
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SiteOverviewStats {
+    pub projects_count: i64,
+    pub users_count: i64,
+    pub issues_count: i64,
+    pub bugnotes_count: i64,
+    pub attachments_count: i64,
+    pub plugins_count: i64,
+    pub pending_emails_count: i64,
+}
+
 #[cfg(test)]
 #[path = "models_test.rs"]
 mod tests;

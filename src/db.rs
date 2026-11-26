@@ -958,6 +958,15 @@ impl Db {
         search: Option<&str>,
         enabled_only: bool,
     ) -> rusqlite::Result<Vec<User>> {
+        self.list_users_filtered(search, enabled_only, None)
+    }
+
+    pub fn list_users_filtered(
+        &self,
+        search: Option<&str>,
+        enabled_only: bool,
+        prefix: Option<&str>,
+    ) -> rusqlite::Result<Vec<User>> {
         let conn = self.conn();
         let mut sql = "SELECT id, username, realname, email, password, enabled, protected, access_level,
                               login_count, lost_password_request_count, failed_login_count, cookie_string,
@@ -979,6 +988,21 @@ impl Db {
                 params_vec.push(Box::new(pattern.clone()));
                 params_vec.push(Box::new(pattern.clone()));
                 params_vec.push(Box::new(pattern));
+            }
+        }
+
+        if let Some(p) = prefix {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("all") {
+                if trimmed == "0-9" {
+                    conditions.push("substr(username, 1, 1) BETWEEN '0' AND '9'".to_string());
+                } else if let Some(ch) = trimmed.chars().next() {
+                    if ch.is_ascii_alphanumeric() {
+                        let pattern = format!("{}%", ch);
+                        conditions.push("username LIKE ? ESCAPE '\\'".to_string());
+                        params_vec.push(Box::new(pattern));
+                    }
+                }
             }
         }
 
@@ -1563,6 +1587,64 @@ impl Db {
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// Returns all ancestor project IDs of `project_id` (excluding `project_id` itself).
+    pub fn list_project_ancestor_ids(&self, project_id: i64) -> rusqlite::Result<HashSet<i64>> {
+        let conn = self.conn();
+        let mut ancestors = HashSet::new();
+        let mut queue = vec![project_id];
+        let mut visited = HashSet::new();
+        visited.insert(project_id);
+
+        while let Some(curr) = queue.pop() {
+            let mut stmt = conn.prepare(
+                "SELECT parent_id FROM mantis_project_hierarchy_table WHERE child_id = ?1",
+            )?;
+            let parents = stmt.query_map(params![curr], |row| row.get::<_, i64>(0))?;
+            for p in parents {
+                let parent_id = p?;
+                ancestors.insert(parent_id);
+                if visited.insert(parent_id) {
+                    queue.push(parent_id);
+                }
+            }
+        }
+        Ok(ancestors)
+    }
+
+    pub fn get_site_overview_stats(&self) -> rusqlite::Result<crate::models::SiteOverviewStats> {
+        let conn = self.conn();
+        let projects_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM mantis_project_table", [], |r| {
+                r.get(0)
+            })?;
+        let users_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM mantis_user_table", [], |r| r.get(0))?;
+        let issues_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM mantis_bug_table", [], |r| r.get(0))?;
+        let bugnotes_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM mantis_bugnote_table", [], |r| {
+                r.get(0)
+            })?;
+        let attachments_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM mantis_bug_file_table", [], |r| {
+                r.get(0)
+            })?;
+        let plugins_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM mantis_plugin_table", [], |r| r.get(0))?;
+        let pending_emails_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM mantis_email_table", [], |r| r.get(0))?;
+
+        Ok(crate::models::SiteOverviewStats {
+            projects_count,
+            users_count,
+            issues_count,
+            bugnotes_count,
+            attachments_count,
+            plugins_count,
+            pending_emails_count,
+        })
     }
 
     pub fn set_project_user(

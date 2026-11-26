@@ -45,6 +45,73 @@ pub async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
     }
 }
 
+pub async fn manage_overview_page(
+    axum::extract::State(db): axum::extract::State<Db>,
+    ctx: AuthContext,
+) -> axum::response::Response {
+    if ctx.user.access_level < 90 {
+        return crate::views::render_access_denied_page(&ctx);
+    }
+
+    let stats = db.get_site_overview_stats().unwrap_or_default();
+    let cookie_secure = std::env::var("MANTIS_COOKIE_SECURE")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false);
+    let upload_fs = std::env::var("MANTIS_UPLOAD_DIR")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let sendgrid_enabled = std::env::var("SENDGRID_API_KEY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let query_token_enabled = std::env::var("MANTIS_ALLOW_QUERY_TOKEN")
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true"
+        })
+        .unwrap_or(false);
+    let jira_enabled = db.get_jira_config(0).map(|c| c.enabled).unwrap_or(false);
+
+    let runtime_info: Vec<(&str, &str)> = vec![
+        (
+            "Cookie Secure / HSTS (MANTIS_COOKIE_SECURE)",
+            if cookie_secure { "Enabled" } else { "Disabled" },
+        ),
+        (
+            "Attachment Storage (MANTIS_UPLOAD_DIR)",
+            if upload_fs {
+                "Filesystem (MANTIS_UPLOAD_DIR)"
+            } else {
+                "Database-backed"
+            },
+        ),
+        (
+            "SendGrid Email Dispatcher",
+            if sendgrid_enabled {
+                "Enabled"
+            } else {
+                "Disabled (DB Queue Only)"
+            },
+        ),
+        (
+            "Jira Cloud Integration",
+            if jira_enabled { "Enabled" } else { "Disabled" },
+        ),
+        (
+            "MCP Query Token Auth (MANTIS_ALLOW_QUERY_TOKEN)",
+            if query_token_enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            },
+        ),
+    ];
+
+    crate::views::render_manage_overview_page(&ctx, &stats, &runtime_info).into_response()
+}
+
 fn static_asset_response<T: IntoResponse>(
     content_type: &'static str,
     body: T,
@@ -323,6 +390,7 @@ pub async fn csrf_protection_middleware(
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/", get(root_handler))
+        .route("/manage_overview_page", get(manage_overview_page))
         .route("/favicon.ico", get(favicon_handler))
         .route("/images/mantis_logo.png", get(logo_handler))
         .route("/assets/tailwind.css", get(tailwind_css_handler))

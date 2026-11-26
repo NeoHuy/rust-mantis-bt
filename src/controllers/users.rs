@@ -21,6 +21,7 @@ fn require_admin(ctx: &AuthContext) -> Option<Response> {
 pub struct ManageUserQuery {
     pub search: Option<String>,
     pub filter_enabled: Option<String>,
+    pub prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -65,7 +66,12 @@ pub async fn manage_user_page(
 
     let search_trimmed = query.search.as_deref().filter(|s| !s.trim().is_empty());
     let enabled_only = query.filter_enabled.is_some();
-    let users = match db.list_users(search_trimmed, enabled_only) {
+    let prefix_trimmed = query
+        .prefix
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let users = match db.list_users_filtered(search_trimmed, enabled_only, prefix_trimmed) {
         Ok(list) => list,
         Err(e) => {
             return (
@@ -81,11 +87,12 @@ pub async fn manage_user_page(
         }
     };
 
-    views::users::render_manage_users_page(
+    views::users::render_manage_users_page_with_prefix(
         &ctx,
         &users,
         query.search.as_deref().unwrap_or(""),
         enabled_only,
+        prefix_trimmed.unwrap_or(""),
     )
     .into_response()
 }

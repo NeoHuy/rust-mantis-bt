@@ -66,6 +66,7 @@ pub fn render_layout(
     }
 
     let is_manage_page = title.contains("Manage")
+        || title.contains("Overview")
         || title.contains("Project")
         || title.contains("User")
         || title.contains("Custom Field")
@@ -122,7 +123,9 @@ pub fn render_layout(
         ));
     }
     sidebar_items.push(("News", "/news_page", "fa-newspaper-o", title == "News"));
-    let manage_default_href = if ctx.user.access_level >= 70 {
+    let manage_default_href = if ctx.user.access_level >= 90 {
+        "/manage_overview_page"
+    } else if ctx.user.access_level >= 70 {
         "/manage_proj_page"
     } else {
         "/manage_tags_page"
@@ -141,42 +144,26 @@ pub fn render_layout(
     // Contextual Sub-Navigation Tabs for Manage & Account pages (MantisBT 2.x style)
     let mut sub_tabs_html = String::new();
     if is_manage_page {
-        let mut tabs: Vec<(&str, &str, bool)> = Vec::new();
-        if ctx.user.access_level >= 90 {
-            tabs.push(("Manage Users", "/manage_user_page", title.contains("User")));
-        }
-        if ctx.user.access_level >= 70 {
-            tabs.push((
-                "Manage Projects",
-                "/manage_proj_page",
-                title.contains("Project"),
-            ));
-        }
-        tabs.push(("Manage Tags", "/manage_tags_page", title.contains("Tag")));
-        if ctx.user.access_level >= 90 {
-            tabs.push((
-                "Manage Custom Fields",
-                "/manage_custom_field_page",
-                title.contains("Custom Field"),
-            ));
-            tabs.push((
-                "Manage Plugins",
-                "/manage_plugin_page",
-                title.contains("Plugin"),
-            ));
-            tabs.push(("Manage Jira", "/manage_jira_page", title.contains("Jira")));
-            tabs.push((
-                "Email Queue",
-                "/manage_email_queue_page",
-                title.contains("Email Queue"),
-            ));
-        }
-        sub_tabs_html.push_str(r#"<div class="sub-nav-tabs">"#);
-        for (lbl, href, act) in tabs {
-            let cls = if act { r#" class="active""# } else { "" };
-            sub_tabs_html.push_str(&format!(r#"<a href="{}"{}>{}</a>"#, href, cls, lbl));
-        }
-        sub_tabs_html.push_str("</div>");
+        let active_tab = if title.contains("Overview") {
+            "overview"
+        } else if title.contains("User") {
+            "users"
+        } else if title.contains("Project") {
+            "projects"
+        } else if title.contains("Tag") {
+            "tags"
+        } else if title.contains("Custom Field") {
+            "custom_fields"
+        } else if title.contains("Plugin") {
+            "plugins"
+        } else if title.contains("Jira") {
+            "jira"
+        } else if title.contains("Email Queue") {
+            "email_queue"
+        } else {
+            ""
+        };
+        sub_tabs_html = crate::views::render_manage_tabs(ctx, active_tab);
     } else if is_account_page {
         let acc_act = if title == "My Account" {
             r#" class="active""#

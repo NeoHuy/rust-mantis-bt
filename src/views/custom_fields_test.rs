@@ -430,3 +430,53 @@ fn test_readonly_checkbox_multilist_renders_comma_separated() {
     assert!(rendered.contains("Win, Linux"));
     assert!(!rendered.contains("Win|Linux"));
 }
+
+#[test]
+fn test_manage_custom_field_edit_renders_human_readable_type_label() {
+    let user = crate::models::User {
+        id: 1,
+        username: "admin".to_string(),
+        realname: "Admin".to_string(),
+        email: "admin@x.com".to_string(),
+        password: "hash".to_string(),
+        enabled: 1,
+        protected: 0,
+        access_level: 90,
+        login_count: 1,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: "c".to_string(),
+        last_visit: 0,
+        date_created: 0,
+    };
+    let ctx = AuthContext {
+        user,
+        active_project_id: 0,
+        visible_projects: vec![],
+    };
+    let cf = CustomField {
+        id: 1,
+        name: "Platform".to_string(),
+        field_type: 0,
+        possible_values: "".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: "".to_string(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 255,
+        display_report: 1,
+        display_update: 1,
+        display_resolved: 0,
+        display_closed: 0,
+        require_report: 0,
+        require_update: 0,
+        require_resolved: 0,
+        require_closed: 0,
+        filter_by: 0,
+    };
+    let html = render_manage_custom_field_edit_page(&ctx, &cf, &[], None, None).0;
+    assert!(html.contains(r#"<option value="0" selected>String</option>"#));
+    assert!(html.contains(r#"<option value="3">Enumeration</option>"#));
+    assert!(!html.contains(r#"<input type="text" name="field_type""#));
+}

@@ -11,6 +11,16 @@ pub fn render_manage_users_page(
     search: &str,
     enabled_only: bool,
 ) -> Html<String> {
+    render_manage_users_page_with_prefix(ctx, users, search, enabled_only, "")
+}
+
+pub fn render_manage_users_page_with_prefix(
+    ctx: &AuthContext,
+    users: &[User],
+    search: &str,
+    enabled_only: bool,
+    prefix: &str,
+) -> Html<String> {
     let mut rows_html = String::new();
     for (idx, u) in users.iter().enumerate() {
         let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
@@ -37,9 +47,9 @@ pub fn render_manage_users_page(
                 <td>{}</td>
                 <td>{}</td>
                 <td>
-                    <a href="/manage_user_edit_page/{}" class="btn btn-secondary btn-sm">Edit</a>
+                    <a href="/manage_user_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>
                     <form action="/manage_user_delete/{}" method="POST" style="display:inline; margin-left:4px;" onsubmit="return confirm('Are you sure you want to delete this user?');">
-                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        <button type="submit" class="btn btn-danger btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>
             </tr>"#,
@@ -58,44 +68,103 @@ pub fn render_manage_users_page(
 
     let enabled_checked = if enabled_only { "checked" } else { "" };
 
+    let mut letter_links = String::new();
+    let all_active = prefix.is_empty() || prefix.eq_ignore_ascii_case("all");
+    let mut base_qs = String::new();
+    if !search.is_empty() {
+        base_qs.push_str(&format!("&search={}", crate::models::url_encode(search)));
+    }
+    if enabled_only {
+        base_qs.push_str("&filter_enabled=1");
+    }
+
+    let all_cls = if all_active {
+        "btn btn-primary btn-sm"
+    } else {
+        "btn btn-white btn-round btn-sm"
+    };
+    let all_href = if base_qs.is_empty() {
+        "/manage_user_page".to_string()
+    } else {
+        format!("/manage_user_page?{}", base_qs.trim_start_matches('&'))
+    };
+    letter_links.push_str(&format!(
+        r#"<a href="{}" class="{}">All</a>"#,
+        all_href, all_cls
+    ));
+
+    let num_cls = if prefix == "0-9" {
+        "btn btn-primary btn-sm"
+    } else {
+        "btn btn-white btn-round btn-sm"
+    };
+    letter_links.push_str(&format!(
+        r#"<a href="/manage_user_page?prefix=0-9{}" class="{}">0-9</a>"#,
+        base_qs, num_cls
+    ));
+
+    for ch in 'A'..='Z' {
+        let s = ch.to_string();
+        let active = prefix.eq_ignore_ascii_case(&s);
+        let cls = if active {
+            "btn btn-primary btn-sm"
+        } else {
+            "btn btn-white btn-round btn-sm"
+        };
+        letter_links.push_str(&format!(
+            r#"<a href="/manage_user_page?prefix={}{}" class="{}">{}</a>"#,
+            s, base_qs, cls, s
+        ));
+    }
+
     let content = format!(
         r#"
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
-            <h2 class="section-title" style="margin:0; border:none;">Manage Users</h2>
-            <a href="/manage_user_create_page" class="btn">Create New Account</a>
-        </div>
-
-        <div class="panel" style="margin-bottom:14px;">
-            <div class="panel-body" style="padding:10px 14px;">
-                <form method="GET" action="/manage_user_page" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-users" aria-hidden="true"></i> Manage Users ({})</h4>
+                <div class="widget-toolbar">
+                    <a href="/manage_user_create_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-user-plus" aria-hidden="true"></i> Create New Account</a>
+                </div>
+            </div>
+            <div class="widget-body">
+                <div class="flex flex-wrap gap-1 mb-3" aria-label="Filter users by starting letter">
+                    {}
+                </div>
+                <form method="GET" action="/manage_user_page" class="flex flex-wrap items-center gap-3 mb-3 pb-3 border-b border-[#e5e5e5]">
+                    <input type="hidden" name="prefix" value="{}" />
                     <label for="search">Search:</label>
                     <input type="text" name="search" id="search" value="{}" placeholder="Filter by username, real name or email" style="width:250px;" />
-                    <label style="display:flex; align-items:center; cursor:pointer;">
+                    <label class="flex items-center cursor-pointer">
                         <input type="checkbox" name="filter_enabled" value="1" {} /> Enabled only
                     </label>
-                    <button type="submit" class="btn btn-secondary">Apply Filter</button>
-                    <a href="/manage_user_page" class="btn btn-secondary">Reset</a>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-filter" aria-hidden="true"></i> Apply Filter</button>
+                    <a href="/manage_user_page" class="btn btn-secondary btn-sm">Reset</a>
                 </form>
+
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>Real Name</th>
+                                <th>Email</th>
+                                <th>Access Level</th>
+                                <th>Status</th>
+                                <th>Protection</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
-
-        <table class="data-table">
-            <thead>
-                <tr>
-                    <th>Username</th>
-                    <th>Real Name</th>
-                    <th>Email</th>
-                    <th>Access Level</th>
-                    <th>Status</th>
-                    <th>Protection</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {}
-            </tbody>
-        </table>
         "#,
+        users.len(),
+        letter_links,
+        html_escape(prefix),
         html_escape(search),
         enabled_checked,
         rows_html
@@ -106,56 +175,60 @@ pub fn render_manage_users_page(
 
 pub fn render_user_create_page(ctx: &AuthContext) -> Html<String> {
     let content = r#"
-    <div class="panel">
-        <div class="panel-header">Create User Account</div>
-        <div class="panel-body">
+    <div class="widget-box widget-color-blue2">
+        <div class="widget-header">
+            <h4 class="widget-title"><i class="fa fa-user-plus" aria-hidden="true"></i> Create User Account</h4>
+        </div>
+        <div class="widget-body">
             <form method="POST" action="/manage_user_create">
-                <table class="form-table">
-                    <tr>
-                        <td class="label-col">Username *</td>
-                        <td class="input-col"><input type="text" name="username" required autofocus /></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Real Name</td>
-                        <td class="input-col"><input type="text" name="realname" /></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Email</td>
-                        <td class="input-col"><input type="email" name="email" /></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Password *</td>
-                        <td class="input-col"><input type="password" name="password" required /></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Access Level</td>
-                        <td class="input-col">
-                            <select name="access_level">
-                                <option value="10">viewer (10)</option>
-                                <option value="25" selected>reporter (25)</option>
-                                <option value="40">updater (40)</option>
-                                <option value="55">developer (55)</option>
-                                <option value="70">manager (70)</option>
-                                <option value="90">administrator (90)</option>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Enabled</td>
-                        <td class="input-col">
-                            <label><input type="checkbox" name="enabled" value="1" checked /> Account is active and can log in</label>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Protected</td>
-                        <td class="input-col">
-                            <label><input type="checkbox" name="protected" value="1" /> Protected accounts cannot be modified or deleted</label>
-                        </td>
-                    </tr>
-                </table>
-                <div style="margin-top: 14px;">
-                    <button type="submit" class="btn">Create User</button>
-                    <a href="/manage_user_page" class="btn btn-secondary" style="margin-left:8px;">Cancel</a>
+                <div class="table-responsive">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Username <span class="required">*</span></td>
+                            <td class="input-col"><input type="text" name="username" required autofocus /></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Real Name</td>
+                            <td class="input-col"><input type="text" name="realname" /></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Email</td>
+                            <td class="input-col"><input type="email" name="email" /></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Password <span class="required">*</span></td>
+                            <td class="input-col"><input type="password" name="password" required /></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Access Level</td>
+                            <td class="input-col">
+                                <select name="access_level">
+                                    <option value="10">viewer (10)</option>
+                                    <option value="25" selected>reporter (25)</option>
+                                    <option value="40">updater (40)</option>
+                                    <option value="55">developer (55)</option>
+                                    <option value="70">manager (70)</option>
+                                    <option value="90">administrator (90)</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Enabled</td>
+                            <td class="input-col">
+                                <label><input type="checkbox" name="enabled" value="1" checked /> Account is active and can log in</label>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Protected</td>
+                            <td class="input-col">
+                                <label><input type="checkbox" name="protected" value="1" /> Protected accounts cannot be modified or deleted</label>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="mt-3.5 flex gap-2">
+                    <button type="submit" class="btn btn-primary"><i class="fa fa-user-plus" aria-hidden="true"></i> Create User</button>
+                    <a href="/manage_user_page" class="btn btn-secondary">Cancel</a>
                 </div>
             </form>
         </div>
@@ -211,11 +284,14 @@ pub fn render_user_edit_page(ctx: &AuthContext, target_user: &User) -> Html<Stri
 
     let content = format!(
         r#"
-        <div class="panel">
-            <div class="panel-header">Edit User: {}</div>
-            <div class="panel-body">
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-pencil" aria-hidden="true"></i> Edit User: {}</h4>
+            </div>
+            <div class="widget-body">
                 <form method="POST" action="/manage_user_update/{}">
-                    <table class="form-table">
+                    <div class="table-responsive">
+                        <table class="form-table">
                         <tr>
                             <td class="label-col">Username</td>
                             <td class="input-col"><input type="text" value="{}" disabled /></td>
@@ -252,10 +328,11 @@ pub fn render_user_edit_page(ctx: &AuthContext, target_user: &User) -> Html<Stri
                                 <label><input type="checkbox" name="protected" value="1" {} /> Protected</label>
                             </td>
                         </tr>
-                    </table>
-                    <div style="margin-top: 14px;">
-                        <button type="submit" class="btn">Update User</button>
-                        <a href="/manage_user_page" class="btn btn-secondary" style="margin-left:8px;">Cancel</a>
+                        </table>
+                    </div>
+                    <div class="mt-3.5 flex gap-2">
+                        <button type="submit" class="btn btn-primary"><i class="fa fa-save" aria-hidden="true"></i> Update User</button>
+                        <a href="/manage_user_page" class="btn btn-secondary">Cancel</a>
                     </div>
                 </form>
                 {}

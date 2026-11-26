@@ -49,21 +49,25 @@ pub fn render_manage_tags_page(
     }
 
     let create_form = if ctx.user.access_level >= 25 {
-        r#"<div class="panel">
-            <div class="panel-header">Create Tag</div>
-            <div class="panel-body">
+        r#"<div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-plus-circle" aria-hidden="true"></i> Create Tag</h4>
+            </div>
+            <div class="widget-body">
                 <form method="POST" action="/tag_create">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Tag Name *</td>
-                            <td class="input-col"><input type="text" name="name" required></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Description</td>
-                            <td class="input-col"><textarea name="description"></textarea></td>
-                        </tr>
-                    </table>
-                    <button type="submit" class="btn">Create Tag</button>
+                    <div class="table-responsive">
+                        <table class="form-table">
+                            <tr>
+                                <td class="label-col">Tag Name <span class="required">*</span></td>
+                                <td class="input-col"><input type="text" name="name" required></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Description</td>
+                                <td class="input-col"><textarea name="description"></textarea></td>
+                            </tr>
+                        </table>
+                    </div>
+                    <button type="submit" class="btn btn-primary mt-3"><i class="fa fa-plus" aria-hidden="true"></i> Create Tag</button>
                 </form>
             </div>
         </div>"#
@@ -73,22 +77,26 @@ pub fn render_manage_tags_page(
 
     let content = format!(
         r#"{}
-        <div class="panel">
-            <div class="panel-header">Manage Tags ({})</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Description</th>
-                            <th>Issues</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-tags" aria-hidden="true"></i> Manage Tags ({})</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Description</th>
+                                <th>Issues</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
         {}"#,

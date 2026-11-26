@@ -221,6 +221,8 @@ pub fn render_layout(
     <meta name="csrf-token" content="{csrf_token}">
     <title>{title} - MantisBT</title>
     <link rel="icon" type="image/png" href="/images/mantis_logo.png">
+    <link rel="alternate" type="application/rss+xml" title="Issues RSS" href="/issues_rss">
+    <link rel="alternate" type="application/rss+xml" title="News RSS" href="/news_rss">
     <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
     <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
     <script>try{{if(localStorage.getItem('mantis_sidebar_collapsed')==='1')document.documentElement.classList.add('sidebar-collapsed-init');}}catch(_){{}}</script>
@@ -271,6 +273,8 @@ pub fn render_layout(
                     <a href="/account_page" class="dropdown-item-link"><i class="fa fa-user" aria-hidden="true"></i> My Account</a>
                     <a href="/account_manage_columns_page" class="dropdown-item-link"><i class="fa fa-columns" aria-hidden="true"></i> Manage Columns</a>
                     <a href="/account_manage_api_tokens_page" class="dropdown-item-link"><i class="fa fa-key" aria-hidden="true"></i> API Tokens</a>
+                    <a href="/issues_rss" class="dropdown-item-link"><i class="fa fa-rss" aria-hidden="true"></i> Issues RSS</a>
+                    <a href="/news_rss" class="dropdown-item-link"><i class="fa fa-rss" aria-hidden="true"></i> News RSS</a>
                     <div class="dropdown-divider"></div>
                     <form action="/logout" method="POST" class="m-0">
                         <button type="submit" class="dropdown-logout-btn"><i class="fa fa-sign-out" aria-hidden="true"></i> Logout</button>
@@ -364,6 +368,8 @@ pub fn render_unauthenticated_layout(
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{title} - MantisBT</title>
     <link rel="icon" type="image/png" href="/images/mantis_logo.png">
+    <link rel="alternate" type="application/rss+xml" title="Issues RSS" href="/issues_rss">
+    <link rel="alternate" type="application/rss+xml" title="News RSS" href="/news_rss">
     <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
     <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
 </head>

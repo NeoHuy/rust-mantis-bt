@@ -63,6 +63,9 @@ fn test_render_layout_authenticated_admin_shell() {
 
     assert!(html.contains("<title>Manage Users - MantisBT</title>"));
     assert!(html.contains(r#"<meta name="csrf-token" content=""#));
+    assert!(html.contains(r#"rel="alternate" type="application/rss+xml""#));
+    assert!(html.contains(r#"href="/issues_rss""#));
+    assert!(html.contains(r#"href="/news_rss""#));
     assert!(html.contains(r#"href="/assets/tailwind.css?v="#));
     assert!(html.contains(r#"href="/assets/font-awesome.min.css?v="#));
     assert!(html.contains(r#"src="/assets/mantis.js?v="#));

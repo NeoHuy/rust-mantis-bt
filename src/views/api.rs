@@ -153,6 +153,16 @@ pub fn render_api_tokens_page(
                 </table>
             </div>
         </div>
+        <div class="panel">
+            <div class="panel-header">Authenticated RSS Feeds</div>
+            <div class="panel-body text-xs space-y-1.5">
+                <p>Use any active API token with the RSS endpoints via <code>Authorization: Bearer &lt;TOKEN&gt;</code>, <code>?token=&lt;TOKEN&gt;</code>, or <code>?username=&lt;USER&gt;&amp;key=&lt;TOKEN&gt;</code>.</p>
+                <div class="flex flex-wrap gap-2">
+                    <a href="/issues_rss" class="btn btn-white btn-round btn-sm"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> Issues RSS</a>
+                    <a href="/news_rss" class="btn btn-white btn-round btn-sm"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> News RSS</a>
+                </div>
+            </div>
+        </div>
         {}"#,
         err_banner,
         token_banner,

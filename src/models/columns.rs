@@ -206,6 +206,23 @@ pub fn parse_columns_input(raw: &str) -> Vec<String> {
     out
 }
 
+/// Neutralizes spreadsheet formula-injection prefixes (`=`, `+`, `-`, `@`, `\t`, `\r`)
+/// by prepending a single quote `'`.
+pub fn sanitize_spreadsheet_cell(val: &str) -> String {
+    let trimmed = val.trim_start();
+    let needs_prefix = val.starts_with('\t')
+        || val.starts_with('\r')
+        || trimmed.starts_with('=')
+        || trimmed.starts_with('+')
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('@');
+    if needs_prefix {
+        format!("'{}", val)
+    } else {
+        val.to_string()
+    }
+}
+
 /// Validates user-submitted column IDs against the strict standard column allowlist
 /// and the user's accessible custom fields.
 pub fn validate_columns_list(

@@ -5129,3 +5129,118 @@ fn test_phase3_advanced_filtering_and_columns_config() {
         .unwrap();
     assert_eq!(fallback_cols, vec!["id", "summary"]);
 }
+
+#[test]
+fn test_list_accessible_news_rbac_isolation() {
+    let db = Db::open_in_memory().unwrap();
+    let pub_proj = db.create_project("NewsPubProj", 10, 10, "", true).unwrap();
+    let priv_proj = db.create_project("NewsPrivProj", 10, 50, "", true).unwrap();
+    let disabled_proj = db
+        .create_project("NewsDisabledProj", 10, 10, "", true)
+        .unwrap();
+    db.update_project(disabled_proj, "NewsDisabledProj", 10, false, 10, "", true)
+        .unwrap();
+
+    let rep_id = db
+        .create_user("news_rep", "News Rep", "nr@x.com", "pass", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("news_dev", "News Dev", "nd@x.com", "pass", 55, true, false)
+        .unwrap();
+    let dis_rep_id = db
+        .create_user(
+            "news_dis",
+            "Disabled",
+            "ndis@x.com",
+            "pass",
+            25,
+            false,
+            false,
+        )
+        .unwrap();
+
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+    let dis_rep = db.get_user_by_id(dis_rep_id).unwrap().unwrap();
+    let admin = db.get_user_by_id(1).unwrap().unwrap();
+
+    // Give dev project-specific Viewer override (10) on priv_proj so dev can enter priv_proj
+    // as Viewer only (should NOT see view_state=50 private news there!)
+    db.set_project_user(priv_proj, dev_id, 10).unwrap();
+
+    db.create_news(0, 1, "Global Public News", "global body", true, 10)
+        .unwrap();
+    db.create_news(0, 1, "Global Private News", "dev global body", false, 50)
+        .unwrap();
+    db.create_news(pub_proj, 1, "Public Project News", "pub body", false, 10)
+        .unwrap();
+    db.create_news(
+        priv_proj,
+        1,
+        "Private Project Public News",
+        "priv pub",
+        false,
+        10,
+    )
+    .unwrap();
+    db.create_news(
+        priv_proj,
+        1,
+        "Private Project Secret News",
+        "priv sec",
+        false,
+        50,
+    )
+    .unwrap();
+    db.create_news(
+        disabled_proj,
+        1,
+        "Disabled Project News",
+        "dis body",
+        false,
+        10,
+    )
+    .unwrap();
+
+    // Disabled user sees nothing
+    assert!(db.list_accessible_news(&dis_rep, 0).unwrap().is_empty());
+
+    // Reporter sees only Global Public + Public Project News
+    let rep_headlines: Vec<String> = db
+        .list_accessible_news(&rep, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(rep_headlines.contains(&"Global Public News".to_string()));
+    assert!(rep_headlines.contains(&"Public Project News".to_string()));
+    assert!(!rep_headlines.contains(&"Global Private News".to_string()));
+    assert!(!rep_headlines.contains(&"Private Project Public News".to_string()));
+    assert!(!rep_headlines.contains(&"Private Project Secret News".to_string()));
+    assert!(!rep_headlines.contains(&"Disabled Project News".to_string()));
+
+    // Dev sees Global Private News and Private Project Public News, NOT Private Project Secret News
+    let dev_headlines: Vec<String> = db
+        .list_accessible_news(&dev, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(dev_headlines.contains(&"Global Private News".to_string()));
+    assert!(dev_headlines.contains(&"Private Project Public News".to_string()));
+    assert!(!dev_headlines.contains(&"Private Project Secret News".to_string()));
+
+    // Admin sees Private Project Secret News, still not disabled project
+    let admin_headlines: Vec<String> = db
+        .list_accessible_news(&admin, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(admin_headlines.contains(&"Private Project Secret News".to_string()));
+    assert!(!admin_headlines.contains(&"Disabled Project News".to_string()));
+    assert!(db
+        .list_accessible_news(&admin, disabled_proj)
+        .unwrap()
+        .is_empty());
+}

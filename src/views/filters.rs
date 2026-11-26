@@ -218,6 +218,7 @@ pub fn render_manage_filter_page(
                     <td class="whitespace-nowrap">
                         <div class="inline-flex items-center gap-1.5">
                             <a href="{}" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-check" aria-hidden="true"></i> Apply</a>
+                            <a href="/issues_rss?filter_id={}" class="btn btn-white btn-round btn-sm" title="Issues RSS Feed"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> RSS</a>
                             {}
                             {}
                         </div>
@@ -233,6 +234,7 @@ pub fn render_manage_filter_page(
                 html_escape(&permalink),
                 sf.id,
                 permalink,
+                sf.id,
                 edit_btn,
                 delete_form
             ));
@@ -375,6 +377,7 @@ pub fn render_manage_filter_edit_page(
                 </h4>
                 <div class="widget-toolbar">
                     <a href="{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-check" aria-hidden="true"></i> Apply Filter</a>
+                    <a href="/issues_rss?filter_id={}" class="btn btn-white btn-round btn-sm"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> RSS Feed</a>
                     <a href="/manage_filter_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a>
                 </div>
             </div>
@@ -440,6 +443,7 @@ pub fn render_manage_filter_edit_page(
         err_banner,
         html_escape(&sf.name),
         id_permalink,
+        sf.id,
         sf.id,
         html_escape(&sf.name),
         project_opts,

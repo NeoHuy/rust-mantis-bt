@@ -8168,6 +8168,80 @@ impl Db {
         rows.collect()
     }
 
+    /// Lists news items accessible to `user`, enforcing project membership for private/disabled
+    /// projects and requiring Developer (`>= 55`) access for private news (`view_state != 10`).
+    pub fn list_accessible_news(
+        &self,
+        user: &User,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<NewsItem>> {
+        if user.enabled == 0 {
+            return Ok(Vec::new());
+        }
+
+        let enabled_visible_ids: HashSet<i64> = self
+            .list_visible_projects(user)?
+            .into_iter()
+            .filter(|(p, _)| p.enabled == 1)
+            .map(|(p, _)| p.id)
+            .collect();
+
+        if project_id > 0 && !enabled_visible_ids.contains(&project_id) {
+            return Ok(Vec::new());
+        }
+
+        let candidates = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, poster_id, date_posted, last_modified,
+                        view_state, announcement, headline, body
+                 FROM mantis_news_table
+                 WHERE (?1 = 0 OR project_id = 0 OR project_id = ?1)
+                 ORDER BY announcement DESC, date_posted DESC, id DESC",
+            )?;
+            let rows = stmt.query_map(params![project_id], |row| {
+                Ok(NewsItem {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    poster_id: row.get(2)?,
+                    date_posted: row.get(3)?,
+                    last_modified: row.get(4)?,
+                    view_state: row.get(5)?,
+                    announcement: row.get(6)?,
+                    headline: row.get(7)?,
+                    body: row.get(8)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+        let mut out = Vec::new();
+        for item in candidates {
+            let eff = if item.project_id == 0 {
+                user.access_level
+            } else {
+                if !enabled_visible_ids.contains(&item.project_id) {
+                    continue;
+                }
+                if let Some(&cached) = eff_cache.get(&item.project_id) {
+                    cached
+                } else {
+                    let level = self.effective_access_level(user, item.project_id)?;
+                    eff_cache.insert(item.project_id, level);
+                    level
+                }
+            };
+            if eff < 10 {
+                continue;
+            }
+            if item.view_state == 10 || eff >= 55 {
+                out.push(item);
+            }
+        }
+        Ok(out)
+    }
+
     // ─── Sub-project 5: API Tokens (`mantis_api_token_table`) & Plugins ──────
 
     pub fn create_api_token(&self, user_id: i64, name: &str) -> Result<(i64, String), String> {

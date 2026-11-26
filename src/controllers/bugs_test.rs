@@ -102,6 +102,7 @@ fn test_build_view_all_bug_page_url_preserves_all_parameters_and_replaces_page()
     let q = ListBugsQuery {
         page: Some(1),
         filter_id: Some(42),
+        project_id: Some(11),
         q: Some("deadlock test".to_string()),
         search: None,
         status: Some(50),
@@ -113,12 +114,13 @@ fn test_build_view_all_bug_page_url_preserves_all_parameters_and_replaces_page()
         handler_id: Some(-1),
         tag_id: Some(9),
         monitored_by: Some(2),
+        target_version: Some("v2.0 beta".to_string()),
+        fixed_in_version: Some("v1.9".to_string()),
         msg: Some("Ignored flash".to_string()),
         err: Some("Ignored error".to_string()),
         sort: Some("priority".to_string()),
         dir: Some("asc".to_string()),
         per_page: Some(50),
-        ..Default::default()
     };
 
     let url = build_view_all_bug_page_url(&q, 3);
@@ -134,6 +136,9 @@ fn test_build_view_all_bug_page_url_preserves_all_parameters_and_replaces_page()
     assert!(url.contains("handler_id=-1"));
     assert!(url.contains("tag_id=9"));
     assert!(url.contains("monitored_by=2"));
+    assert!(url.contains("project_id=11"));
+    assert!(url.contains("target_version=v2.0+beta"));
+    assert!(url.contains("fixed_in_version=v1.9"));
     assert!(url.contains("sort=priority"));
     assert!(url.contains("dir=asc"));
     assert!(url.contains("per_page=50"));

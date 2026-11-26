@@ -274,8 +274,25 @@ pub fn render_changelog_page(
                 ));
             }
 
-            let view_issues_href =
-                format!("/view_all_bug_page?fixed_in_version={}", url_encode(ver));
+            let changelog_proj_id = if ctx.active_project_id > 0 {
+                Some(ctx.active_project_id)
+            } else {
+                let first_pid = items.first().map(|b| b.project_id);
+                if first_pid.is_some() && items.iter().all(|b| Some(b.project_id) == first_pid) {
+                    first_pid
+                } else {
+                    None
+                }
+            };
+            let view_issues_href = if let Some(pid) = changelog_proj_id.filter(|&id| id > 0) {
+                format!(
+                    "/view_all_bug_page?project_id={}&fixed_in_version={}",
+                    pid,
+                    url_encode(ver)
+                )
+            } else {
+                format!("/view_all_bug_page?fixed_in_version={}", url_encode(ver))
+            };
             sections_html.push_str(&format!(
                 r#"<div class="widget-box widget-color-blue2">
                     <div class="widget-header">

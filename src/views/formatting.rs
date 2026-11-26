@@ -757,18 +757,17 @@ fn highlight_code_spec(raw_code: &str, spec: &LangSpec) -> String {
                 plain_start = i;
                 continue;
             } else {
-                // Match single-char literal ('a', '🦀', '\n', '\x7f', '\u{...}') without matching Rust lifetimes ('a, 'static)
-                let found_close = if i + 1 < len && bytes[i + 1] == b'\\' {
-                    let mut k = i + 2;
+                // Match single-char literal ('a', '🦀', '\n', '\'', '\\', '\x7f', '\u{...}') without matching Rust lifetimes ('a, 'static)
+                let found_close = if i + 2 < len
+                    && bytes[i + 1] == b'\\'
+                    && !matches!(bytes[i + 2], b'\n' | b'\r')
+                {
+                    let mut k = i + 3;
                     let limit = (i + 12).min(len);
                     let mut close = None;
                     while k < limit {
                         if bytes[k] == b'\n' || bytes[k] == b'\r' {
                             break;
-                        }
-                        if bytes[k] == b'\\' && k + 1 < limit {
-                            k += 2;
-                            continue;
                         }
                         if bytes[k] == b'\'' {
                             close = Some(k + 1);

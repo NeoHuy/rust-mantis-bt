@@ -974,14 +974,16 @@ fn test_highlight_unclosed_quote_and_rust_lifetimes() {
     assert!(bash_hl.contains(r#"<span class="hl-kw">if</span>"#));
     assert!(bash_hl.contains(r#"<span class="hl-kw">true</span>"#));
 
-    // 2. Rust lifetimes ('a, 'static) are NOT misread as char literals, while char literals ('z', '\n', '🦀') are
+    // 2. Rust lifetimes ('a, 'static) are NOT misread as char literals, while char literals ('z', '\n', '\'', '\\', '🦀') are
     let rust_hl = highlight_code_block(
         "rust",
-        "fn f<'a>(x: &'a str) -> char {\n    let c = 'z';\n    let nl = '\\n';\n    let crab = '🦀';\n    c\n}",
+        "fn f<'a>(x: &'a str) -> char {\n    let c = 'z';\n    let nl = '\\n';\n    let sq = '\\'';\n    let bs = '\\\\';\n    let crab = '🦀';\n    c\n}",
     );
     assert!(!rust_hl.contains(r#"<span class="hl-str">'a"#));
     assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;z&#x27;</span>"#));
     assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;\n&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;\&#x27;&#x27;</span>"#));
+    assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;\\&#x27;</span>"#));
     assert!(rust_hl.contains(r#"<span class="hl-str">&#x27;🦀&#x27;</span>"#));
     assert!(rust_hl.contains(r#"<span class="hl-ty">str</span>"#));
 }

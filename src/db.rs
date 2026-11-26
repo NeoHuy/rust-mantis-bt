@@ -3005,7 +3005,9 @@ impl Db {
             .unwrap_or("(Unknown)");
 
         let (action_header, subject) = if bug.status != new_status {
-            let new_status_name = crate::views::bugs::status_label(new_status);
+            let new_status_name = BugStatus::from_i32(new_status)
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
             let action_header = match new_status {
                 80 => "The following issue has been RESOLVED.",
                 90 => "The following issue has been CLOSED.",
@@ -3067,7 +3069,9 @@ impl Db {
             let trimmed = nt.trim();
             if !note_mentions.is_empty() {
                 let mention_ctx = if bug.status != new_status {
-                    let new_status_name = crate::views::bugs::status_label(new_status);
+                    let new_status_name = BugStatus::from_i32(new_status)
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown");
                     format!("[Status changed to {}]\n\n{}", new_status_name, trimmed)
                 } else if bug.resolution != resolution {
                     let res_name = BugResolution::from_i32(resolution)

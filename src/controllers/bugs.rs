@@ -757,6 +757,7 @@ pub async fn bug_report_page(
         q.err.as_deref(),
         q.msg.as_deref(),
         verified_created_bug_id,
+        verified_created_bug_id.is_some(),
     )
     .into_response()
 }
@@ -1306,11 +1307,17 @@ pub async fn view_bug_page(
                 && p.enabled == 1
                 && db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25
         });
+    let assignable_users = if eff >= 55 {
+        db.list_assignable_users_for_project(bug.project_id, 55)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let actions_html = views::bugs::render_bug_action_toolbar(
         bug,
         eff,
         ctx.user.id,
-        &users,
+        &assignable_users,
         is_monitoring,
         can_clone,
         can_move,

@@ -879,6 +879,7 @@ async fn test_http_bug_report_target_version_assign_to_and_report_stay() {
         r#"<option value="{}" selected>Frontend</option>"#,
         cat2_id
     )));
+    assert!(sec_stay_html.contains(r#"id="report_stay" name="report_stay" value="1" checked"#));
 
     // 3b. Developer submits with target_version=v2.0, handler_id=1 (admin), and report_stay=1
     let res = app

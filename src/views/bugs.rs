@@ -1706,6 +1706,7 @@ pub fn render_bug_report_page(
     flash_err: Option<&str>,
     flash_msg: Option<&str>,
     created_bug_id: Option<i64>,
+    report_stay: bool,
 ) -> Html<String> {
     let mut proj_opts = String::new();
     for (pid, pname, is_selected) in project_opts {
@@ -1949,7 +1950,7 @@ pub fn render_bug_report_page(
                                     <th class="category"><label for="report_stay">Report Stay</label></th>
                                     <td class="input-col">
                                         <label class="inline-label">
-                                            <input type="checkbox" id="report_stay" name="report_stay" value="1">
+                                            <input type="checkbox" id="report_stay" name="report_stay" value="1"{}>
                                             <span>Check to report more issues</span>
                                         </label>
                                     </td>
@@ -1974,7 +1975,8 @@ pub fn render_bug_report_page(
         target_ver_row,
         assign_to_row,
         cf_rows_html,
-        dropzone_html
+        dropzone_html,
+        if report_stay { " checked" } else { "" }
     );
 
     render_layout("Report Issue", ctx, layout_flash, &content)
@@ -3343,7 +3345,7 @@ pub fn render_bugnotes_cards(
 
         if can_del_note {
             actions.push(format!(
-                r#"<form method="POST" action="/bugnote_delete/{}" class="inline-form"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
+                r#"<form method="POST" action="/bugnote_delete/{}" class="inline-form" onsubmit="return confirm('Delete this note?');"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
                 n.id
             ));
         }

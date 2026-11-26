@@ -1347,6 +1347,33 @@ pub fn render_view_all_bug_page(
         ));
     }
 
+    let mut version_scope_hidden_inputs = String::new();
+    if let Some(pid) = query.project_id.filter(|&x| x > 0) {
+        version_scope_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="project_id" value="{}">"#,
+            pid
+        ));
+    }
+    if let Some(ref tv) = filter.target_version {
+        let trimmed = tv.trim();
+        if !trimmed.is_empty() {
+            version_scope_hidden_inputs.push_str(&format!(
+                r#"<input type="hidden" name="target_version" value="{}">"#,
+                html_escape(trimmed)
+            ));
+        }
+    }
+    if let Some(ref fv) = filter.fixed_in_version {
+        let trimmed = fv.trim();
+        if !trimmed.is_empty() {
+            version_scope_hidden_inputs.push_str(&format!(
+                r#"<input type="hidden" name="fixed_in_version" value="{}">"#,
+                html_escape(trimmed)
+            ));
+        }
+    }
+    quick_hidden_inputs.push_str(&version_scope_hidden_inputs);
+
     let save_filter_form = if ctx.user.access_level >= 25 {
         format!(
             r#"<form method="POST" action="/filter_save" class="flex flex-wrap gap-2 items-center mt-2">
@@ -1418,6 +1445,7 @@ pub fn render_view_all_bug_page(
                     <input type="hidden" name="sort" value="{}">
                     <input type="hidden" name="dir" value="{}">
                     <input type="hidden" name="per_page" value="{}">
+                    {}
                     <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3 pb-3 border-b border-gray-200">
                         <div class="filter-cell">
                             <span class="filter-label">Reporter</span>
@@ -1654,6 +1682,7 @@ pub fn render_view_all_bug_page(
         html_escape(cur_sort),
         html_escape(cur_dir),
         cur_per_page_str,
+        version_scope_hidden_inputs,
         reporter_opts,
         handler_opts,
         monitored_opts,

@@ -1467,6 +1467,11 @@ async fn test_ui_m4_subproject_dropdown_excludes_ancestors_and_manage_users_pref
     .unwrap();
     assert!(html_tv.contains("Target v2 issue"));
     assert!(!html_tv.contains("Other version issue"));
+    assert!(html_tv.contains(r#"<input type="hidden" name="target_version" value="v2.0">"#));
+    assert!(html_tv.contains(&format!(
+        r#"<input type="hidden" name="project_id" value="{}">"#,
+        unrelated
+    )));
 
     let res_fv = app
         .clone()

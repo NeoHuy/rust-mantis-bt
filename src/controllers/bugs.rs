@@ -160,8 +160,22 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
     if let Some(fid) = q.filter_id {
         if let Ok(Some((sf, mut bf))) = db.get_filter(fid) {
             if sf.is_public != 0 || sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
-                if ctx.active_project_id > 0 {
+                if let Some(pid) = q.project_id.filter(|&v| v > 0) {
+                    bf.project_id = Some(pid);
+                } else if ctx.active_project_id > 0 {
                     bf.project_id = Some(ctx.active_project_id);
+                }
+                if let Some(ref tv) = q.target_version {
+                    let trimmed = tv.trim();
+                    if !trimmed.is_empty() {
+                        bf.target_version = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(ref fv) = q.fixed_in_version {
+                    let trimmed = fv.trim();
+                    if !trimmed.is_empty() {
+                        bf.fixed_in_version = Some(trimmed.to_string());
+                    }
                 }
                 if let Some(ref s) = q.sort {
                     let trimmed = s.trim();

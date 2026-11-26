@@ -1389,6 +1389,7 @@ pub fn render_view_all_bug_page(
                 <input type="hidden" name="sort" value="{}">
                 <input type="hidden" name="dir" value="{}">
                 <input type="hidden" name="per_page" value="{}">
+                {}
                 <input type="text" name="name" placeholder="Saved filter name" class="!max-w-[180px]" required>
                 <label class="text-xs inline-flex items-center gap-1"><input type="checkbox" name="is_public" value="1"> Public</label>
                 <button type="submit" class="btn btn-primary btn-sm">Save Current Filter</button>
@@ -1404,7 +1405,8 @@ pub fn render_view_all_bug_page(
             filter.tag_id.unwrap_or(0),
             html_escape(cur_sort),
             html_escape(cur_dir),
-            cur_per_page_str
+            cur_per_page_str,
+            version_scope_hidden_inputs
         )
     } else {
         String::new()

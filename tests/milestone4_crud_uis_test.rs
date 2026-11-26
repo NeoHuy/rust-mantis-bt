@@ -1495,4 +1495,74 @@ async fn test_ui_m4_subproject_dropdown_excludes_ancestors_and_manage_users_pref
     .unwrap();
     assert!(html_fv.contains("Target v2 issue"));
     assert!(!html_fv.contains("Other version issue"));
+
+    // Saved filter combined with target_version override narrows results
+    let save_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &admin_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=AllInProj&project_id={}&status=10",
+                    unrelated
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(save_res.status(), StatusCode::SEE_OTHER);
+
+    let res_all_filters = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/view_all_bug_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html_filters = String::from_utf8(
+        axum::body::to_bytes(res_all_filters.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let fid = html_filters
+        .split("filter_id=")
+        .nth(1)
+        .and_then(|s| s.split(['"', '&']).next())
+        .expect("saved filter link must exist");
+
+    let res_fid_tv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/view_all_bug_page?filter_id={}&target_version=v2.0",
+                    fid
+                ))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_fid_tv.status(), StatusCode::OK);
+    let html_fid_tv = String::from_utf8(
+        axum::body::to_bytes(res_fid_tv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_fid_tv.contains("Target v2 issue"));
+    assert!(!html_fid_tv.contains("Other version issue"));
 }

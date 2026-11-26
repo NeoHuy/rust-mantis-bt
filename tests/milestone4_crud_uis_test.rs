@@ -1574,8 +1574,22 @@ async fn test_version_scope_chip_and_project_id_override_rbac() {
     let priv_proj = db
         .create_project("SecretVersionProj", 10, 50, "", true)
         .unwrap();
+    let priv_only_cat = db.add_category(priv_proj, "SecretProjOnlyCat", 0).unwrap();
     let priv_cat = db.list_effective_categories(priv_proj).unwrap()[0].id;
     let admin_user = db.get_user_by_username("administrator").unwrap().unwrap();
+    let priv_filter_id = db
+        .save_filter(
+            admin_user.id,
+            priv_proj,
+            true,
+            "PrivProjPublicFilter",
+            &rust_mantis_bt::models::BugFilter {
+                project_id: Some(priv_proj),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let _ = priv_only_cat;
     let priv_bug = db
         .create_bug(
             priv_proj,
@@ -1704,4 +1718,56 @@ async fn test_version_scope_chip_and_project_id_override_rbac() {
     assert!(auth_tv_body.contains("Active (1)"));
     assert!(auth_tv_body.contains("Target Version: v2.0"));
     assert_no_nested_forms(&auth_tv_body);
+
+    // 5. M-4: Saved filter pointing at an inaccessible private project also returns 403
+    let deny_fid_view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/view_all_bug_page?filter_id={}", priv_filter_id))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_fid_view.status(), StatusCode::FORBIDDEN);
+
+    let deny_fid_csv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/csv_export?filter_id={}", priv_filter_id))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_fid_csv.status(), StatusCode::FORBIDDEN);
+
+    // 6. M-3: Category dropdown follows ?project_id= override even when active_project_id == 0
+    let proj_cat_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/view_all_bug_page?project_id={}", priv_proj))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(proj_cat_res.status(), StatusCode::OK);
+    let proj_cat_body = String::from_utf8(
+        axum::body::to_bytes(proj_cat_res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(proj_cat_body.contains("SecretProjOnlyCat"));
 }

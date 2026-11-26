@@ -1927,8 +1927,7 @@ fn test_view_all_bug_page_counts_and_renders_version_scope_chips() {
     assert!(html_tv.contains("Target Version: v2.0"));
     assert!(html_tv.contains("Clear Target Version filter"));
     assert!(
-        !html_tv.contains(r#"title="Clear Target Version filter""#)
-            || !html_tv.contains(r#"href="/view_all_bug_page?page=1&target_version=v2.0""#)
+        html_tv.contains(r#"href="/view_all_bug_page?page=1" title="Clear Target Version filter""#)
     );
     assert_no_nested_forms(&html_tv);
 
@@ -1966,4 +1965,43 @@ fn test_view_all_bug_page_counts_and_renders_version_scope_chips() {
     assert!(html_both.contains("Target Version: v2.0"));
     assert!(html_both.contains("Fixed in Version: v1.9"));
     assert_no_nested_forms(&html_both);
+
+    // M-1 + M-2: clearing a version chip while a saved filter is active must drop filter_id,
+    // use resolved filter state instead of stale URL params, and preserve remaining version scope.
+    let q_saved = ListBugsQuery {
+        filter_id: Some(5),
+        status: Some(10),
+        target_version: Some("v3.0".to_string()),
+        ..Default::default()
+    };
+    let f_saved = BugFilter {
+        status: Some(50),
+        target_version: Some("v3.0".to_string()),
+        fixed_in_version: Some("v1.9".to_string()),
+        ..Default::default()
+    };
+    let Html(html_saved) = render_view_all_bug_page(
+        &ctx,
+        &[],
+        0,
+        1,
+        25,
+        &f_saved,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q_saved,
+        &ViewIssuesMeta::default(),
+    );
+    assert!(html_saved.contains(
+        r#"href="/view_all_bug_page?page=1&amp;status=50&amp;fixed_in_version=v1.9" title="Clear Target Version filter""#
+    ));
+    assert_no_nested_forms(&html_saved);
 }

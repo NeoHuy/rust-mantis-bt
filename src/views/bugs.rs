@@ -823,67 +823,31 @@ fn build_clear_version_url(
     filter: &BugFilter,
     clear_target: bool,
 ) -> String {
-    let mut clear_q = query.clone();
-    let from_saved_filter = if clear_target {
-        query
-            .target_version
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
-            && query.filter_id.unwrap_or(0) > 0
+    let mut clear_q = if query.filter_id.unwrap_or(0) > 0 {
+        // Materialize from the resolved effective filter (ignoring stale URL params and dropping
+        // filter_id so clearing a version override or saved-filter version never snaps back).
+        ListBugsQuery {
+            project_id: filter.project_id.filter(|&v| v > 0),
+            search: filter.search.clone(),
+            status: filter.status.filter(|&v| v > 0),
+            hide_status: filter.hide_status.filter(|&v| v > 0),
+            priority: filter.priority.filter(|&v| v > 0),
+            severity: filter.severity.filter(|&v| v > 0),
+            category_id: filter.category_id.filter(|&v| v > 0),
+            reporter_id: filter.reporter_id.filter(|&v| v > 0),
+            handler_id: filter.handler_id.filter(|&v| v != 0),
+            tag_id: filter.tag_id.filter(|&v| v > 0),
+            monitored_by: filter.monitored_by.filter(|&v| v > 0),
+            target_version: filter.target_version.clone(),
+            fixed_in_version: filter.fixed_in_version.clone(),
+            sort: query.sort.clone(),
+            dir: query.dir.clone(),
+            per_page: query.per_page,
+            ..Default::default()
+        }
     } else {
-        query
-            .fixed_in_version
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
-            && query.filter_id.unwrap_or(0) > 0
+        query.clone()
     };
-
-    if from_saved_filter {
-        clear_q.filter_id = None;
-        if clear_q.project_id.is_none() {
-            clear_q.project_id = filter.project_id.filter(|&v| v > 0);
-        }
-        if clear_q.search.is_none() && clear_q.q.is_none() {
-            clear_q.search = filter.search.clone();
-        }
-        if clear_q.status.is_none() {
-            clear_q.status = filter.status.filter(|&v| v > 0);
-        }
-        if clear_q.hide_status.is_none() {
-            clear_q.hide_status = filter.hide_status.filter(|&v| v > 0);
-        }
-        if clear_q.priority.is_none() {
-            clear_q.priority = filter.priority.filter(|&v| v > 0);
-        }
-        if clear_q.severity.is_none() {
-            clear_q.severity = filter.severity.filter(|&v| v > 0);
-        }
-        if clear_q.category_id.is_none() {
-            clear_q.category_id = filter.category_id.filter(|&v| v > 0);
-        }
-        if clear_q.reporter_id.is_none() {
-            clear_q.reporter_id = filter.reporter_id.filter(|&v| v > 0);
-        }
-        if clear_q.handler_id.is_none() {
-            clear_q.handler_id = filter.handler_id.filter(|&v| v != 0);
-        }
-        if clear_q.tag_id.is_none() {
-            clear_q.tag_id = filter.tag_id.filter(|&v| v > 0);
-        }
-        if clear_q.monitored_by.is_none() {
-            clear_q.monitored_by = filter.monitored_by.filter(|&v| v > 0);
-        }
-        if !clear_target && clear_q.target_version.is_none() {
-            clear_q.target_version = filter.target_version.clone();
-        }
-        if clear_target && clear_q.fixed_in_version.is_none() {
-            clear_q.fixed_in_version = filter.fixed_in_version.clone();
-        }
-    }
 
     if clear_target {
         clear_q.target_version = None;

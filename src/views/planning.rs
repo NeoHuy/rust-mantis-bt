@@ -708,7 +708,7 @@ pub fn render_manage_email_queue_page(
                 <td class="whitespace-pre-wrap">{}</td>
                 <td class="whitespace-nowrap">{}</td>
                 <td>
-                    <form method="POST" action="/manage_email_delete/{}" class="inline-block m-0">
+                    <form method="POST" action="/manage_email_delete/{}" class="inline-block m-0" onsubmit="return confirm('Delete queued email?');">
                         <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>

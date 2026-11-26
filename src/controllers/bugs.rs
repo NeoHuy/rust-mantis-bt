@@ -489,6 +489,9 @@ pub async fn csv_export(
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
+    if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
+        return resp;
+    }
     let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
     let effective_sort = q
         .sort
@@ -583,6 +586,9 @@ pub async fn view_all_bug_page(
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
+    if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
+        return resp;
+    }
     let page = q.page.unwrap_or(1).max(1);
 
     let effective_sort = q
@@ -641,9 +647,10 @@ pub async fn view_all_bug_page(
         .map(|(p, _)| (p.id, p.name.clone()))
         .collect();
 
+    let effective_project_id = filter.project_id.unwrap_or(ctx.active_project_id);
     let mut categories_map = db.list_all_categories_map().unwrap_or_default();
     let cats = db
-        .list_effective_categories(ctx.active_project_id)
+        .list_effective_categories(effective_project_id)
         .unwrap_or_default();
     let mut all_cats = Vec::new();
     for c in &cats {

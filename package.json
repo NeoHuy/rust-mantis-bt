@@ -1,0 +1,13 @@
+{
+  "name": "rust-mantis-bt-ui",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline Tailwind CSS v4 build pipeline for rust-mantis-bt",
+  "scripts": {
+    "build:css": "tailwindcss -i assets/css/input.css -o assets/css/tailwind.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.0.0",
+    "tailwindcss": "^4.0.0"
+  }
+}

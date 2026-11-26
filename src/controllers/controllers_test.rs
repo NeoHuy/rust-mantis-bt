@@ -87,6 +87,59 @@ async fn test_security_headers_middleware() {
             .unwrap();
         assert!(csp.contains("frame-ancestors 'self'"));
         assert!(csp.contains("form-action 'self'"));
+        assert!(csp.contains("font-src 'self'"));
+    }
+}
+
+#[tokio::test]
+async fn test_static_assets_endpoints() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db);
+
+    let endpoints = [
+        ("/assets/tailwind.css", "text/css; charset=utf-8"),
+        ("/assets/font-awesome.min.css", "text/css; charset=utf-8"),
+        ("/assets/mantis.js", "application/javascript; charset=utf-8"),
+        ("/assets/mantis_logo.png", "image/png"),
+        ("/fonts/fontawesome-webfont.woff2", "font/woff2"),
+        ("/fonts/fontawesome-webfont.woff", "font/woff"),
+    ];
+
+    for (uri, expected_ct) in endpoints {
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {uri} should return 200");
+        let headers = res.headers();
+        assert_eq!(
+            headers.get("content-type").unwrap().to_str().unwrap(),
+            expected_ct,
+            "Unexpected content-type for {uri}"
+        );
+        assert_eq!(
+            headers.get("cache-control").unwrap().to_str().unwrap(),
+            "public, max-age=86400",
+            "Missing cache-control for {uri}"
+        );
+        let csp = headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("font-src 'self'"),
+            "CSP should include font-src 'self' on {uri}"
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!bytes.is_empty(), "Empty asset body for {uri}");
     }
 }
 

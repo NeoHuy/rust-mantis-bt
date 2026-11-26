@@ -961,9 +961,17 @@ pub async fn rest_add_issue_note(
     }
 }
 
+async fn account_manage_api_tokens_redirect() -> Redirect {
+    Redirect::to("/api_tokens_page")
+}
+
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/api_tokens_page", get(api_tokens_page))
+        .route(
+            "/account_manage_api_tokens_page",
+            get(account_manage_api_tokens_redirect),
+        )
         .route("/api_token_create", post(api_token_create))
         .route("/api_token_revoke/:id", post(api_token_revoke))
         .route("/manage_plugin_page", get(manage_plugin_page))

@@ -5,8 +5,8 @@ use crate::views::layout::{render_layout, render_unauthenticated_layout};
 use axum::response::Html;
 
 pub fn render_login_page(flash_error: Option<&str>, allow_signup: bool) -> Html<String> {
-    let signup_link = if allow_signup {
-        r#"<div style="margin-top: 14px; text-align: center; font-size: 12px;"><a href="/signup_page" style="color:#0066cc; text-decoration:none;">Signup for a new account</a></div>"#
+    let signup_toolbar = if allow_signup {
+        r#"<div class="login-toolbar"><a href="/signup_page"><i class="fa fa-arrow-right" aria-hidden="true"></i> Signup for a new account</a></div>"#
     } else {
         ""
     };
@@ -14,29 +14,40 @@ pub fn render_login_page(flash_error: Option<&str>, allow_signup: bool) -> Html<
     let form_html = format!(
         r#"
     <div class="login-box">
-        <div class="login-header">&#128274; Sign In</div>
+        <div class="login-header">
+            <i class="fa fa-sign-in" aria-hidden="true"></i>
+            <span>Login</span>
+        </div>
         <div class="login-body">
             <form method="POST" action="/login">
-                <div style="margin-bottom: 12px;">
-                    <label for="username" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Username</label>
-                    <input type="text" name="username" id="username" placeholder="Username" autofocus required style="width:100%;" />
+                <div class="login-field">
+                    <label for="username">Username</label>
+                    <span class="input-icon input-icon-right">
+                        <input type="text" name="username" id="username" placeholder="Username" autofocus required />
+                        <i class="ace-icon fa fa-user" aria-hidden="true"></i>
+                    </span>
                 </div>
-                <div style="margin-bottom: 14px;">
-                    <label for="password" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Password</label>
-                    <input type="password" name="password" id="password" placeholder="Password" required style="width:100%;" />
+                <div class="login-field">
+                    <label for="password">Password</label>
+                    <span class="input-icon input-icon-right">
+                        <input type="password" name="password" id="password" placeholder="Password" required />
+                        <i class="ace-icon fa fa-lock" aria-hidden="true"></i>
+                    </span>
                 </div>
-                <div style="margin-bottom: 16px; display:flex; align-items:center; justify-content:space-between; font-size:12px; color:#555;">
-                    <label style="cursor:pointer;"><input type="checkbox" name="perm_login" value="1" checked /> Remember my login on this browser</label>
+                <div class="login-submit-row">
+                    <label class="inline-flex items-center cursor-pointer text-xs text-neutral-600">
+                        <input type="checkbox" name="perm_login" value="1" checked /> Remember my login on this browser
+                    </label>
+                    <button type="submit" class="btn-login-charcoal">
+                        <i class="fa fa-key" aria-hidden="true"></i> Login
+                    </button>
                 </div>
-                <div>
-                    <button type="submit" class="btn" style="width:100%; padding:8px; font-size:13px;">Login</button>
-                </div>
-                {}
             </form>
         </div>
+        {signup_toolbar}
     </div>
     "#,
-        signup_link
+        signup_toolbar = signup_toolbar
     );
 
     let title = if flash_error.is_some() {
@@ -57,36 +68,57 @@ pub fn render_signup_page(
     let form_html = format!(
         r#"
     <div class="login-box">
-        <div class="login-header">&#128100; Create New Account</div>
+        <div class="login-header">
+            <i class="fa fa-users" aria-hidden="true"></i>
+            <span>Create New Account</span>
+        </div>
         <div class="login-body">
             <form method="POST" action="/signup">
-                <div style="margin-bottom: 12px;">
-                    <label for="username" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Username *</label>
-                    <input type="text" name="username" id="username" value="{}" placeholder="Username" autofocus required style="width:100%;" />
+                <div class="login-field">
+                    <label for="username">Username *</label>
+                    <span class="input-icon input-icon-right">
+                        <input type="text" name="username" id="username" value="{}" placeholder="Username" autofocus required />
+                        <i class="ace-icon fa fa-user" aria-hidden="true"></i>
+                    </span>
                 </div>
-                <div style="margin-bottom: 12px;">
-                    <label for="realname" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Real Name</label>
-                    <input type="text" name="realname" id="realname" value="{}" placeholder="Real Name (optional)" style="width:100%;" />
+                <div class="login-field">
+                    <label for="realname">Real Name</label>
+                    <span class="input-icon input-icon-right">
+                        <input type="text" name="realname" id="realname" value="{}" placeholder="Real Name (optional)" />
+                        <i class="ace-icon fa fa-id-card-o" aria-hidden="true"></i>
+                    </span>
                 </div>
-                <div style="margin-bottom: 12px;">
-                    <label for="email" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Email *</label>
-                    <input type="email" name="email" id="email" value="{}" placeholder="Email Address" required style="width:100%;" />
+                <div class="login-field">
+                    <label for="email">Email *</label>
+                    <span class="input-icon input-icon-right">
+                        <input type="email" name="email" id="email" value="{}" placeholder="Email Address" required />
+                        <i class="ace-icon fa fa-envelope" aria-hidden="true"></i>
+                    </span>
                 </div>
-                <div style="margin-bottom: 12px;">
-                    <label for="password" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Password * (min 6 chars)</label>
-                    <input type="password" name="password" id="password" placeholder="Password" required style="width:100%;" />
+                <div class="login-field">
+                    <label for="password">Password * (min 6 chars)</label>
+                    <span class="input-icon input-icon-right">
+                        <input type="password" name="password" id="password" placeholder="Password" required />
+                        <i class="ace-icon fa fa-lock" aria-hidden="true"></i>
+                    </span>
                 </div>
-                <div style="margin-bottom: 16px;">
-                    <label for="password_confirm" style="display:block; margin-bottom:4px; font-weight:600; color:#555;">Confirm Password *</label>
-                    <input type="password" name="password_confirm" id="password_confirm" placeholder="Confirm Password" required style="width:100%;" />
+                <div class="login-field">
+                    <label for="password_confirm">Confirm Password *</label>
+                    <span class="input-icon input-icon-right">
+                        <input type="password" name="password_confirm" id="password_confirm" placeholder="Confirm Password" required />
+                        <i class="ace-icon fa fa-retweet" aria-hidden="true"></i>
+                    </span>
                 </div>
-                <div>
-                    <button type="submit" class="btn" style="width:100%; padding:8px; font-size:13px;">Sign Up</button>
-                </div>
-                <div style="margin-top: 14px; text-align: center; font-size: 12px;">
-                    <a href="/login" style="color:#0066cc; text-decoration:none;">Already have an account? Sign In</a>
+                <div class="login-submit-row">
+                    <span></span>
+                    <button type="submit" class="btn-login-charcoal">
+                        <i class="fa fa-user-plus" aria-hidden="true"></i> Sign Up
+                    </button>
                 </div>
             </form>
+        </div>
+        <div class="login-toolbar">
+            <a href="/login"><i class="fa fa-arrow-left" aria-hidden="true"></i> Already have an account? Sign In</a>
         </div>
     </div>
     "#,
@@ -116,19 +148,22 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
     let content = format!(
         r#"
     <div class="login-box">
-        <div class="login-header" style="background-color: #5cb85c; color: white;">&#10004; Registration Successful</div>
+        <div class="login-header" style="background-color: #629b58; color: #ffffff;">
+            <i class="fa fa-check-circle" aria-hidden="true"></i>
+            <span>Registration Successful</span>
+        </div>
         <div class="login-body" style="text-align: center; padding: 24px 20px;">
             <p style="font-size: 15px; font-weight: 600; color: #3c763d; margin-bottom: 12px;">
                 Account created successfully!
             </p>
-            <p style="color: #555; margin-bottom: 16px;">
+            <p style="color: #555555; margin-bottom: 16px;">
                 You are now logged in as <strong>{}</strong>.
             </p>
-            <p style="color: #777; font-size: 13px; margin-bottom: 20px;">
+            <p style="color: #777777; font-size: 13px; margin-bottom: 20px;">
                 You will be redirected to the dashboard in <span id="countdown" style="font-weight: bold; color: #337ab7;">5</span> seconds...
             </p>
             <div>
-                <a href="/my_view_page" class="btn" style="display: inline-block; padding: 8px 18px; text-decoration: none;">
+                <a href="/my_view_page" class="btn-login-charcoal" style="text-decoration: none;">
                     Go to Dashboard Now &rarr;
                 </a>
             </div>
@@ -152,6 +187,7 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
         html_escape(username)
     );
 
+    let asset_ver = env!("CARGO_PKG_VERSION");
     let html = format!(
         r#"<!DOCTYPE html>
 <html lang="en">
@@ -160,16 +196,19 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
     <meta http-equiv="refresh" content="5;url=/my_view_page">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Registration Successful - MantisBT</title>
-    <style>{}</style>
+    <link rel="icon" type="image/png" href="/images/mantis_logo.png">
+    <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
+    <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
 </head>
-<body class="login-layout">
+<body class="login-layout light-login">
     <div class="login-container">
-        <div class="login-logo-title">&#128027; <span>Mantis</span>BT</div>
+        <div class="login-logo-title">
+            <img src="/assets/mantis_logo.png" alt="MantisBT Logo" class="login-logo">
+        </div>
         {}
     </div>
 </body>
 </html>"#,
-        crate::views::layout::CSS,
         content
     );
 

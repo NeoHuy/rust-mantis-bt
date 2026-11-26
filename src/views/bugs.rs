@@ -291,7 +291,7 @@ pub fn render_my_view_page(
     monitored_by_me: &[Bug],
 ) -> Html<String> {
     let content = format!(
-        r#"<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(460px, 1fr)); gap:16px;">
+        r#"<div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(min(460px, 100%), 1fr)); gap:16px;">
             {}
             {}
             {}

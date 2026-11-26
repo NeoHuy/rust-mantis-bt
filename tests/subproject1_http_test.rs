@@ -1101,7 +1101,7 @@ async fn test_mantis_logo_and_favicon() {
         "HTML should not contain caterpillar bug code &#128027;"
     );
     assert!(html.contains("class=\"login-logo\""));
-    assert!(html.contains("data:image/png;base64,"));
+    assert!(html.contains("src=\"/assets/mantis_logo.png\""));
 
     // 2. GET /favicon.ico returns 200 OK and image/x-icon
     let res = app
@@ -1130,6 +1130,20 @@ async fn test_mantis_logo_and_favicon() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(res.headers().get("content-type").unwrap(), "image/png");
+
+    // 4. GET /assets/mantis_logo.png returns 200 OK and image/png
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/mantis_logo.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers().get("content-type").unwrap(), "image/png");
 }
 
 #[tokio::test]
@@ -1141,6 +1155,7 @@ async fn test_top_project_selector_fetch_and_reload() {
     let admin_cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
 
     let res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/my_view_page")
@@ -1159,8 +1174,28 @@ async fn test_top_project_selector_fetch_and_reload() {
     )
     .unwrap();
 
-    assert!(html.contains(r#"id="top_project_id""#));
-    assert!(html.contains("fetch('/set_project'"));
-    assert!(html.contains("location.reload()"));
+    assert!(html.contains(r#"id="dropdown_projects_menu""#));
+    assert!(html.contains(r#"data-project-search"#));
+    assert!(html.contains(r#"src="/assets/mantis.js?v="#));
     assert!(!html.contains(r#"id="top_project_id" onchange="this.form.submit()""#));
+
+    let js_res = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/mantis.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(js_res.status(), StatusCode::OK);
+    let js = String::from_utf8(
+        axum::body::to_bytes(js_res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(js.contains("fetch('/set_project'"));
+    assert!(js.contains("location.reload()"));
 }

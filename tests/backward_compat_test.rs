@@ -2460,3 +2460,53 @@ async fn test_planning_pages_and_rest_api_smoke_regression() {
     // Verify issue is deleted
     assert!(db.get_bug(new_issue_id).unwrap().is_none());
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. Phase 3.1 Regressions: Advanced Filters, Manage Filters & Column Config
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_phase3_m1_backward_compat_and_no_nested_forms() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_id = db.create_project("P3CompatProj", 10, 10, "", true).unwrap();
+    let admin_cookie = login_as_admin(&app).await;
+    let full_cookie = set_project_cookie(&app, &admin_cookie, proj_id).await;
+
+    // 1. Legacy BugFilter JSON without Phase 3.1 fields deserializes cleanly & works via permalink
+    let fid = db
+        .save_filter(
+            1,
+            proj_id,
+            true,
+            "Legacy Compat Filter",
+            &BugFilter {
+                project_id: Some(proj_id),
+                status: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    for uri in [
+        format!("/view_all_bug_page?filter_id={}", fid),
+        "/manage_filter_page".to_string(),
+        format!("/manage_filter_edit_page/{}", fid),
+        format!("/account_manage_columns_page?project_id={}", proj_id),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header("cookie", &full_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {} failed", uri);
+        let html = response_body_string(res).await;
+        assert_no_nested_forms(&html);
+    }
+}

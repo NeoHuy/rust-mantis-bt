@@ -121,6 +121,7 @@ fn test_build_view_all_bug_page_url_preserves_all_parameters_and_replaces_page()
         sort: Some("priority".to_string()),
         dir: Some("asc".to_string()),
         per_page: Some(50),
+        ..Default::default()
     };
 
     let url = build_view_all_bug_page_url(&q, 3);

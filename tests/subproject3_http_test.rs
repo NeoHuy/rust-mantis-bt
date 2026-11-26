@@ -441,3 +441,512 @@ async fn test_http_my_view_timeline_rbac_hides_private_issues_and_notes() {
     assert!(!html.contains(&format!("{:07}", priv_bug)));
     assert!(!html.contains("commented on issue"));
 }
+
+#[tokio::test]
+async fn test_http_advanced_filters_manage_filters_and_column_customization() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("Phase3FilterProj", 10, 10, "", true)
+        .unwrap();
+    let priv_proj_id = db.create_project("SecretProj", 10, 50, "", true).unwrap();
+
+    let rep_id = db
+        .create_user(
+            "p3_rep",
+            "Reporter P3",
+            "p3rep@test.com",
+            "pass123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let dev_id = db
+        .create_user(
+            "p3_dev",
+            "Developer P3",
+            "p3dev@test.com",
+            "pass123",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let mgr_id = db
+        .create_user(
+            "p3_mgr",
+            "Manager P3",
+            "p3mgr@test.com",
+            "pass123",
+            70,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let cf_browser = db
+        .create_custom_field_full(
+            "Browser",
+            3,
+            "Chrome|Firefox|Safari",
+            "",
+            "",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    let cf_secret = db
+        .create_custom_field_full(
+            "AdminSecret",
+            0,
+            "",
+            "",
+            "",
+            70,
+            70,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_browser, proj_id, 1)
+        .unwrap();
+    db.link_custom_field_to_project(cf_secret, proj_id, 2)
+        .unwrap();
+
+    let b1 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            rep_id,
+            1,
+            "MultiFilter Alpha",
+            "Desc 1",
+            "",
+            "",
+            40, // high
+            60, // major
+            10, // always
+            "v1.0",
+            "Linux",
+            "6.1",
+            "x86_64",
+            10,
+            &[],
+            rust_mantis_bt::db::BugCreateExtras {
+                target_version: "v2.0",
+                build: "b10",
+                due_date: 0,
+                handler_id: Some(dev_id),
+            },
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            dev_id,
+            1,
+            "MultiFilter Beta",
+            "Desc 2",
+            "",
+            "",
+            20, // low
+            80, // block
+            30, // sometimes
+            "v1.1",
+            "macOS",
+            "15",
+            "arm64",
+            10,
+            &[],
+            rust_mantis_bt::db::BugCreateExtras {
+                target_version: "v2.1",
+                build: "b11",
+                due_date: 0,
+                handler_id: None,
+            },
+        )
+        .unwrap();
+    let b3 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            rep_id,
+            1,
+            "=CMD|'calc'!A0",
+            "Formula check",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "v1.0",
+            "Windows",
+            "11",
+            "x64",
+            10,
+            &[],
+            rust_mantis_bt::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+    db.change_bug_status(b2, dev_id, 80, 20, None).unwrap();
+    db.update_bug_fields(
+        b2,
+        dev_id,
+        rust_mantis_bt::models::BugUpdate {
+            fixed_in_version: Some("v1.1.1".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_custom_field_value(cf_browser, b1, mgr_id, "Chrome")
+        .unwrap();
+    db.set_custom_field_value(cf_browser, b2, mgr_id, "Firefox")
+        .unwrap();
+    db.set_custom_field_value(cf_secret, b1, mgr_id, "CONFIDENTIAL_X")
+        .unwrap();
+    db.set_custom_field_value(cf_secret, b3, mgr_id, "=SUM(1,2)")
+        .unwrap();
+
+    // Update date_submitted / last_updated for deterministic date-range HTTP check
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_bug_table SET date_submitted = 1704067200, last_updated = 1704067200 WHERE id = ?1",
+            rusqlite::params![b1],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE mantis_bug_table SET date_submitted = 1735689600, last_updated = 1735689600 WHERE id = ?1",
+            rusqlite::params![b2],
+        )
+        .unwrap();
+    }
+
+    let app = build_router(db.clone());
+    let rep_cookie =
+        set_project_cookie(&app, &login_user(&app, "p3_rep", "pass123").await, proj_id).await;
+    let mgr_cookie =
+        set_project_cookie(&app, &login_user(&app, "p3_mgr", "pass123").await, proj_id).await;
+
+    // 1. Multi-select + MATCH ANY HTTP test: priority=40 OR severity=80 -> matches b1 and b2, excludes b3
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page?match_type=1&priority=40&severity=80")
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("MultiFilter Alpha"));
+    assert!(html.contains("MultiFilter Beta"));
+    assert!(!html.contains("Formula check"));
+
+    // 2. Date range + custom field + version filter HTTP test
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/view_all_bug_page?date_submitted_from=2024-01-01&date_submitted_to=2024-01-02&version=v1.0&custom_field_{}=Chrome",
+                    cf_browser
+                ))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html_cf = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_cf.contains("MultiFilter Alpha"));
+    assert!(!html_cf.contains("MultiFilter Beta"));
+
+    // 3. RBAC: Reporter querying a Manager-only custom field gets no match (no oracle leak)
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/view_all_bug_page?custom_field_{}=CONFIDENTIAL_X",
+                    cf_secret
+                ))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html_oracle = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html_oracle.contains("MultiFilter Alpha"));
+
+    // 4. Save filter (multi-select + custom field) & Manage Filters lifecycle + RBAC
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=Rep+Saved+CF&match_type=1&priority=40&priority=20&custom_field_{}=Chrome",
+                    cf_browser
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let rep_fid = db.list_visible_filters(rep_id, proj_id).unwrap()[0].id;
+
+    // Manager tries to view Reporter's private filter via permalink -> allowed (>= 70),
+    // whereas another Reporter cannot!
+    let other_rep_id = db
+        .create_user(
+            "p3_rep2",
+            "Reporter2",
+            "p3rep2@test.com",
+            "pass123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let _ = other_rep_id;
+    let rep2_cookie =
+        set_project_cookie(&app, &login_user(&app, "p3_rep2", "pass123").await, proj_id).await;
+    let res_priv_deny = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?filter_id={}", rep_fid))
+                .header("cookie", &rep2_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_priv_deny.status(), StatusCode::FORBIDDEN);
+
+    // Filter belonging to inaccessible private project -> 403 Forbidden
+    let priv_fid = db
+        .save_filter(
+            mgr_id,
+            priv_proj_id,
+            true,
+            "SecretProj Filter",
+            &rust_mantis_bt::models::BugFilter::default(),
+        )
+        .unwrap();
+    let res_priv_proj = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?filter_id={}", priv_fid))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_priv_proj.status(), StatusCode::FORBIDDEN);
+
+    // Manage Filters page & edit & RBAC guard on is_public
+    let res_mf = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/manage_filter_page")
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mf.status(), StatusCode::OK);
+    let mf_html = String::from_utf8(
+        axum::body::to_bytes(res_mf.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(mf_html.contains("Rep Saved CF"));
+    assert!(mf_html.contains(&format!("/view_all_bug_page?filter_id={}", rep_fid)));
+
+    // Reporter cannot promote private filter to public (403 Forbidden)
+    let res_pub_deny = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/manage_filter_update/{}", rep_fid))
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=Rep+Saved+CF&project_id={}&is_public=1",
+                    proj_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_pub_deny.status(), StatusCode::FORBIDDEN);
+
+    // Reporter CAN rename own private filter
+    let res_rename = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/manage_filter_update/{}", rep_fid))
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=Renamed+Rep+Filter&project_id={}&match_type=0",
+                    proj_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rename.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        db.get_filter(rep_fid).unwrap().unwrap().0.name,
+        "Renamed Rep Filter"
+    );
+
+    // 5. Per-context Column Customization + View Issues + CSV Export formula sanitization
+    let res_cols = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/account_manage_columns_page?project_id={}",
+                    proj_id
+                ))
+                .header("cookie", &mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_cols.status(), StatusCode::OK);
+    let cols_html = String::from_utf8(
+        axum::body::to_bytes(res_cols.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(cols_html.contains("Manage Columns"));
+    assert!(cols_html.contains(&format!("custom_field_{}", cf_secret)));
+
+    // Manager updates view & csv columns to include custom fields
+    let res_col_save = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/account_manage_columns_update")
+                .header("cookie", &mgr_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&view_issues_columns=id,target_version,custom_field_{},summary&print_issues_columns=id,summary&csv_columns=id,summary,custom_field_{}&excel_columns=id,summary",
+                    proj_id, cf_browser, cf_secret
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_col_save.status(), StatusCode::SEE_OTHER);
+
+    // View Issues renders configured columns (Target Version, Browser)
+    let res_view_cols = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page")
+                .header("cookie", &mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_view_cols.status(), StatusCode::OK);
+    let view_cols_html = String::from_utf8(
+        axum::body::to_bytes(res_view_cols.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(view_cols_html.contains("Target Version"));
+    assert!(view_cols_html.contains("Browser"));
+    assert!(view_cols_html.contains("v2.0"));
+    assert!(view_cols_html.contains("Chrome"));
+
+    // CSV Export respects custom csv_columns AND sanitizes formula injection in custom fields & summary
+    let res_csv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/csv_export")
+                .header("cookie", &mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_csv.status(), StatusCode::OK);
+    let csv = String::from_utf8(
+        axum::body::to_bytes(res_csv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(csv.starts_with("Id,Summary,AdminSecret\r\n"));
+    assert!(csv.contains("'=CMD|'calc'!A0"));
+    assert!(csv.contains("'=SUM(1,2)"));
+}

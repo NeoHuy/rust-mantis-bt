@@ -74,7 +74,9 @@ pub fn render_layout(
         || title.contains("Email Queue")
         || title.contains("Tag");
 
-    let is_account_page = title.contains("My Account") || title.contains("API Tokens");
+    let is_account_page = title.contains("My Account")
+        || title.contains("API Tokens")
+        || title.contains("Manage Columns");
 
     // Left Sidebar items (MantisBT 2.28.4 .skin-3 compact)
     let mut sidebar_items: Vec<(&str, &str, &str, bool)> = vec![
@@ -170,6 +172,11 @@ pub fn render_layout(
         } else {
             ""
         };
+        let col_act = if title == "Manage Columns" {
+            r#" class="active""#
+        } else {
+            ""
+        };
         let tok_act = if title == "API Tokens" {
             r#" class="active""#
         } else {
@@ -178,9 +185,10 @@ pub fn render_layout(
         sub_tabs_html.push_str(&format!(
             r#"<div class="sub-nav-tabs">
                 <a href="/account_page"{}>My Account</a>
+                <a href="/account_manage_columns_page"{}>Manage Columns</a>
                 <a href="/api_tokens_page"{}>API Tokens</a>
             </div>"#,
-            acc_act, tok_act
+            acc_act, col_act, tok_act
         ));
     }
 
@@ -261,6 +269,7 @@ pub fn render_layout(
                 <div id="user-dropdown-menu" class="nav-dropdown-menu">
                     <div class="dropdown-user-meta">{username} ({role})</div>
                     <a href="/account_page" class="dropdown-item-link"><i class="fa fa-user" aria-hidden="true"></i> My Account</a>
+                    <a href="/account_manage_columns_page" class="dropdown-item-link"><i class="fa fa-columns" aria-hidden="true"></i> Manage Columns</a>
                     <a href="/account_manage_api_tokens_page" class="dropdown-item-link"><i class="fa fa-key" aria-hidden="true"></i> API Tokens</a>
                     <div class="dropdown-divider"></div>
                     <form action="/logout" method="POST" class="m-0">

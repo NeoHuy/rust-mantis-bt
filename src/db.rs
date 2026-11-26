@@ -1,9 +1,11 @@
 use crate::models::{
-    ApiToken, Bug, BugFile, BugFilter, BugFull, BugHistory, BugPriority, BugRelationship,
-    BugReproducibility, BugResolution, BugRevision, BugSeverity, BugStatus, BugTag, BugUpdate,
-    Bugnote, Category, CustomField, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig,
-    NewsItem, PluginItem, Project, ProjectVersion, RevisionType, SavedFilter, Tag,
-    TimeTrackingEntry, TimelineEvent, User,
+    default_columns_for_context, filter_authorized_columns, parse_columns_input,
+    parse_date_filter_bound, validate_columns_list, ApiToken, Bug, BugFile, BugFilter, BugFull,
+    BugHistory, BugPriority, BugRelationship, BugReproducibility, BugResolution, BugRevision,
+    BugSeverity, BugStatus, BugTag, BugUpdate, Bugnote, Category, ColumnContext, CustomField,
+    CustomFieldType, CustomFieldValue, EmailMessage, JiraLink, JiraResolvedConfig, NewsItem,
+    PluginItem, Project, ProjectVersion, RevisionType, SavedFilter, Tag, TimeTrackingEntry,
+    TimelineEvent, User, FILTER_MATCH_ANY,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -1377,6 +1379,124 @@ impl Db {
              ON CONFLICT(config_id, project_id, user_id) DO UPDATE SET value = excluded.value",
             params![config_id, project_id, user_id, value],
         )?;
+        Ok(())
+    }
+
+    pub fn delete_config(
+        &self,
+        config_id: &str,
+        project_id: i64,
+        user_id: i64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM mantis_config_table WHERE config_id = ?1 AND project_id = ?2 AND user_id = ?3",
+            params![config_id, project_id, user_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns custom fields accessible (`eff >= access_level_r`) to `user` in `project_id`
+    /// (including descendant projects, or across all accessible projects when `project_id == 0`).
+    pub fn list_accessible_custom_fields_for_user(
+        &self,
+        user: &User,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<CustomField>> {
+        let target_projects: Vec<(i64, i32)> = if project_id > 0 {
+            let eff = self.effective_access_level(user, project_id)?;
+            if eff < 10 {
+                return Ok(Vec::new());
+            }
+            let pids = self.list_project_descendant_ids(project_id)?;
+            let mut out = Vec::new();
+            for pid in pids {
+                let sub_eff = self.effective_access_level(user, pid)?;
+                if sub_eff >= 10 {
+                    out.push((pid, sub_eff));
+                }
+            }
+            out
+        } else {
+            let projects = self.list_visible_projects(user)?;
+            let mut out = Vec::new();
+            for (p, _) in projects {
+                let sub_eff = self.effective_access_level(user, p.id)?;
+                if sub_eff >= 10 {
+                    out.push((p.id, sub_eff));
+                }
+            }
+            out
+        };
+
+        let mut seen = HashSet::new();
+        let mut fields = Vec::new();
+        for (pid, eff) in target_projects {
+            for cf in self.list_custom_fields_for_project(pid)? {
+                if eff >= cf.access_level_r && seen.insert(cf.id) {
+                    fields.push(cf);
+                }
+            }
+        }
+        Ok(fields)
+    }
+
+    pub fn get_user_columns(
+        &self,
+        user: &User,
+        project_id: i64,
+        col_ctx: ColumnContext,
+    ) -> rusqlite::Result<Vec<String>> {
+        let stored_opt = self.get_config(col_ctx.config_id(), project_id, user.id)?;
+        let Some(raw) = stored_opt else {
+            return Ok(default_columns_for_context(col_ctx, project_id));
+        };
+
+        let parsed: Vec<String> = if let Ok(arr) = serde_json::from_str::<Vec<String>>(&raw) {
+            arr
+        } else {
+            parse_columns_input(&raw)
+        };
+
+        let accessible_cfs = self.list_accessible_custom_fields_for_user(user, project_id)?;
+        let accessible_cf_ids: HashSet<i64> = accessible_cfs.iter().map(|c| c.id).collect();
+        let sanitized = filter_authorized_columns(&parsed, &accessible_cf_ids);
+        if sanitized.is_empty() {
+            Ok(default_columns_for_context(col_ctx, project_id))
+        } else {
+            Ok(sanitized)
+        }
+    }
+
+    pub fn set_user_columns(
+        &self,
+        user: &User,
+        project_id: i64,
+        col_ctx: ColumnContext,
+        raw_cols: &[String],
+    ) -> Result<Vec<String>, String> {
+        if project_id > 0 {
+            let eff = self
+                .effective_access_level(user, project_id)
+                .map_err(|e| e.to_string())?;
+            if eff < 10 {
+                return Err("Access denied for this project.".to_string());
+            }
+        }
+        let accessible_cfs = self
+            .list_accessible_custom_fields_for_user(user, project_id)
+            .map_err(|e| e.to_string())?;
+        let validated = validate_columns_list(raw_cols, &accessible_cfs)?;
+        let json = serde_json::to_string(&validated).map_err(|e| e.to_string())?;
+        self.set_config(col_ctx.config_id(), project_id, user.id, &json)
+            .map_err(|e| e.to_string())?;
+        Ok(validated)
+    }
+
+    pub fn reset_user_columns(&self, user_id: i64, project_id: i64) -> rusqlite::Result<()> {
+        for ctx in ColumnContext::all() {
+            self.delete_config(ctx.config_id(), project_id, user_id)?;
+        }
         Ok(())
     }
 
@@ -5923,6 +6043,105 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_visible_filters_for_user(
+        &self,
+        user: &User,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<SavedFilter>> {
+        let filters = self.list_visible_filters(user.id, project_id)?;
+        let mut out = Vec::with_capacity(filters.len());
+        for sf in filters {
+            if sf.project_id > 0 && self.effective_access_level(user, sf.project_id)? < 10 {
+                continue;
+            }
+            out.push(sf);
+        }
+        Ok(out)
+    }
+
+    pub fn list_manageable_filters(
+        &self,
+        user: &User,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<SavedFilter>> {
+        let is_manager = user.access_level >= 70;
+        let filters = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(
+                "SELECT id, user_id, project_id, is_public, name, filter_string
+                 FROM mantis_filters_table
+                 WHERE (user_id = ?1 OR is_public = 1 OR ?2 = 1)
+                   AND (project_id = 0 OR project_id = ?3 OR ?3 = 0)
+                 ORDER BY name ASC, id ASC",
+            )?;
+            let rows = stmt.query_map(
+                params![user.id, if is_manager { 1 } else { 0 }, project_id],
+                |row| {
+                    Ok(SavedFilter {
+                        id: row.get(0)?,
+                        user_id: row.get(1)?,
+                        project_id: row.get(2)?,
+                        is_public: row.get(3)?,
+                        name: row.get(4)?,
+                        filter_string: row.get(5)?,
+                    })
+                },
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut out = Vec::with_capacity(filters.len());
+        for sf in filters {
+            if sf.project_id > 0 && self.effective_access_level(user, sf.project_id)? < 10 {
+                continue;
+            }
+            out.push(sf);
+        }
+        Ok(out)
+    }
+
+    pub fn update_filter(
+        &self,
+        id: i64,
+        name: &str,
+        is_public: bool,
+        project_id: i64,
+        filter: Option<&BugFilter>,
+    ) -> Result<(), String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("Filter name cannot be empty".to_string());
+        }
+        let conn = self.conn();
+        if let Some(bf) = filter {
+            let json = serde_json::to_string(bf).map_err(|e| e.to_string())?;
+            let rows = conn
+                .execute(
+                    "UPDATE mantis_filters_table
+                     SET name = ?1, is_public = ?2, project_id = ?3, filter_string = ?4
+                     WHERE id = ?5",
+                    params![trimmed, if is_public { 1 } else { 0 }, project_id, json, id],
+                )
+                .map_err(|e| e.to_string())?;
+            if rows == 0 {
+                return Err("Filter not found".to_string());
+            }
+        } else {
+            let rows = conn
+                .execute(
+                    "UPDATE mantis_filters_table
+                     SET name = ?1, is_public = ?2, project_id = ?3
+                     WHERE id = ?4",
+                    params![trimmed, if is_public { 1 } else { 0 }, project_id, id],
+                )
+                .map_err(|e| e.to_string())?;
+            if rows == 0 {
+                return Err("Filter not found".to_string());
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete_filter(&self, id: i64) -> rusqlite::Result<()> {
         let conn = self.conn();
         conn.execute(
@@ -6040,6 +6259,303 @@ impl Db {
         rows.collect()
     }
 
+    pub fn list_distinct_bug_versions_for_user(
+        &self,
+        user: &User,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<String>> {
+        let mut project_ids = Vec::new();
+        if project_id > 0 {
+            if self.effective_access_level(user, project_id)? < 10 {
+                return Ok(Vec::new());
+            }
+            for pid in self.list_project_descendant_ids(project_id)? {
+                if self.effective_access_level(user, pid)? >= 10 {
+                    project_ids.push(pid);
+                }
+            }
+        } else {
+            for (p, _) in self.list_visible_projects(user)? {
+                if self.effective_access_level(user, p.id)? >= 10 {
+                    project_ids.push(p.id);
+                }
+            }
+        }
+
+        let mut versions_set = HashSet::new();
+        for pid in &project_ids {
+            for v in self.list_versions(*pid)? {
+                let t = v.version.trim().to_string();
+                if !t.is_empty() {
+                    versions_set.insert(t);
+                }
+            }
+        }
+
+        if !project_ids.is_empty() {
+            let conn = self.conn();
+            for chunk in project_ids.chunks(200) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+                let sql = format!(
+                    "SELECT version, target_version, fixed_in_version
+                     FROM mantis_bug_table
+                     WHERE project_id IN ({})",
+                    placeholders.join(",")
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?;
+                for r in rows {
+                    let (v, tv, fv) = r?;
+                    for s in [v, tv, fv] {
+                        let t = s.trim().to_string();
+                        if !t.is_empty() {
+                            versions_set.insert(t);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut out: Vec<String> = versions_set.into_iter().collect();
+        out.sort();
+        Ok(out)
+    }
+
+    pub fn get_bugs_custom_field_values_map(
+        &self,
+        bugs: &[Bug],
+        accessible_cf_ids: &HashSet<i64>,
+    ) -> rusqlite::Result<HashMap<(i64, i64), String>> {
+        let mut out = HashMap::new();
+        if bugs.is_empty() || accessible_cf_ids.is_empty() {
+            return Ok(out);
+        }
+
+        let mut cf_defaults: HashMap<i64, String> = HashMap::new();
+        for cf in self.list_custom_fields()? {
+            if accessible_cf_ids.contains(&cf.id) {
+                cf_defaults.insert(cf.id, cf.default_value);
+            }
+        }
+        if cf_defaults.is_empty() {
+            return Ok(out);
+        }
+
+        let conn = self.conn();
+        let proj_ids: Vec<i64> = bugs
+            .iter()
+            .map(|b| b.project_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let mut proj_linked_cfs: HashMap<i64, Vec<i64>> = HashMap::new();
+        for chunk in proj_ids.chunks(200) {
+            let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+            let sql = format!(
+                "SELECT project_id, field_id FROM mantis_custom_field_project_table WHERE project_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for r in rows {
+                let (pid, fid) = r?;
+                if cf_defaults.contains_key(&fid) {
+                    proj_linked_cfs.entry(pid).or_default().push(fid);
+                }
+            }
+        }
+
+        for b in bugs {
+            if let Some(fids) = proj_linked_cfs.get(&b.project_id) {
+                for &fid in fids {
+                    if let Some(def_val) = cf_defaults.get(&fid) {
+                        if !def_val.is_empty() {
+                            out.insert((b.id, fid), def_val.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        let bug_ids: Vec<i64> = bugs.iter().map(|b| b.id).collect();
+        let bug_proj_map: HashMap<i64, i64> = bugs.iter().map(|b| (b.id, b.project_id)).collect();
+        for chunk in bug_ids.chunks(200) {
+            let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+            let sql = format!(
+                "SELECT bug_id, field_id, value FROM mantis_custom_field_string_table WHERE bug_id IN ({})",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (bid, fid, val) = r?;
+                if let Some(pid) = bug_proj_map.get(&bid) {
+                    let is_linked = proj_linked_cfs
+                        .get(pid)
+                        .map(|fids| fids.contains(&fid))
+                        .unwrap_or(false);
+                    if is_linked && accessible_cf_ids.contains(&fid) {
+                        out.insert((bid, fid), val);
+                    }
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
+    pub fn get_bugs_tags_map(
+        &self,
+        bug_ids: &[i64],
+    ) -> rusqlite::Result<HashMap<i64, Vec<String>>> {
+        let mut out: HashMap<i64, Vec<String>> = HashMap::new();
+        if bug_ids.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn();
+        for chunk in bug_ids.chunks(200) {
+            let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+            let sql = format!(
+                "SELECT bt.bug_id, t.name
+                 FROM mantis_bug_tag_table bt
+                 JOIN mantis_tag_table t ON bt.tag_id = t.id
+                 WHERE bt.bug_id IN ({})
+                 ORDER BY t.name ASC",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for r in rows {
+                let (bid, name) = r?;
+                out.entry(bid).or_default().push(name);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn get_bugs_texts_map(
+        &self,
+        bug_ids: &[i64],
+    ) -> rusqlite::Result<HashMap<i64, (String, String, String)>> {
+        let mut out = HashMap::new();
+        if bug_ids.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn();
+        for chunk in bug_ids.chunks(200) {
+            let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+            let sql = format!(
+                "SELECT id, description, steps_to_reproduce, additional_information
+                 FROM mantis_bug_text_table
+                 WHERE id IN ({})",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for r in rows {
+                let (bid, desc, steps, add) = r?;
+                out.insert(bid, (desc, steps, add));
+            }
+        }
+        Ok(out)
+    }
+
+    fn custom_field_value_matches(
+        cf: &CustomField,
+        stored_val: &str,
+        expected_vals: &[String],
+    ) -> bool {
+        let expected_clean: Vec<String> = expected_vals
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "[any]")
+            .collect();
+        if expected_clean.is_empty() {
+            return true;
+        }
+        let stored_trimmed = stored_val.trim();
+        match CustomFieldType::from_i32(cf.field_type) {
+            Some(CustomFieldType::Checkbox) => {
+                if cf.possible_values.trim().is_empty() {
+                    let stored_bool =
+                        stored_trimmed == "1" || stored_trimmed.eq_ignore_ascii_case("true");
+                    expected_clean.iter().any(|e| {
+                        let exp_bool = e == "1" || e.eq_ignore_ascii_case("true");
+                        if e == "0" || e.eq_ignore_ascii_case("false") {
+                            !stored_bool
+                        } else {
+                            stored_bool == exp_bool
+                        }
+                    })
+                } else {
+                    let items: Vec<&str> = stored_trimmed
+                        .split('|')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    expected_clean
+                        .iter()
+                        .any(|e| items.iter().any(|i| i.eq_ignore_ascii_case(e)))
+                }
+            }
+            Some(CustomFieldType::Multilist) => {
+                let items: Vec<&str> = stored_trimmed
+                    .split('|')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                expected_clean
+                    .iter()
+                    .any(|e| items.iter().any(|i| i.eq_ignore_ascii_case(e)))
+            }
+            Some(CustomFieldType::String)
+            | Some(CustomFieldType::Textarea)
+            | Some(CustomFieldType::Email) => {
+                let lower_stored = stored_trimmed.to_ascii_lowercase();
+                expected_clean
+                    .iter()
+                    .any(|e| lower_stored.contains(&e.to_ascii_lowercase()))
+            }
+            _ => expected_clean
+                .iter()
+                .any(|e| stored_trimmed.eq_ignore_ascii_case(e)),
+        }
+    }
+
     pub fn filter_bugs(&self, filter: &BugFilter, user: &User) -> rusqlite::Result<Vec<Bug>> {
         let all_candidates = if let Some(pid) = filter.project_id {
             if pid > 0 {
@@ -6066,115 +6582,518 @@ impl Db {
             self.list_bugs(0, 0, 50_000)?
         };
 
+        let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+        let hide_threshold = filter.hide_status.filter(|&v| v > 0);
+        let hide_statuses = filter.effective_hide_statuses();
+
+        let mut visible_bugs = Vec::new();
+        for b in all_candidates {
+            let eff = match eff_cache.get(&b.project_id) {
+                Some(&v) => v,
+                None => {
+                    let v = self.effective_access_level(user, b.project_id)?;
+                    eff_cache.insert(b.project_id, v);
+                    v
+                }
+            };
+            if !Self::can_view_bug(user.id, eff, &b) {
+                continue;
+            }
+            if let Some(hide_st) = hide_threshold {
+                if b.status >= hide_st {
+                    continue;
+                }
+            }
+            if !hide_statuses.is_empty() && hide_statuses.contains(&b.status) {
+                continue;
+            }
+            visible_bugs.push(b);
+        }
+
+        if visible_bugs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let statuses = filter.effective_statuses();
+        let priorities = filter.effective_priorities();
+        let severities = filter.effective_severities();
+        let category_ids = filter.effective_category_ids();
+        let reporter_ids = filter.effective_reporter_ids();
+        let handler_ids = filter.effective_handler_ids();
+        let tag_ids = filter.effective_tag_ids();
+        let monitored_by_ids = filter.effective_monitored_by_ids();
+        let resolutions = filter.effective_resolutions();
+        let reproducibilities = filter.effective_reproducibilities();
+        let view_state_opt = filter.view_state.filter(|&v| v == 10 || v == 50);
+        let sticky_opt = filter.sticky.filter(|&v| v == 0 || v == 1);
+        let versions = filter.effective_versions();
+        let target_versions = filter.effective_target_versions();
+        let fixed_in_versions = filter.effective_fixed_in_versions();
+        let note_user_ids = filter.effective_note_user_ids();
+
+        let ds_from = filter
+            .date_submitted_from
+            .as_deref()
+            .and_then(|s| parse_date_filter_bound(s, false));
+        let ds_to = filter
+            .date_submitted_to
+            .as_deref()
+            .and_then(|s| parse_date_filter_bound(s, true));
+        let lu_from = filter
+            .last_updated_from
+            .as_deref()
+            .and_then(|s| parse_date_filter_bound(s, false));
+        let lu_to = filter
+            .last_updated_to
+            .as_deref()
+            .and_then(|s| parse_date_filter_bound(s, true));
+
+        let rel_type_opt = filter
+            .relationship_type
+            .filter(|&rt| (-1..=6).contains(&rt));
+        let rel_bug_id_opt = filter.relationship_bug_id.filter(|&id| id > 0);
+        let rel_active = rel_type_opt.is_some() || rel_bug_id_opt.is_some();
+
         let search_kw = filter
             .search
             .as_ref()
             .map(|s| s.trim().to_ascii_lowercase())
             .filter(|s| !s.is_empty());
 
+        let active_cf_filters: Vec<(i64, Vec<String>)> = filter
+            .custom_fields
+            .iter()
+            .filter_map(|(&fid, vals)| {
+                let cleaned: Vec<String> = vals
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && s != "[any]")
+                    .collect();
+                if fid > 0 && !cleaned.is_empty() {
+                    Some((fid, cleaned))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let visible_ids: Vec<i64> = visible_bugs.iter().map(|b| b.id).collect();
+
+        // Batch-load auxiliary maps only when needed
+        let bug_tag_ids_map: HashMap<i64, HashSet<i64>> = if !tag_ids.is_empty() {
+            let mut map: HashMap<i64, HashSet<i64>> = HashMap::new();
+            let conn = self.conn();
+            for chunk in visible_ids.chunks(200) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+                let sql = format!(
+                    "SELECT bug_id, tag_id FROM mantis_bug_tag_table WHERE bug_id IN ({})",
+                    placeholders.join(",")
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                for r in rows {
+                    let (bid, tid) = r?;
+                    map.entry(bid).or_default().insert(tid);
+                }
+            }
+            map
+        } else {
+            HashMap::new()
+        };
+
+        let bug_monitors_map: HashMap<i64, HashSet<i64>> = if !monitored_by_ids.is_empty() {
+            let mut map: HashMap<i64, HashSet<i64>> = HashMap::new();
+            let conn = self.conn();
+            for chunk in visible_ids.chunks(200) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+                let sql = format!(
+                    "SELECT bug_id, user_id FROM mantis_bug_monitor_table WHERE bug_id IN ({})",
+                    placeholders.join(",")
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                for r in rows {
+                    let (bid, uid) = r?;
+                    map.entry(bid).or_default().insert(uid);
+                }
+            }
+            map
+        } else {
+            HashMap::new()
+        };
+
+        let bug_notes_map: HashMap<i64, Vec<(i64, i32, String)>> =
+            if !note_user_ids.is_empty() || search_kw.is_some() {
+                let mut map: HashMap<i64, Vec<(i64, i32, String)>> = HashMap::new();
+                let conn = self.conn();
+                for chunk in visible_ids.chunks(200) {
+                    let placeholders: Vec<String> =
+                        (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+                    let sql = format!(
+                        "SELECT n.bug_id, n.reporter_id, n.view_state, COALESCE(t.note, '')
+                         FROM mantis_bugnote_table n
+                         LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+                         WHERE n.bug_id IN ({})",
+                        placeholders.join(",")
+                    );
+                    let mut stmt = conn.prepare(&sql)?;
+                    let params: Vec<&dyn rusqlite::ToSql> =
+                        chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                    let rows = stmt.query_map(params.as_slice(), |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i32>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    })?;
+                    for r in rows {
+                        let (bid, rep_id, vs, text) = r?;
+                        map.entry(bid).or_default().push((rep_id, vs, text));
+                    }
+                }
+                map
+            } else {
+                HashMap::new()
+            };
+
+        let texts_map = if search_kw.is_some() {
+            self.get_bugs_texts_map(&visible_ids)?
+        } else {
+            HashMap::new()
+        };
+
+        // Batch relationships + target bug visibility
+        let bug_rels_map: HashMap<i64, Vec<(i64, i32, bool)>> = if rel_active {
+            let mut raw_rels: Vec<(i64, i64, i32)> = Vec::new();
+            let mut dest_ids = HashSet::new();
+            let conn = self.conn();
+            for chunk in visible_ids.chunks(200) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+                let sql = format!(
+                    "SELECT source_bug_id, destination_bug_id, relationship_type
+                     FROM mantis_bug_relationship_table
+                     WHERE source_bug_id IN ({0}) OR destination_bug_id IN ({0})",
+                    placeholders.join(",")
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
+                })?;
+                for r in rows {
+                    let (src, dst, rt) = r?;
+                    raw_rels.push((src, dst, rt));
+                    dest_ids.insert(src);
+                    dest_ids.insert(dst);
+                }
+            }
+            drop(conn);
+
+            let dest_vec: Vec<i64> = dest_ids.into_iter().collect();
+            let related_bugs = self.get_bugs_by_ids(&dest_vec)?;
+            let mut viewable_bugs: HashMap<i64, bool> = HashMap::new();
+            for (bid, rb) in &related_bugs {
+                let eff = match eff_cache.get(&rb.project_id) {
+                    Some(&v) => v,
+                    None => {
+                        let v = self.effective_access_level(user, rb.project_id)?;
+                        eff_cache.insert(rb.project_id, v);
+                        v
+                    }
+                };
+                viewable_bugs.insert(*bid, Self::can_view_bug(user.id, eff, rb));
+            }
+
+            let mut map: HashMap<i64, Vec<(i64, i32, bool)>> = HashMap::new();
+            for (src, dst, rt) in raw_rels {
+                let dst_ok = viewable_bugs.get(&dst).copied().unwrap_or(false);
+                let src_ok = viewable_bugs.get(&src).copied().unwrap_or(false);
+                if dst_ok {
+                    map.entry(src).or_default().push((dst, rt, true));
+                }
+                // For undirected RelatedTo (0), allow matching either direction
+                if rt == 0 && src_ok {
+                    map.entry(dst).or_default().push((src, rt, true));
+                }
+            }
+            map
+        } else {
+            HashMap::new()
+        };
+
+        // Batch custom fields metadata, links, and stored values
+        struct FilterCfData {
+            defs: HashMap<i64, CustomField>,
+            links: HashSet<(i64, i64)>,
+            values: HashMap<(i64, i64), String>,
+        }
+        let cf_data = if !active_cf_filters.is_empty() {
+            let defs: HashMap<i64, CustomField> = self
+                .list_custom_fields()?
+                .into_iter()
+                .map(|c| (c.id, c))
+                .collect();
+            let mut links = HashSet::new();
+            let mut values = HashMap::new();
+            let conn = self.conn();
+            let proj_ids: Vec<i64> = visible_bugs
+                .iter()
+                .map(|b| b.project_id)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            for chunk in proj_ids.chunks(200) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+                let sql = format!(
+                    "SELECT field_id, project_id FROM mantis_custom_field_project_table WHERE project_id IN ({})",
+                    placeholders.join(",")
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                for r in rows {
+                    let (fid, pid) = r?;
+                    links.insert((fid, pid));
+                }
+            }
+            for chunk in visible_ids.chunks(200) {
+                let placeholders: Vec<String> =
+                    (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+                let sql = format!(
+                    "SELECT bug_id, field_id, value FROM mantis_custom_field_string_table WHERE bug_id IN ({})",
+                    placeholders.join(",")
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> =
+                    chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?;
+                for r in rows {
+                    let (bid, fid, val) = r?;
+                    values.insert((bid, fid), val);
+                }
+            }
+            FilterCfData {
+                defs,
+                links,
+                values,
+            }
+        } else {
+            FilterCfData {
+                defs: HashMap::new(),
+                links: HashSet::new(),
+                values: HashMap::new(),
+            }
+        };
+
+        let match_any = filter.match_type == FILTER_MATCH_ANY;
         let mut results = Vec::new();
-        for b in all_candidates {
-            let eff = self.effective_access_level(user, b.project_id)?;
-            if !Self::can_view_bug(user.id, eff, &b) {
-                continue;
+
+        for b in visible_bugs {
+            let eff = eff_cache.get(&b.project_id).copied().unwrap_or(0);
+            let mut preds: Vec<bool> = Vec::new();
+
+            if !statuses.is_empty() {
+                preds.push(statuses.contains(&b.status));
             }
-            if let Some(st) = filter.status {
-                if st > 0 && b.status != st {
-                    continue;
-                }
+            if !priorities.is_empty() {
+                preds.push(priorities.contains(&b.priority));
             }
-            if let Some(hide_st) = filter.hide_status {
-                if hide_st > 0 && b.status >= hide_st {
-                    continue;
-                }
+            if !severities.is_empty() {
+                preds.push(severities.contains(&b.severity));
             }
-            if let Some(pr) = filter.priority {
-                if pr > 0 && b.priority != pr {
-                    continue;
-                }
+            if !category_ids.is_empty() {
+                preds.push(category_ids.contains(&b.category_id));
             }
-            if let Some(sev) = filter.severity {
-                if sev > 0 && b.severity != sev {
-                    continue;
-                }
+            if !reporter_ids.is_empty() {
+                preds.push(reporter_ids.contains(&b.reporter_id));
             }
-            if let Some(cid) = filter.category_id {
-                if cid > 0 && b.category_id != cid {
-                    continue;
-                }
+            if !handler_ids.is_empty() {
+                let matched = handler_ids.contains(&b.handler_id)
+                    || (b.handler_id == 0 && handler_ids.contains(&-1));
+                preds.push(matched);
             }
-            if let Some(rid) = filter.reporter_id {
-                if rid > 0 && b.reporter_id != rid {
-                    continue;
-                }
+            if !resolutions.is_empty() {
+                preds.push(resolutions.contains(&b.resolution));
             }
-            if let Some(hid) = filter.handler_id {
-                if hid > 0 && b.handler_id != hid {
-                    continue;
-                } else if hid == -1 && b.handler_id != 0 {
-                    // -1 = Unassigned
-                    continue;
-                }
+            if !reproducibilities.is_empty() {
+                preds.push(reproducibilities.contains(&b.reproducibility));
             }
-            if let Some(tid) = filter.tag_id {
-                if tid > 0 {
-                    let tags = self.list_bug_tags(b.id)?;
-                    if !tags.iter().any(|t| t.tag_id == tid) {
-                        continue;
+            if let Some(vs) = view_state_opt {
+                preds.push(b.view_state == vs);
+            }
+            if let Some(st) = sticky_opt {
+                preds.push(b.sticky == st);
+            }
+            if !versions.is_empty() {
+                let matched = versions.iter().any(|v| {
+                    if v == "[none]" {
+                        b.version.trim().is_empty()
+                    } else {
+                        b.version.trim() == v
                     }
-                }
+                });
+                preds.push(matched);
             }
-            if let Some(mid) = filter.monitored_by {
-                if mid > 0 {
-                    let monitors = self.list_bug_monitor_users(b.id)?;
-                    if !monitors.iter().any(|u| u.id == mid) {
-                        continue;
+            if !target_versions.is_empty() {
+                let matched = target_versions.iter().any(|v| {
+                    if v == "[none]" {
+                        b.target_version.trim().is_empty()
+                    } else {
+                        b.target_version.trim() == v
                     }
-                }
+                });
+                preds.push(matched);
             }
-            if let Some(ref tv) = filter.target_version {
-                let tv_trimmed = tv.trim();
-                if !tv_trimmed.is_empty() && b.target_version.trim() != tv_trimmed {
-                    continue;
-                }
+            if !fixed_in_versions.is_empty() {
+                let matched = fixed_in_versions.iter().any(|v| {
+                    if v == "[none]" {
+                        b.fixed_in_version.trim().is_empty()
+                    } else {
+                        b.fixed_in_version.trim() == v
+                    }
+                });
+                preds.push(matched);
             }
-            if let Some(ref fv) = filter.fixed_in_version {
-                let fv_trimmed = fv.trim();
-                if !fv_trimmed.is_empty() && b.fixed_in_version.trim() != fv_trimmed {
-                    continue;
-                }
+            if ds_from.is_some() || ds_to.is_some() {
+                let ok_from = ds_from.map(|ts| b.date_submitted >= ts).unwrap_or(true);
+                let ok_to = ds_to.map(|ts| b.date_submitted <= ts).unwrap_or(true);
+                preds.push(ok_from && ok_to);
+            }
+            if lu_from.is_some() || lu_to.is_some() {
+                let ok_from = lu_from.map(|ts| b.last_updated >= ts).unwrap_or(true);
+                let ok_to = lu_to.map(|ts| b.last_updated <= ts).unwrap_or(true);
+                preds.push(ok_from && ok_to);
+            }
+            if !tag_ids.is_empty() {
+                let matched = bug_tag_ids_map
+                    .get(&b.id)
+                    .map(|set| tag_ids.iter().any(|tid| set.contains(tid)))
+                    .unwrap_or(false);
+                preds.push(matched);
+            }
+            if !monitored_by_ids.is_empty() {
+                let matched = bug_monitors_map
+                    .get(&b.id)
+                    .map(|set| monitored_by_ids.iter().any(|mid| set.contains(mid)))
+                    .unwrap_or(false);
+                preds.push(matched);
+            }
+            if !note_user_ids.is_empty() {
+                let matched = bug_notes_map
+                    .get(&b.id)
+                    .map(|notes| {
+                        notes.iter().any(|(rep_id, vs, _)| {
+                            (*vs == 10 || eff >= 55 || *rep_id == user.id)
+                                && note_user_ids.contains(rep_id)
+                        })
+                    })
+                    .unwrap_or(false);
+                preds.push(matched);
+            }
+            if rel_active {
+                let matched = bug_rels_map
+                    .get(&b.id)
+                    .map(|rels| {
+                        rels.iter().any(|(dst_id, rt, viewable)| {
+                            if !*viewable {
+                                return false;
+                            }
+                            let type_ok = match rel_type_opt {
+                                Some(req_rt) if req_rt >= 0 => *rt == req_rt,
+                                _ => true,
+                            };
+                            let bug_ok = match rel_bug_id_opt {
+                                Some(req_id) => *dst_id == req_id,
+                                None => true,
+                            };
+                            type_ok && bug_ok
+                        })
+                    })
+                    .unwrap_or(false);
+                preds.push(matched);
+            }
+            for (cf_id, expected_vals) in &active_cf_filters {
+                let matched = match cf_data.defs.get(cf_id) {
+                    Some(cf)
+                        if cf.filter_by != 0
+                            && eff >= cf.access_level_r
+                            && cf_data.links.contains(&(*cf_id, b.project_id)) =>
+                    {
+                        let stored = cf_data
+                            .values
+                            .get(&(b.id, *cf_id))
+                            .map(String::as_str)
+                            .unwrap_or(cf.default_value.as_str());
+                        Self::custom_field_value_matches(cf, stored, expected_vals)
+                    }
+                    _ => false,
+                };
+                preds.push(matched);
             }
             if let Some(ref kw) = search_kw {
                 let mut matched = b.summary.to_ascii_lowercase().contains(kw)
                     || format!("{:07}", b.id).contains(kw);
                 if !matched {
-                    if let Some(full) = self.get_bug_full(b.id)? {
-                        if full.description.to_ascii_lowercase().contains(kw)
-                            || full.steps_to_reproduce.to_ascii_lowercase().contains(kw)
-                            || full
-                                .additional_information
-                                .to_ascii_lowercase()
-                                .contains(kw)
+                    if let Some((desc, steps, add)) = texts_map.get(&b.id) {
+                        if desc.to_ascii_lowercase().contains(kw)
+                            || steps.to_ascii_lowercase().contains(kw)
+                            || add.to_ascii_lowercase().contains(kw)
                         {
                             matched = true;
                         }
                     }
                 }
                 if !matched {
-                    let notes = self.list_bugnotes(b.id, eff)?;
-                    if notes
-                        .iter()
-                        .any(|n| n.note.to_ascii_lowercase().contains(kw))
-                    {
-                        matched = true;
+                    if let Some(notes) = bug_notes_map.get(&b.id) {
+                        if notes.iter().any(|(rep_id, vs, text)| {
+                            (*vs == 10 || eff >= 55 || *rep_id == user.id)
+                                && text.to_ascii_lowercase().contains(kw)
+                        }) {
+                            matched = true;
+                        }
                     }
                 }
-                if !matched {
-                    continue;
-                }
+                preds.push(matched);
             }
 
-            results.push(b);
+            let keep = if preds.is_empty() {
+                true
+            } else if match_any {
+                preds.into_iter().any(|p| p)
+            } else {
+                preds.into_iter().all(|p| p)
+            };
+
+            if keep {
+                results.push(b);
+            }
         }
 
         Ok(results)

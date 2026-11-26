@@ -1,7 +1,9 @@
 pub mod api;
 pub mod auth;
 pub mod bugs;
+pub mod columns;
 pub mod custom_fields;
+pub mod filters;
 pub mod formatting;
 pub mod jira;
 pub mod layout;

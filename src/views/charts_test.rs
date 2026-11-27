@@ -88,7 +88,7 @@ fn test_render_charts_top_n_sorted_with_other_and_full_total() {
 
 #[test]
 fn test_trend_y_axis_ticks_are_unique_increasing_integers() {
-    for max_val in [1usize, 2, 3, 5, 9] {
+    for max_val in [1usize, 2, 3, 4, 5, 9, 1000] {
         let svg = render_issues_trend_svg(
             "Trend",
             &[TrendPoint {

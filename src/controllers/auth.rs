@@ -48,7 +48,7 @@ pub struct AccountQuery {
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/login", get(login_page).post(login_submit))
-        .route("/login_page", get(login_page).post(login_submit))
+        .route("/login_page", get(login_page))
         .route("/signup_page", get(signup_page))
         .route("/signup", post(signup_submit))
         .route("/logout", post(logout))

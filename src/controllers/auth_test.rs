@@ -160,7 +160,10 @@ async fn test_login_page_alias_route() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let user = db.authenticate("administrator", "root").unwrap().unwrap();
+    let user = db
+        .authenticate("administrator", "root")
+        .unwrap()
+        .expect("seed admin");
     let resp = app
         .oneshot(
             Request::builder()

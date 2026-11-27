@@ -1240,6 +1240,7 @@ async fn test_http_advanced_filters_manage_filters_and_column_customization() {
 
     let rep_b_cookie = set_project_cookie(&app, &rep_cookie, proj_b).await;
     let res_proj_b_view = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/view_all_bug_page")
@@ -1257,4 +1258,64 @@ async fn test_http_advanced_filters_manage_filters_and_column_customization() {
     )
     .unwrap();
     assert!(!proj_b_html.contains(r#"name="is_public""#));
+
+    // CSV export with another user's private filter returns 403 Forbidden
+    let mgr_priv_fid = db
+        .save_filter(
+            mgr_id,
+            proj_a,
+            false,
+            "MgrPrivateCSV",
+            &rust_mantis_bt::models::BugFilter::default(),
+        )
+        .unwrap();
+    let res_priv_csv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/csv_export?filter_id={}", mgr_priv_fid))
+                .header("cookie", &rep_a_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_priv_csv.status(), StatusCode::FORBIDDEN);
+
+    // Viewing project-scoped saved filter under All Projects (0) preserves target project_id in save form
+    let scoped_fid = db
+        .save_filter(
+            rep_id,
+            proj_a,
+            false,
+            "ScopedProjA",
+            &rust_mantis_bt::models::BugFilter {
+                project_id: Some(proj_a),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let res_scoped_view = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?filter_id={}", scoped_fid))
+                .header("cookie", &rep_all_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_scoped_view.status(), StatusCode::OK);
+    let scoped_html = String::from_utf8(
+        axum::body::to_bytes(res_scoped_view.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(scoped_html.contains(&format!(
+        r#"<input type="hidden" name="project_id" value="{}">"#,
+        proj_a
+    )));
+    assert!(scoped_html.contains(r#"name="is_public""#));
 }

@@ -109,7 +109,7 @@ pub fn render_manage_columns_page(
                             <td class="label-col">Print Issues Columns</td>
                             <td class="input-col">
                                 <textarea name="print_issues_columns" id="print_issues_columns" rows="3" class="w-full text-xs" required>{}</textarea>
-                                <div class="text-xs text-gray-500 mt-1">Included in the printer-friendly View Issues report.</div>
+                                <div class="text-xs text-gray-500 mt-1">Saved for the printer-friendly View Issues report.</div>
                             </td>
                         </tr>
                         <tr>
@@ -123,7 +123,7 @@ pub fn render_manage_columns_page(
                             <td class="label-col">Excel Export Columns</td>
                             <td class="input-col">
                                 <textarea name="excel_columns" id="excel_columns" rows="3" class="w-full text-xs" required>{}</textarea>
-                                <div class="text-xs text-gray-500 mt-1">Included in Excel SpreadsheetML XML exports.</div>
+                                <div class="text-xs text-gray-500 mt-1">Saved for Excel SpreadsheetML XML exports.</div>
                             </td>
                         </tr>
                     </table>

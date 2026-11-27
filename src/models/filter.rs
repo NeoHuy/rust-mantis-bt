@@ -470,7 +470,10 @@ fn url_decode_lossy(s: &str) -> String {
                 i += 1;
             }
             b'%' => {
-                if i + 2 < raw.len() {
+                if i + 2 < raw.len()
+                    && raw[i + 1].is_ascii_hexdigit()
+                    && raw[i + 2].is_ascii_hexdigit()
+                {
                     if let Ok(s_hex) = std::str::from_utf8(&raw[i + 1..i + 3]) {
                         if let Ok(val) = u8::from_str_radix(s_hex, 16) {
                             bytes.push(val);

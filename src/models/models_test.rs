@@ -1096,13 +1096,14 @@ fn test_advanced_bug_filter_parsing_urls_and_columns() {
     assert!(bf.custom_fields.contains_key(&5));
     assert!(!bf.custom_fields.contains_key(&99));
 
-    // Malformed percent decoding preserves valid subsequent % escapes
-    let pairs = parse_query_pairs("q=%ZZ%20ok%2B&a=%2");
+    // Malformed percent decoding preserves valid subsequent % escapes and rejects %+X
+    let pairs = parse_query_pairs("q=%ZZ%20ok%2B&a=%2&b=%+5%20ok");
     assert_eq!(
         pairs,
         vec![
             ("q".to_string(), "%ZZ ok+".to_string()),
             ("a".to_string(), "%2".to_string()),
+            ("b".to_string(), "% 5 ok".to_string()),
         ]
     );
 

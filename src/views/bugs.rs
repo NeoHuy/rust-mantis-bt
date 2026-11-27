@@ -2129,7 +2129,16 @@ pub fn render_view_all_bug_page(
         true,
         &allowed_cf_ids,
     );
-    save_hidden_inputs.push_str(&version_scope_hidden_inputs);
+    let save_project_hidden_inputs = if let Some(pid) = filter
+        .project_id
+        .filter(|&x| x > 0)
+        .or_else(|| query.project_id.filter(|&x| x > 0))
+    {
+        format!(r#"<input type="hidden" name="project_id" value="{}">"#, pid)
+    } else {
+        String::new()
+    };
+    save_hidden_inputs.push_str(&save_project_hidden_inputs);
 
     let mut adv_form_hidden_inputs = version_scope_hidden_inputs.clone();
     for v in filter.effective_hide_statuses() {

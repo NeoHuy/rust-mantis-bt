@@ -221,6 +221,7 @@ async fn test_project_only_manager_public_filter_move_and_private_delete_rbac() 
         big_body.push_str(&format!("&version={}_{}", i, "x".repeat(400)));
     }
     let res_big = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -240,4 +241,62 @@ async fn test_project_only_manager_public_filter_move_and_private_delete_rbac() 
         .to_str()
         .unwrap();
     assert!(big_loc.contains("err=Filter+definition+exceeds+maximum+allowed+size"));
+
+    // 5. Plain Reporter cannot delete another user's public filter -> 403
+    db.create_user(
+        "plain_rep",
+        "Plain Rep",
+        "prep@x.com",
+        "pw123",
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+    let plain_rep = db.authenticate("plain_rep", "pw123").unwrap().unwrap();
+    let plain_rep_cookie = format!("MANTIS_STRING_COOKIE={}", plain_rep.cookie_string);
+    let res_rep_del_pub = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/filter_delete/{}", fid))
+                .header("cookie", &plain_rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rep_del_pub.status(), StatusCode::FORBIDDEN);
+    assert!(db.get_filter(fid).unwrap().is_some());
+
+    // 6. User who is Viewer on active proj_b (10) can still manage/edit own filter in proj_a (70)
+    db.set_project_user(proj_b, u_id, 10).unwrap();
+    let viewer_active_cookie = format!(
+        "MANTIS_STRING_COOKIE={}; MANTIS_PROJECT_COOKIE={}",
+        u.cookie_string, proj_b
+    );
+    let res_mgr_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/manage_filter_page")
+                .header("cookie", &viewer_active_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_list.status(), StatusCode::OK);
+    let res_mgr_edit = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/manage_filter_edit_page/{}", fid))
+                .header("cookie", &viewer_active_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_edit.status(), StatusCode::OK);
 }

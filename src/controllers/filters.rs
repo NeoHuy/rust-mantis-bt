@@ -113,7 +113,7 @@ pub async fn manage_filter_page(
     ctx: AuthContext,
     Query(q): Query<FlashQuery>,
 ) -> Response {
-    if !has_filter_reporter_access(&db, &ctx, ctx.active_project_id) {
+    if !has_filter_reporter_access(&db, &ctx, 0) {
         return forbidden(&ctx, "Reporter access required to manage saved filters.");
     }
 
@@ -169,10 +169,6 @@ pub async fn manage_filter_edit_page(
     Path(id): Path<i64>,
     Query(q): Query<FlashQuery>,
 ) -> Response {
-    if !has_filter_reporter_access(&db, &ctx, ctx.active_project_id) {
-        return forbidden(&ctx, "Reporter access required to manage saved filters.");
-    }
-
     let (sf, mut bf) = match db.get_filter(id) {
         Ok(Some(v)) => v,
         Ok(None) => return views::render_not_found_page(&ctx, "Saved filter not found"),
@@ -197,6 +193,9 @@ pub async fn manage_filter_edit_page(
             < 10
     {
         return forbidden(&ctx, "You do not have access to this filter's project.");
+    }
+    if !has_filter_reporter_access(&db, &ctx, sf.project_id) {
+        return forbidden(&ctx, "Reporter access required to manage saved filters.");
     }
 
     let proj_mgr = filter_manager_access(&db, &ctx.user, sf.project_id) >= 70;
@@ -246,10 +245,6 @@ pub async fn manage_filter_update(
     Path(id): Path<i64>,
     axum::Form(form): axum::Form<UpdateFilterForm>,
 ) -> Response {
-    if !has_filter_reporter_access(&db, &ctx, ctx.active_project_id) {
-        return forbidden(&ctx, "Reporter access required to manage saved filters.");
-    }
-
     let (sf, mut bf) = match db.get_filter(id) {
         Ok(Some(v)) => v,
         Ok(None) => return views::render_not_found_page(&ctx, "Saved filter not found"),
@@ -274,6 +269,9 @@ pub async fn manage_filter_update(
             < 10
     {
         return forbidden(&ctx, "You do not have access to this filter's project.");
+    }
+    if !has_filter_reporter_access(&db, &ctx, sf.project_id) {
+        return forbidden(&ctx, "Reporter access required to manage saved filters.");
     }
 
     let cur_proj_mgr = filter_manager_access(&db, &ctx.user, sf.project_id) >= 70;

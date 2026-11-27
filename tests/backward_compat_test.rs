@@ -2556,6 +2556,7 @@ async fn test_phase3_m1_backward_compat_and_no_nested_forms() {
 
     for uri in [
         format!("/view_all_bug_page?filter_id={}", fid),
+        format!("/print_all_bug_page?filter_id={}", fid),
         "/manage_filter_page".to_string(),
         format!("/manage_filter_edit_page/{}", fid),
         format!("/account_manage_columns_page?project_id={}", proj_id),
@@ -2574,5 +2575,27 @@ async fn test_phase3_m1_backward_compat_and_no_nested_forms() {
         assert_eq!(res.status(), StatusCode::OK, "GET {} failed", uri);
         let html = response_body_string(res).await;
         assert_no_nested_forms(&html);
+    }
+
+    // 2. Phase 3.2 export & RSS regression checks
+    for uri in [
+        "/excel_all_bug_page",
+        "/word_all_bug_page",
+        "/bug_export_word",
+        "/issues_rss",
+        "/news_rss",
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &full_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {} failed", uri);
     }
 }

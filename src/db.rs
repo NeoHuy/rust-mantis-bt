@@ -374,6 +374,7 @@ impl Db {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL REFERENCES mantis_user_table(id) ON DELETE CASCADE,
                 name TEXT NOT NULL,
+                scope TEXT NOT NULL DEFAULT 'api',
                 hash TEXT NOT NULL UNIQUE,
                 date_created INTEGER NOT NULL DEFAULT 0,
                 date_used INTEGER NOT NULL DEFAULT 0,
@@ -553,6 +554,17 @@ impl Db {
         if !has_jira_status {
             let _ = conn.execute(
                 "ALTER TABLE mantis_jira_links_table ADD COLUMN jira_status TEXT NOT NULL DEFAULT ''",
+                [],
+            );
+        }
+
+        // Ensure scope column exists in mantis_api_token_table for existing databases
+        let has_token_scope = conn
+            .prepare("SELECT scope FROM mantis_api_token_table LIMIT 1")
+            .is_ok();
+        if !has_token_scope {
+            let _ = conn.execute(
+                "ALTER TABLE mantis_api_token_table ADD COLUMN scope TEXT NOT NULL DEFAULT 'api'",
                 [],
             );
         }
@@ -4454,6 +4466,43 @@ impl Db {
         rows.collect()
     }
 
+    pub fn get_bugs_bugnotes_map(
+        &self,
+        bug_ids: &[i64],
+        bug_eff_levels: &HashMap<i64, i32>,
+    ) -> rusqlite::Result<HashMap<i64, Vec<Bugnote>>> {
+        let mut out: HashMap<i64, Vec<Bugnote>> = HashMap::new();
+        if bug_ids.is_empty() {
+            return Ok(out);
+        }
+        let conn = self.conn();
+        for chunk in bug_ids.chunks(200) {
+            let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{}", i)).collect();
+            let sql = format!(
+                "SELECT n.id, n.bug_id, n.reporter_id, n.bugnote_text_id, n.view_state,
+                        n.date_submitted, n.last_modified, n.note_type, n.note_attr,
+                        n.time_tracking, COALESCE(t.note, '')
+                 FROM mantis_bugnote_table n
+                 LEFT JOIN mantis_bugnote_text_table t ON n.bugnote_text_id = t.id
+                 WHERE n.bug_id IN ({})
+                 ORDER BY n.date_submitted ASC, n.id ASC",
+                placeholders.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), Self::map_bugnote_row)?;
+            for r in rows {
+                let note = r?;
+                let eff = bug_eff_levels.get(&note.bug_id).copied().unwrap_or(0);
+                if note.view_state == 10 || eff >= 55 {
+                    out.entry(note.bug_id).or_default().push(note);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     pub fn update_bugnote(
         &self,
         note_id: i64,
@@ -8168,13 +8217,101 @@ impl Db {
         rows.collect()
     }
 
+    /// Lists news items accessible to `user`, enforcing project membership for private/disabled
+    /// projects and requiring Developer (`>= 55`) access for private news (`view_state != 10`).
+    pub fn list_accessible_news(
+        &self,
+        user: &User,
+        project_id: i64,
+    ) -> rusqlite::Result<Vec<NewsItem>> {
+        if user.enabled == 0 {
+            return Ok(Vec::new());
+        }
+
+        let enabled_visible_ids: HashSet<i64> = self
+            .list_visible_projects(user)?
+            .into_iter()
+            .filter(|(p, _)| p.enabled == 1)
+            .map(|(p, _)| p.id)
+            .collect();
+
+        if project_id > 0 && !enabled_visible_ids.contains(&project_id) {
+            return Ok(Vec::new());
+        }
+
+        let candidates = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, poster_id, date_posted, last_modified,
+                        view_state, announcement, headline, body
+                 FROM mantis_news_table
+                 WHERE (?1 = 0 OR project_id = 0 OR project_id = ?1)
+                 ORDER BY announcement DESC, date_posted DESC, id DESC",
+            )?;
+            let rows = stmt.query_map(params![project_id], |row| {
+                Ok(NewsItem {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    poster_id: row.get(2)?,
+                    date_posted: row.get(3)?,
+                    last_modified: row.get(4)?,
+                    view_state: row.get(5)?,
+                    announcement: row.get(6)?,
+                    headline: row.get(7)?,
+                    body: row.get(8)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+
+        let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+        let mut out = Vec::new();
+        for item in candidates {
+            let eff = if item.project_id == 0 {
+                user.access_level
+            } else {
+                if !enabled_visible_ids.contains(&item.project_id) {
+                    continue;
+                }
+                if let Some(&cached) = eff_cache.get(&item.project_id) {
+                    cached
+                } else {
+                    let level = self.effective_access_level(user, item.project_id)?;
+                    eff_cache.insert(item.project_id, level);
+                    level
+                }
+            };
+            if eff < 10 {
+                continue;
+            }
+            if item.view_state == 10 || eff >= 55 {
+                out.push(item);
+            }
+        }
+        Ok(out)
+    }
+
     // ─── Sub-project 5: API Tokens (`mantis_api_token_table`) & Plugins ──────
 
     pub fn create_api_token(&self, user_id: i64, name: &str) -> Result<(i64, String), String> {
+        self.create_api_token_with_scope(user_id, name, "api")
+    }
+
+    pub fn create_api_token_with_scope(
+        &self,
+        user_id: i64,
+        name: &str,
+        scope: &str,
+    ) -> Result<(i64, String), String> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
             return Err("Token name cannot be empty".to_string());
         }
+        let norm_scope = match scope.trim() {
+            "api" => "api",
+            "rss" => "rss",
+            _ => return Err("Invalid token scope".to_string()),
+        };
         let raw_token = crate::auth::generate_api_token();
         let token_hash = crate::auth::hash_api_token(&raw_token);
         let now = std::time::SystemTime::now()
@@ -8183,9 +8320,9 @@ impl Db {
             .as_secs() as i64;
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO mantis_api_token_table (user_id, name, hash, date_created, date_used)
-             VALUES (?1, ?2, ?3, ?4, 0)",
-            params![user_id, trimmed, token_hash, now],
+            "INSERT INTO mantis_api_token_table (user_id, name, scope, hash, date_created, date_used)
+             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![user_id, trimmed, norm_scope, token_hash, now],
         )
         .map_err(|e| e.to_string())?;
         Ok((conn.last_insert_rowid(), raw_token))
@@ -8194,7 +8331,7 @@ impl Db {
     pub fn list_api_tokens(&self, user_id: i64) -> rusqlite::Result<Vec<ApiToken>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, name, hash, date_created, date_used
+            "SELECT id, user_id, name, scope, hash, date_created, date_used
              FROM mantis_api_token_table
              WHERE user_id = ?1
              ORDER BY date_created DESC, id DESC",
@@ -8204,9 +8341,10 @@ impl Db {
                 id: row.get(0)?,
                 user_id: row.get(1)?,
                 name: row.get(2)?,
-                hash: row.get(3)?,
-                date_created: row.get(4)?,
-                date_used: row.get(5)?,
+                scope: row.get(3)?,
+                hash: row.get(4)?,
+                date_created: row.get(5)?,
+                date_used: row.get(6)?,
             })
         })?;
         rows.collect()
@@ -8215,7 +8353,7 @@ impl Db {
     pub fn list_all_api_tokens(&self) -> rusqlite::Result<Vec<(ApiToken, String, String)>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
-            "SELECT t.id, t.user_id, t.name, t.hash, t.date_created, t.date_used,
+            "SELECT t.id, t.user_id, t.name, t.scope, t.hash, t.date_created, t.date_used,
                     COALESCE(u.username, ''), COALESCE(u.realname, '')
              FROM mantis_api_token_table t
              LEFT JOIN mantis_user_table u ON t.user_id = u.id
@@ -8226,12 +8364,13 @@ impl Db {
                 id: row.get(0)?,
                 user_id: row.get(1)?,
                 name: row.get(2)?,
-                hash: row.get(3)?,
-                date_created: row.get(4)?,
-                date_used: row.get(5)?,
+                scope: row.get(3)?,
+                hash: row.get(4)?,
+                date_created: row.get(5)?,
+                date_used: row.get(6)?,
             };
-            let username: String = row.get(6)?;
-            let realname: String = row.get(7)?;
+            let username: String = row.get(7)?;
+            let realname: String = row.get(8)?;
             Ok((token, username, realname))
         })?;
         rows.collect()
@@ -8263,23 +8402,33 @@ impl Db {
         &self,
         raw_token: &str,
     ) -> rusqlite::Result<Option<(i64, User)>> {
+        match self.authenticate_api_token_with_scope(raw_token)? {
+            Some((token_id, user, scope)) if scope == "api" => Ok(Some((token_id, user))),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn authenticate_api_token_with_scope(
+        &self,
+        raw_token: &str,
+    ) -> rusqlite::Result<Option<(i64, User, String)>> {
         let trimmed = raw_token.trim();
         if trimmed.is_empty() {
             return Ok(None);
         }
         let token_hash = crate::auth::hash_api_token(trimmed);
         let conn = self.conn();
-        let row_opt: Option<(i64, i64)> = match conn.query_row(
-            "SELECT id, user_id FROM mantis_api_token_table WHERE hash = ?1",
+        let row_opt: Option<(i64, i64, String, i64)> = match conn.query_row(
+            "SELECT id, user_id, scope, date_used FROM mantis_api_token_table WHERE hash = ?1",
             params![token_hash],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ) {
             Ok(v) => Some(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(e),
         };
 
-        let (token_id, user_id) = match row_opt {
+        let (token_id, user_id, scope, prev_used) = match row_opt {
             Some(v) => v,
             None => return Ok(None),
         };
@@ -8293,12 +8442,14 @@ impl Db {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let _ = conn.execute(
-            "UPDATE mantis_api_token_table SET date_used = ?1 WHERE id = ?2",
-            params![now, token_id],
-        );
+        if now.saturating_sub(prev_used) >= 300 {
+            let _ = conn.execute(
+                "UPDATE mantis_api_token_table SET date_used = ?1 WHERE id = ?2",
+                params![now, token_id],
+            );
+        }
 
-        Ok(Some((token_id, user)))
+        Ok(Some((token_id, user, scope)))
     }
 
     pub fn list_plugins(&self) -> rusqlite::Result<Vec<PluginItem>> {

@@ -964,6 +964,53 @@ async fn test_mcp_sse_and_messages_e2e() {
         .unwrap();
     assert_eq!(res_dev.status(), StatusCode::OK);
     std::env::remove_var("MANTIS_ALLOW_QUERY_TOKEN");
+
+    // 12. Read-only RSS tokens are rejected on /mcp/sse (header & query) and cannot access /mcp/messages
+    let (_rss_id, rss_tok) = db
+        .create_api_token_with_scope(rep_id, "mcp_rss_blocked", "rss")
+        .unwrap();
+    let res_rss_sse = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/mcp/sse")
+                .header("authorization", format!("Bearer {}", rss_tok))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rss_sse.status(), StatusCode::UNAUTHORIZED);
+
+    std::env::set_var("MANTIS_ALLOW_QUERY_TOKEN", "1");
+    let res_rss_sse_query = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/mcp/sse?token={}", rss_tok))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    std::env::remove_var("MANTIS_ALLOW_QUERY_TOKEN");
+    assert_eq!(res_rss_sse_query.status(), StatusCode::UNAUTHORIZED);
+
+    let res_rss_msg = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/messages?session_id=nonexistent")
+                .header("authorization", format!("Bearer {}", rss_tok))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rss_msg.status(), StatusCode::NOT_FOUND);
 }
 
 #[test]

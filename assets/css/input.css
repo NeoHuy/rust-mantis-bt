@@ -1876,8 +1876,13 @@
   .flash-message,
   .flash-success,
   .flash-error,
+  .no-print,
   footer.mantis-footer {
     display: none !important;
+  }
+
+  body {
+    background: #ffffff !important;
   }
 
   .main-container,

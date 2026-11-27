@@ -485,7 +485,7 @@ async fn test_http_saved_filter_delete_ui_and_permissions() {
     assert!(html_filter_view.contains("sort=priority"));
     // CSV export button must include filter_id, sort, and dir
     assert!(html_filter_view.contains(&format!(
-        r#"href="/csv_export?filter_id={}&sort=priority&dir=asc""#,
+        r#"href="/csv_export?filter_id={}&amp;sort=priority&amp;dir=asc""#,
         fid_pub
     )));
 

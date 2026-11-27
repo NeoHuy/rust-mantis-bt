@@ -533,6 +533,15 @@
     }
   }
 
+  function initPrintButtons() {
+    var btns = document.querySelectorAll('[data-action="print"]');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function () {
+        window.print();
+      });
+    }
+  }
+
   function initProjectReloadSelects() {
     var selects = document.querySelectorAll('select[data-reload-url]');
     for (var i = 0; i < selects.length; i++) {
@@ -563,5 +572,6 @@
     initConfirmButtons();
     initBulkActionForm();
     initCopyButtons();
+    initPrintButtons();
   });
 })();

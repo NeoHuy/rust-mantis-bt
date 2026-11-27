@@ -9,6 +9,7 @@ pub mod jira;
 pub mod layout;
 pub mod planning;
 pub mod projects;
+pub mod rss;
 pub mod tags;
 pub mod users;
 
@@ -29,6 +30,59 @@ pub fn html_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Escapes text for safe inclusion inside XML 1.0 text nodes and attributes,
+/// stripping disallowed XML control characters.
+pub fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if (c < ' ' && c != '\t' && c != '\n' && c != '\r') || c == '\u{FFFE}' || c == '\u{FFFF}' {
+            continue;
+        }
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Formats a Unix timestamp (seconds) as UTC RFC 2822 date-time string for RSS 2.0 feeds.
+pub fn format_rfc2822_timestamp(ts: i64) -> String {
+    let ts = ts.max(0);
+    let days = ts.div_euclid(86_400);
+    let secs_of_day = ts.rem_euclid(86_400);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let wday = WEEKDAYS[((days + 4).rem_euclid(7)) as usize];
+    let month_name = MONTHS[(m as usize).saturating_sub(1).min(11)];
+
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
+        wday, d, month_name, year, hour, minute, second
+    )
 }
 
 /// Convert Unix timestamp (seconds) to `YYYY-MM-DD HH:MM` in UTC using Howard Hinnant's civil calendar algorithm.

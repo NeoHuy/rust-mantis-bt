@@ -2,8 +2,9 @@ use super::{sanitize_error_message, url_encode};
 use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::models::{
-    clamp_per_page, parse_custom_field_column_id, sort_bugs, BugFilter, BugUpdate, ColumnContext,
-    CustomFieldType, ListBugsQuery, User, FILTER_MATCH_ANY,
+    clamp_per_page, parse_custom_field_column_id, sanitize_spreadsheet_cell, sort_bugs, Bug,
+    BugFilter, BugUpdate, ColumnContext, CustomField, CustomFieldType, ListBugsQuery, User,
+    FILTER_MATCH_ANY,
 };
 use crate::views;
 use axum::body::Bytes;
@@ -342,30 +343,29 @@ pub(crate) fn filter_from_query(
     }
 }
 
-enum FilterResolveError {
+#[derive(Debug)]
+pub(crate) enum FilterResolveError {
     Forbidden(&'static str),
     NotFound(&'static str),
     Internal(&'static str),
 }
 
-fn resolve_bug_filter_inner(
+pub(crate) fn resolve_bug_filter_for_user(
     db: &Db,
-    ctx: &AuthContext,
+    user: &User,
+    active_project_id: i64,
     q: &ListBugsQuery,
 ) -> Result<BugFilter, FilterResolveError> {
     if let Some(fid) = q.filter_id.filter(|&id| id > 0) {
         match db.get_filter(fid) {
             Ok(Some((sf, mut bf))) => {
-                if sf.is_public == 0 && sf.user_id != ctx.user.id {
+                if sf.is_public == 0 && sf.user_id != user.id {
                     return Err(FilterResolveError::Forbidden(
                         "You do not have permission to view this private filter.",
                     ));
                 }
                 if sf.project_id > 0
-                    && db
-                        .effective_access_level(&ctx.user, sf.project_id)
-                        .unwrap_or(0)
-                        < 10
+                    && db.effective_access_level(user, sf.project_id).unwrap_or(0) < 10
                 {
                     return Err(FilterResolveError::Forbidden(
                         "You do not have access to this filter's project.",
@@ -374,10 +374,10 @@ fn resolve_bug_filter_inner(
 
                 if let Some(pid) = q.project_id.filter(|&v| v > 0) {
                     bf.project_id = Some(pid);
-                } else if ctx.active_project_id > 0 {
-                    bf.project_id = Some(ctx.active_project_id);
+                } else if active_project_id > 0 {
+                    bf.project_id = Some(active_project_id);
                 } else if let Some(bf_pid) = bf.project_id.filter(|&p| p > 0) {
-                    if db.effective_access_level(&ctx.user, bf_pid).unwrap_or(0) < 10 {
+                    if db.effective_access_level(user, bf_pid).unwrap_or(0) < 10 {
                         return Err(FilterResolveError::Forbidden(
                             "You do not have access to this project.",
                         ));
@@ -412,7 +412,7 @@ fn resolve_bug_filter_inner(
                 }
                 let eff_pid = bf.project_id.unwrap_or(0);
                 let accessible_cf_ids: HashSet<i64> = db
-                    .list_accessible_custom_fields_for_user(&ctx.user, eff_pid)
+                    .list_accessible_custom_fields_for_user(user, eff_pid)
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|cf| cf.filter_by != 0)
@@ -426,13 +426,7 @@ fn resolve_bug_filter_inner(
         }
     }
 
-    Ok(filter_from_query(
-        db,
-        &ctx.user,
-        ctx.active_project_id,
-        q,
-        false,
-    ))
+    Ok(filter_from_query(db, user, active_project_id, q, false))
 }
 
 fn resolve_bug_filter(
@@ -440,7 +434,7 @@ fn resolve_bug_filter(
     ctx: &AuthContext,
     q: &ListBugsQuery,
 ) -> Result<BugFilter, Box<Response>> {
-    resolve_bug_filter_inner(db, ctx, q).map_err(|err| match err {
+    resolve_bug_filter_for_user(db, &ctx.user, ctx.active_project_id, q).map_err(|err| match err {
         FilterResolveError::Forbidden(msg) => Box::new(forbidden(ctx, msg)),
         FilterResolveError::NotFound(msg) => Box::new(not_found(ctx, msg)),
         FilterResolveError::Internal(msg) => Box::new(
@@ -502,6 +496,10 @@ pub fn router() -> Router<Db> {
         .route("/bug_file_delete/:id", post(bug_file_delete))
         .route("/my_view_page", get(my_view_page))
         .route("/csv_export", get(csv_export))
+        .route("/print_all_bug_page", get(print_all_bug_page))
+        .route("/excel_all_bug_page", get(excel_all_bug_page))
+        .route("/word_all_bug_page", get(word_all_bug_page))
+        .route("/bug_export_word", get(word_all_bug_page))
         .route("/bug_monitor_add/:bug_id", post(bug_monitor_add))
         .route("/bug_monitor_delete/:bug_id", post(bug_monitor_delete))
 }
@@ -639,21 +637,6 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     .into_response()
 }
 
-pub(crate) fn sanitize_spreadsheet_cell(val: &str) -> String {
-    let trimmed = val.trim_start();
-    let needs_prefix = val.starts_with('\t')
-        || val.starts_with('\r')
-        || trimmed.starts_with('=')
-        || trimmed.starts_with('+')
-        || trimmed.starts_with('-')
-        || trimmed.starts_with('@');
-    if needs_prefix {
-        format!("'{}", val)
-    } else {
-        val.to_string()
-    }
-}
-
 fn sanitize_csv_cell(val: &str) -> String {
     let safe = sanitize_spreadsheet_cell(val);
     if safe.contains(',') || safe.contains('"') || safe.contains('\n') || safe.contains('\r') {
@@ -685,22 +668,46 @@ fn check_project_filter_access(
     None
 }
 
-pub async fn csv_export(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    RawQuery(raw_query): RawQuery,
-) -> Response {
-    let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
-    if let Some(resp) = check_project_filter_access(&db, &ctx, q.project_id) {
-        return resp;
+fn export_max_rows() -> usize {
+    std::env::var("MANTIS_EXPORT_MAX_ROWS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1000)
+}
+
+struct PreparedExportBugs {
+    bugs: Vec<Bug>,
+    bug_eff_levels: HashMap<i64, i32>,
+    projects_map: HashMap<i64, String>,
+    users_map: HashMap<i64, String>,
+    categories_map: HashMap<i64, String>,
+    accessible_cfs: Vec<CustomField>,
+    project_title: String,
+    effective_project_id: i64,
+}
+
+struct ExportTabularDataset {
+    bugs: Vec<Bug>,
+    col_keys: Vec<String>,
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    project_title: String,
+    truncated_from: Option<usize>,
+}
+
+fn load_filtered_export_bugs(
+    db: &Db,
+    ctx: &AuthContext,
+    q: &ListBugsQuery,
+) -> Result<PreparedExportBugs, Box<Response>> {
+    if let Some(resp) = check_project_filter_access(db, ctx, q.project_id) {
+        return Err(Box::new(resp));
     }
 
-    let filter = match resolve_bug_filter(&db, &ctx, &q) {
-        Ok(f) => f,
-        Err(res) => return *res,
-    };
-    if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
-        return resp;
+    let filter = resolve_bug_filter(db, ctx, q)?;
+    if let Some(resp) = check_project_filter_access(db, ctx, filter.project_id) {
+        return Err(Box::new(resp));
     }
     let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
     let effective_sort = q
@@ -717,61 +724,124 @@ pub async fn csv_export(
         .or(filter.dir.as_deref());
     sort_bugs(&mut bugs, effective_sort, effective_dir);
 
-    let effective_project_id = filter.project_id.unwrap_or(ctx.active_project_id);
-    let accessible_cfs = db
-        .list_accessible_custom_fields_for_user(&ctx.user, effective_project_id)
-        .unwrap_or_default();
-    let accessible_cf_ids: HashSet<i64> = accessible_cfs.iter().map(|c| c.id).collect();
-    let raw_cols = db
-        .get_user_columns_with_cfs(
-            ctx.user.id,
-            effective_project_id,
-            ColumnContext::Csv,
-            &accessible_cf_ids,
-        )
-        .unwrap_or_else(|_| {
-            crate::models::default_columns_for_context(ColumnContext::Csv, effective_project_id)
+    let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+    let mut bug_eff_levels: HashMap<i64, i32> = HashMap::with_capacity(bugs.len());
+    for b in &bugs {
+        let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
+            db.effective_access_level(&ctx.user, b.project_id)
+                .unwrap_or(0)
         });
-    let csv_cols: Vec<String> = raw_cols
-        .into_iter()
-        .filter(|c| c != "selection" && c != "edit")
-        .collect();
+        bug_eff_levels.insert(b.id, eff);
+    }
 
-    let cf_names: HashMap<i64, String> = accessible_cfs
+    let effective_project_id = filter.project_id.unwrap_or(ctx.active_project_id);
+    let projects_map: HashMap<i64, String> = ctx
+        .visible_projects
         .iter()
-        .map(|cf| (cf.id, cf.name.clone()))
+        .map(|(p, _)| (p.id, p.name.clone()))
         .collect();
-    let cf_ids_in_cols: HashSet<i64> = csv_cols
-        .iter()
-        .filter_map(|c| parse_custom_field_column_id(c))
-        .collect();
-
-    let bug_ids: Vec<i64> = bugs.iter().map(|b| b.id).collect();
+    let project_title = if effective_project_id == 0 {
+        "All Projects".to_string()
+    } else {
+        projects_map
+            .get(&effective_project_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Project #{}", effective_project_id))
+    };
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
         .unwrap_or_default()
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
-    let projects_map: HashMap<i64, String> = ctx
-        .visible_projects
-        .iter()
-        .map(|(p, _)| (p.id, p.name.clone()))
-        .collect();
     let categories_map = db.list_all_categories_map().unwrap_or_default();
+    let accessible_cfs = db
+        .list_accessible_custom_fields_for_user(&ctx.user, effective_project_id)
+        .unwrap_or_default();
 
-    let cf_values_map = if !cf_ids_in_cols.is_empty() {
-        db.get_bugs_custom_field_values_map(&ctx.user, &bugs, &cf_ids_in_cols)
+    Ok(PreparedExportBugs {
+        bugs,
+        bug_eff_levels,
+        projects_map,
+        users_map,
+        categories_map,
+        accessible_cfs,
+        project_title,
+        effective_project_id,
+    })
+}
+
+fn prepare_tabular_export_dataset(
+    db: &Db,
+    ctx: &AuthContext,
+    q: &ListBugsQuery,
+    col_ctx: ColumnContext,
+    format_last_updated: bool,
+    apply_row_cap: bool,
+) -> Result<ExportTabularDataset, Box<Response>> {
+    let mut prepared = load_filtered_export_bugs(db, ctx, q)?;
+    let truncated_from = if apply_row_cap {
+        let max_rows = export_max_rows();
+        if prepared.bugs.len() > max_rows {
+            let total = prepared.bugs.len();
+            prepared.bugs.truncate(max_rows);
+            Some(total)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let accessible_cf_ids: HashSet<i64> = prepared.accessible_cfs.iter().map(|c| c.id).collect();
+    let raw_cols = db
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            prepared.effective_project_id,
+            col_ctx,
+            &accessible_cf_ids,
+        )
+        .unwrap_or_else(|_| {
+            crate::models::default_columns_for_context(col_ctx, prepared.effective_project_id)
+        });
+    let col_keys: Vec<String> = raw_cols
+        .into_iter()
+        .filter(|c| c != "selection" && c != "edit")
+        .collect();
+
+    let cf_names: HashMap<i64, String> = prepared
+        .accessible_cfs
+        .iter()
+        .map(|cf| (cf.id, cf.name.clone()))
+        .collect();
+    let cf_access_r: HashMap<i64, i32> = prepared
+        .accessible_cfs
+        .iter()
+        .map(|cf| (cf.id, cf.access_level_r))
+        .collect();
+    let cf_ids_in_cols: HashSet<i64> = col_keys
+        .iter()
+        .filter_map(|c| parse_custom_field_column_id(c))
+        .collect();
+
+    let bug_ids: Vec<i64> = prepared.bugs.iter().map(|b| b.id).collect();
+    let mut cf_values_map = if !cf_ids_in_cols.is_empty() {
+        db.get_bugs_custom_field_values_map(&ctx.user, &prepared.bugs, &cf_ids_in_cols)
             .unwrap_or_default()
     } else {
         HashMap::new()
     };
-    let tags_map = if csv_cols.iter().any(|c| c == "tags") {
+    cf_values_map.retain(|(bug_id, cf_id), _| {
+        let eff = prepared.bug_eff_levels.get(bug_id).copied().unwrap_or(0);
+        let req = cf_access_r.get(cf_id).copied().unwrap_or(i32::MAX);
+        eff >= req
+    });
+
+    let tags_map = if col_keys.iter().any(|c| c == "tags") {
         db.get_bugs_tags_map(&bug_ids).unwrap_or_default()
     } else {
         HashMap::new()
     };
-    let texts_map = if csv_cols.iter().any(|c| {
+    let texts_map = if col_keys.iter().any(|c| {
         matches!(
             c.as_str(),
             "description" | "steps_to_reproduce" | "additional_information"
@@ -781,133 +851,158 @@ pub async fn csv_export(
     } else {
         HashMap::new()
     };
-    let (note_counts, file_counts) = if csv_cols
+    let (note_counts, file_counts) = if col_keys
         .iter()
         .any(|c| c == "bugnotes_count" || c == "attachment_count")
     {
-        let mut eff_cache: HashMap<i64, i32> = HashMap::new();
-        let mut eff_map = HashMap::with_capacity(bugs.len());
-        for b in &bugs {
-            let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
-                db.effective_access_level(&ctx.user, b.project_id)
-                    .unwrap_or(0)
-            });
-            eff_map.insert(b.id, eff);
-        }
-        db.get_bug_note_and_file_counts(&bug_ids, &eff_map)
+        db.get_bug_note_and_file_counts(&bug_ids, &prepared.bug_eff_levels)
             .unwrap_or_default()
     } else {
         (HashMap::new(), HashMap::new())
     };
 
-    let header_cells: Vec<String> = csv_cols
+    let headers: Vec<String> = col_keys
         .iter()
         .map(|col| {
-            let label = if let Some(cf_id) = parse_custom_field_column_id(col) {
+            if let Some(cf_id) = parse_custom_field_column_id(col) {
                 cf_names.get(&cf_id).cloned().unwrap_or_else(|| col.clone())
             } else {
                 crate::models::standard_column_label(col)
                     .unwrap_or(col.as_str())
                     .to_string()
-            };
-            sanitize_csv_cell(&label)
+            }
         })
         .collect();
 
-    let mut out = format!("{}\r\n", header_cells.join(","));
-
-    for b in &bugs {
-        let mut row = Vec::with_capacity(csv_cols.len());
-        for col in &csv_cols {
-            let cell = match col.as_str() {
+    let mut rows = Vec::with_capacity(prepared.bugs.len());
+    for b in &prepared.bugs {
+        let mut row = Vec::with_capacity(col_keys.len());
+        for col in &col_keys {
+            let val = match col.as_str() {
                 "id" => format!("{:07}", b.id),
-                "project_id" => sanitize_csv_cell(
-                    projects_map
-                        .get(&b.project_id)
-                        .map(String::as_str)
-                        .unwrap_or(""),
-                ),
-                "reporter_id" => sanitize_csv_cell(
-                    users_map
-                        .get(&b.reporter_id)
-                        .map(String::as_str)
-                        .unwrap_or(""),
-                ),
+                "project_id" => prepared
+                    .projects_map
+                    .get(&b.project_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                "reporter_id" => prepared
+                    .users_map
+                    .get(&b.reporter_id)
+                    .cloned()
+                    .unwrap_or_default(),
                 "handler_id" => {
                     if b.handler_id > 0 {
-                        sanitize_csv_cell(
-                            users_map
-                                .get(&b.handler_id)
-                                .map(String::as_str)
-                                .unwrap_or(""),
-                        )
+                        prepared
+                            .users_map
+                            .get(&b.handler_id)
+                            .cloned()
+                            .unwrap_or_default()
                     } else {
                         String::new()
                     }
                 }
-                "priority" => sanitize_csv_cell(views::bugs::priority_label(b.priority)),
-                "severity" => sanitize_csv_cell(views::bugs::severity_label(b.severity)),
+                "priority" => views::bugs::priority_label(b.priority).to_string(),
+                "severity" => views::bugs::severity_label(b.severity).to_string(),
                 "reproducibility" => {
-                    sanitize_csv_cell(views::bugs::reproducibility_label(b.reproducibility))
+                    views::bugs::reproducibility_label(b.reproducibility).to_string()
                 }
-                "status" => sanitize_csv_cell(views::bugs::status_label(b.status)),
-                "resolution" => sanitize_csv_cell(views::bugs::resolution_label(b.resolution)),
-                "view_state" => sanitize_csv_cell(if b.view_state == 50 {
+                "status" => views::bugs::status_label(b.status).to_string(),
+                "resolution" => views::bugs::resolution_label(b.resolution).to_string(),
+                "view_state" => if b.view_state == 50 {
                     "private"
                 } else {
                     "public"
-                }),
-                "category_id" => sanitize_csv_cell(
-                    categories_map
-                        .get(&b.category_id)
-                        .map(String::as_str)
-                        .unwrap_or("General"),
-                ),
-                "version" => sanitize_csv_cell(&b.version),
-                "target_version" => sanitize_csv_cell(&b.target_version),
-                "fixed_in_version" => sanitize_csv_cell(&b.fixed_in_version),
-                "build" => sanitize_csv_cell(&b.build),
-                "platform" => sanitize_csv_cell(&b.platform),
-                "os" => sanitize_csv_cell(&b.os),
-                "os_build" => sanitize_csv_cell(&b.os_build),
-                "date_submitted" => sanitize_csv_cell(&views::format_timestamp(b.date_submitted)),
-                "last_updated" => b.last_updated.to_string(),
-                "due_date" => sanitize_csv_cell(&views::format_date(b.due_date)),
+                }
+                .to_string(),
+                "category_id" => prepared
+                    .categories_map
+                    .get(&b.category_id)
+                    .cloned()
+                    .unwrap_or_else(|| "General".to_string()),
+                "version" => b.version.clone(),
+                "target_version" => b.target_version.clone(),
+                "fixed_in_version" => b.fixed_in_version.clone(),
+                "build" => b.build.clone(),
+                "platform" => b.platform.clone(),
+                "os" => b.os.clone(),
+                "os_build" => b.os_build.clone(),
+                "date_submitted" => views::format_timestamp(b.date_submitted),
+                "last_updated" => {
+                    if format_last_updated {
+                        views::format_timestamp(b.last_updated)
+                    } else {
+                        b.last_updated.to_string()
+                    }
+                }
+                "due_date" => views::format_date(b.due_date),
                 "sticky" => (if b.sticky == 1 { "yes" } else { "no" }).to_string(),
                 "bugnotes_count" => note_counts.get(&b.id).copied().unwrap_or(0).to_string(),
                 "attachment_count" => file_counts.get(&b.id).copied().unwrap_or(0).to_string(),
-                "tags" => {
-                    let joined = tags_map
-                        .get(&b.id)
-                        .map(|v| v.join(", "))
-                        .unwrap_or_default();
-                    sanitize_csv_cell(&joined)
-                }
-                "summary" => sanitize_csv_cell(&b.summary),
-                "description" => {
-                    sanitize_csv_cell(texts_map.get(&b.id).map(|t| t.0.as_str()).unwrap_or(""))
-                }
-                "steps_to_reproduce" => {
-                    sanitize_csv_cell(texts_map.get(&b.id).map(|t| t.1.as_str()).unwrap_or(""))
-                }
-                "additional_information" => {
-                    sanitize_csv_cell(texts_map.get(&b.id).map(|t| t.2.as_str()).unwrap_or(""))
-                }
+                "tags" => tags_map
+                    .get(&b.id)
+                    .map(|v| v.join(", "))
+                    .unwrap_or_default(),
+                "summary" => b.summary.clone(),
+                "description" => texts_map
+                    .get(&b.id)
+                    .map(|t| t.0.clone())
+                    .unwrap_or_default(),
+                "steps_to_reproduce" => texts_map
+                    .get(&b.id)
+                    .map(|t| t.1.clone())
+                    .unwrap_or_default(),
+                "additional_information" => texts_map
+                    .get(&b.id)
+                    .map(|t| t.2.clone())
+                    .unwrap_or_default(),
                 other => {
                     if let Some(cf_id) = parse_custom_field_column_id(other) {
-                        let val = cf_values_map
+                        cf_values_map
                             .get(&(b.id, cf_id))
-                            .map(String::as_str)
-                            .unwrap_or("");
-                        sanitize_csv_cell(val)
+                            .cloned()
+                            .unwrap_or_default()
                     } else {
                         String::new()
                     }
                 }
             };
-            row.push(cell);
+            row.push(val);
         }
-        out.push_str(&row.join(","));
+        rows.push(row);
+    }
+
+    Ok(ExportTabularDataset {
+        bugs: prepared.bugs,
+        col_keys,
+        headers,
+        rows,
+        project_title: prepared.project_title,
+        truncated_from,
+    })
+}
+
+pub async fn csv_export(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
+    let dataset =
+        match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Csv, false, false) {
+            Ok(d) => d,
+            Err(res) => return *res,
+        };
+
+    let header_cells: Vec<String> = dataset
+        .headers
+        .iter()
+        .map(|h| sanitize_csv_cell(h))
+        .collect();
+    let mut out = format!("{}\r\n", header_cells.join(","));
+
+    for row in &dataset.rows {
+        let csv_row: Vec<String> = row.iter().map(|cell| sanitize_csv_cell(cell)).collect();
+        out.push_str(&csv_row.join(","));
         out.push_str("\r\n");
     }
 
@@ -925,6 +1020,209 @@ pub async fn csv_export(
         .into_response()
 }
 
+pub async fn print_all_bug_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
+    let dataset =
+        match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Print, true, true) {
+            Ok(d) => d,
+            Err(res) => return *res,
+        };
+
+    views::bugs::render_print_all_bug_page(
+        &ctx,
+        &dataset.project_title,
+        &q,
+        &dataset.headers,
+        &dataset.col_keys,
+        &dataset.bugs,
+        &dataset.rows,
+        dataset.truncated_from,
+    )
+    .into_response()
+}
+
+pub async fn excel_all_bug_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
+    let dataset =
+        match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Excel, true, true) {
+            Ok(d) => d,
+            Err(res) => return *res,
+        };
+
+    let xml = views::bugs::render_excel_xml(
+        &dataset.project_title,
+        &dataset.headers,
+        &dataset.col_keys,
+        &dataset.rows,
+        dataset.truncated_from,
+    );
+
+    let mut resp = (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.ms-excel; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"issues.xml\"".to_string(),
+            ),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+        ],
+        xml,
+    )
+        .into_response();
+    if let Some(total) = dataset.truncated_from {
+        if let Ok(hv) =
+            axum::http::HeaderValue::from_str(&format!("{}/{}", dataset.rows.len(), total))
+        {
+            resp.headers_mut().insert(
+                axum::http::header::HeaderName::from_static("x-mantis-export-truncated"),
+                hv,
+            );
+        }
+    }
+    resp
+}
+
+pub async fn word_all_bug_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
+    let mut prepared = match load_filtered_export_bugs(&db, &ctx, &q) {
+        Ok(p) => p,
+        Err(res) => return *res,
+    };
+
+    let max_rows = export_max_rows();
+    let truncated_from = if prepared.bugs.len() > max_rows {
+        let total = prepared.bugs.len();
+        prepared.bugs.truncate(max_rows);
+        Some(total)
+    } else {
+        None
+    };
+
+    let bug_ids: Vec<i64> = prepared.bugs.iter().map(|b| b.id).collect();
+    let texts_map = db.get_bugs_texts_map(&bug_ids).unwrap_or_default();
+    let tags_map = db.get_bugs_tags_map(&bug_ids).unwrap_or_default();
+    let cf_ids: HashSet<i64> = prepared.accessible_cfs.iter().map(|c| c.id).collect();
+    let cf_values_map = if !cf_ids.is_empty() {
+        db.get_bugs_custom_field_values_map(&ctx.user, &prepared.bugs, &cf_ids)
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let notes_map = db
+        .get_bugs_bugnotes_map(&bug_ids, &prepared.bug_eff_levels)
+        .unwrap_or_default();
+
+    let mut entries = Vec::with_capacity(prepared.bugs.len());
+    for b in prepared.bugs {
+        let eff = prepared.bug_eff_levels.get(&b.id).copied().unwrap_or(0);
+        let project_name = prepared
+            .projects_map
+            .get(&b.project_id)
+            .cloned()
+            .unwrap_or_else(|| format!("Project #{}", b.project_id));
+        let category_name = prepared
+            .categories_map
+            .get(&b.category_id)
+            .cloned()
+            .unwrap_or_else(|| "General".to_string());
+        let reporter_name = prepared
+            .users_map
+            .get(&b.reporter_id)
+            .cloned()
+            .unwrap_or_else(|| format!("user#{}", b.reporter_id));
+        let handler_name = if b.handler_id > 0 {
+            prepared
+                .users_map
+                .get(&b.handler_id)
+                .cloned()
+                .unwrap_or_else(|| format!("user#{}", b.handler_id))
+        } else {
+            String::new()
+        };
+        let (description, steps_to_reproduce, additional_information) =
+            texts_map.get(&b.id).cloned().unwrap_or_default();
+        let tags = tags_map.get(&b.id).cloned().unwrap_or_default();
+
+        let mut custom_fields = Vec::new();
+        for cf in &prepared.accessible_cfs {
+            if eff >= cf.access_level_r {
+                if let Some(val) = cf_values_map.get(&(b.id, cf.id)) {
+                    custom_fields.push((cf.name.clone(), val.clone()));
+                }
+            }
+        }
+
+        let notes = notes_map
+            .get(&b.id)
+            .map(|list| {
+                list.iter()
+                    .map(|n| views::bugs::WordBugnoteEntry {
+                        id: n.id,
+                        reporter_name: prepared
+                            .users_map
+                            .get(&n.reporter_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("user#{}", n.reporter_id)),
+                        date_submitted: n.date_submitted,
+                        view_state: n.view_state,
+                        note: n.note.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        entries.push(views::bugs::WordIssueEntry {
+            bug: b,
+            project_name,
+            category_name,
+            reporter_name,
+            handler_name,
+            description,
+            steps_to_reproduce,
+            additional_information,
+            tags,
+            custom_fields,
+            notes,
+        });
+    }
+
+    let doc =
+        views::bugs::render_word_export_doc(&prepared.project_title, &entries, truncated_from);
+
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/msword; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"issues.doc\"".to_string(),
+            ),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+        ],
+        doc,
+    )
+        .into_response()
+}
+
 pub async fn view_all_bug_page(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -935,7 +1233,7 @@ pub async fn view_all_bug_page(
         return resp;
     }
 
-    let filter = match resolve_bug_filter_inner(&db, &ctx, &q) {
+    let filter = match resolve_bug_filter_for_user(&db, &ctx.user, ctx.active_project_id, &q) {
         Ok(f) => f,
         Err(FilterResolveError::Forbidden(msg)) => return forbidden(&ctx, msg),
         Err(FilterResolveError::NotFound(_)) => {

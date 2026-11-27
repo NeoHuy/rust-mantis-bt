@@ -1,16 +1,18 @@
 use crate::auth::AuthContext;
 use crate::models::{
-    build_csv_export_url, build_filter_permalink_url, build_view_all_bug_page_url, clamp_per_page,
-    default_columns_for_context, parse_custom_field_column_id, standard_column_label, Bug, BugFile,
+    build_csv_export_url, build_excel_export_url, build_filter_permalink_url,
+    build_issues_rss_url_for, build_print_all_bug_page_url, build_view_all_bug_page_url,
+    build_word_export_url, clamp_per_page, default_columns_for_context,
+    parse_custom_field_column_id, sanitize_spreadsheet_cell, standard_column_label, Bug, BugFile,
     BugFilter, BugFull, BugHistory, BugPriority, BugRelationship, BugReproducibility,
     BugResolution, BugRevision, BugSeverity, BugStatus, BugTag, Bugnote, Category, ColumnContext,
     CustomField, CustomFieldType, CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion,
     RelationshipType, SavedFilter, Tag, TimelineEvent, User, ViewState, FILTER_MATCH_ANY,
 };
-use crate::views::html_escape;
 use crate::views::layout::render_layout;
 use crate::views::{
-    format_date, format_timestamp, render_status_badge, render_status_legend, status_color,
+    format_date, format_timestamp, html_escape, render_status_badge, render_status_legend,
+    status_color, xml_escape,
 };
 use axum::response::Html;
 use std::collections::{HashMap, HashSet};
@@ -2190,6 +2192,8 @@ pub fn render_view_all_bug_page(
         ""
     };
 
+    let rss_export_url = build_issues_rss_url_for(query, ctx.active_project_id);
+
     let range_badge = if bugs.is_empty() {
         format!("0 / {}", total)
     } else {
@@ -2349,9 +2353,13 @@ pub fn render_view_all_bug_page(
                     Viewing Issues ({})
                     <span class="badge" style="background:rgba(0,0,0,0.22); color:#ffffff;">{}</span>
                 </h4>
-                <div class="widget-toolbar">
+                <div class="widget-toolbar flex-wrap">
                     <a class="btn btn-white btn-round btn-sm" href="/account_manage_columns_page"><i class="fa fa-columns" aria-hidden="true"></i> Columns</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-print" aria-hidden="true"></i> Print Reports</a>
                     <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-download" aria-hidden="true"></i> CSV Export</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-file-excel-o" aria-hidden="true"></i> Excel Export</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-file-word-o" aria-hidden="true"></i> Word Export</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> RSS</a>
                     <a class="btn btn-success btn-sm" href="/bug_report_page"><i class="fa fa-edit" aria-hidden="true"></i> Report Issue</a>
                 </div>
             </div>
@@ -2552,7 +2560,11 @@ pub fn render_view_all_bug_page(
         permalink_bar,
         total,
         range_badge,
-        build_csv_export_url(query),
+        html_escape(&build_print_all_bug_page_url(query)),
+        html_escape(&build_csv_export_url(query)),
+        html_escape(&build_excel_export_url(query)),
+        html_escape(&build_word_export_url(query)),
+        html_escape(&rss_export_url),
         html_escape(return_query),
         per_page_html,
         prev_link,
@@ -4769,6 +4781,422 @@ pub fn render_bug_move_page(
         ctx,
         flash_msg,
         &content,
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct WordBugnoteEntry {
+    pub id: i64,
+    pub reporter_name: String,
+    pub date_submitted: i64,
+    pub view_state: i32,
+    pub note: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WordIssueEntry {
+    pub bug: Bug,
+    pub project_name: String,
+    pub category_name: String,
+    pub reporter_name: String,
+    pub handler_name: String,
+    pub description: String,
+    pub steps_to_reproduce: String,
+    pub additional_information: String,
+    pub tags: Vec<String>,
+    pub custom_fields: Vec<(String, String)>,
+    pub notes: Vec<WordBugnoteEntry>,
+}
+
+fn sanitize_excel_worksheet_name(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if matches!(c, ':' | '\\' | '/' | '?' | '*' | '[' | ']') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "Issues".to_string()
+    } else {
+        trimmed.chars().take(31).collect()
+    }
+}
+
+pub fn render_excel_xml(
+    project_title: &str,
+    headers: &[String],
+    col_keys: &[String],
+    rows: &[Vec<String>],
+    truncated_from: Option<usize>,
+) -> String {
+    let sheet_name = sanitize_excel_worksheet_name(project_title);
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <?mso-application progid=\"Excel.Sheet\"?>\n\
+         <Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\"\n\
+          xmlns:o=\"urn:schemas-microsoft-com:office:office\"\n\
+          xmlns:x=\"urn:schemas-microsoft-com:office:excel\"\n\
+          xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\">\n",
+    );
+    out.push_str(&format!(
+        "  <Worksheet ss:Name=\"{}\">\n    <Table>\n      <Row>\n",
+        xml_escape(&sheet_name)
+    ));
+
+    for h in headers {
+        let safe = sanitize_spreadsheet_cell(h);
+        out.push_str(&format!(
+            "        <Cell><Data ss:Type=\"String\">{}</Data></Cell>\n",
+            xml_escape(&safe)
+        ));
+    }
+    out.push_str("      </Row>\n");
+
+    for row in rows {
+        out.push_str("      <Row>\n");
+        for (idx, cell) in row.iter().enumerate() {
+            let col_key = col_keys.get(idx).map(String::as_str).unwrap_or("");
+            let is_numeric_col = matches!(col_key, "bugnotes_count" | "attachment_count");
+            if is_numeric_col && cell.trim().parse::<i64>().is_ok() {
+                out.push_str(&format!(
+                    "        <Cell><Data ss:Type=\"Number\">{}</Data></Cell>\n",
+                    cell.trim()
+                ));
+            } else {
+                let safe = sanitize_spreadsheet_cell(cell);
+                let escaped = xml_escape(&safe).replace('\n', "&#10;");
+                out.push_str(&format!(
+                    "        <Cell><Data ss:Type=\"String\">{}</Data></Cell>\n",
+                    escaped
+                ));
+            }
+        }
+        out.push_str("      </Row>\n");
+    }
+
+    out.push_str("    </Table>\n  </Worksheet>\n");
+    if let Some(total) = truncated_from {
+        let msg = format!(
+            "Export capped at {} of {} matching issues (MANTIS_EXPORT_MAX_ROWS).",
+            rows.len(),
+            total
+        );
+        out.push_str(&format!(
+            "  <Worksheet ss:Name=\"Notice\">\n    <Table>\n      <Row>\n        <Cell><Data ss:Type=\"String\">{}</Data></Cell>\n      </Row>\n    </Table>\n  </Worksheet>\n",
+            xml_escape(&sanitize_spreadsheet_cell(&msg))
+        ));
+    }
+    out.push_str("</Workbook>\n");
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_print_all_bug_page(
+    ctx: &AuthContext,
+    project_title: &str,
+    query: &ListBugsQuery,
+    headers: &[String],
+    col_keys: &[String],
+    bugs: &[Bug],
+    rows: &[Vec<String>],
+    truncated_from: Option<usize>,
+) -> Html<String> {
+    let asset_ver = env!("CARGO_PKG_VERSION");
+    let rss_url = build_issues_rss_url_for(query, ctx.active_project_id);
+    let truncated_notice = truncated_from
+        .map(|total| {
+            format!(
+                r#"<div class="flash-error mb-3"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> Export capped at {} of {} matching issues (<code>MANTIS_EXPORT_MAX_ROWS</code>).</div>"#,
+                rows.len(),
+                total
+            )
+        })
+        .unwrap_or_default();
+
+    let mut th_html = String::new();
+    for h in headers {
+        th_html.push_str(&format!(
+            r#"<th class="whitespace-nowrap">{}</th>"#,
+            html_escape(h)
+        ));
+    }
+
+    let mut tbody_html = String::new();
+    if rows.is_empty() {
+        let colspan = headers.len().max(1);
+        tbody_html.push_str(&format!(
+            r#"<tr><td colspan="{}" class="text-center py-6 text-gray-500">No matching issues to print.</td></tr>"#,
+            colspan
+        ));
+    } else {
+        for (idx, row) in rows.iter().enumerate() {
+            let bug_opt = bugs.get(idx);
+            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let mut tds = String::new();
+            for (cidx, val) in row.iter().enumerate() {
+                let col_key = col_keys.get(cidx).map(String::as_str).unwrap_or("");
+                let cell_html = if col_key == "id" {
+                    if let Some(b) = bug_opt {
+                        format!(
+                            r#"<td class="whitespace-nowrap font-bold"><a href="/view_bug_page/{}">{}</a></td>"#,
+                            b.id,
+                            html_escape(val)
+                        )
+                    } else {
+                        format!(r#"<td class="whitespace-nowrap">{}</td>"#, html_escape(val))
+                    }
+                } else if col_key == "status" {
+                    if let Some(b) = bug_opt {
+                        format!(
+                            r#"<td class="whitespace-nowrap"><span class="inline-flex items-center gap-1.5">{}<span>{}</span></span></td>"#,
+                            render_status_square(b.status),
+                            html_escape(val)
+                        )
+                    } else {
+                        format!(r#"<td class="whitespace-nowrap">{}</td>"#, html_escape(val))
+                    }
+                } else if matches!(
+                    col_key,
+                    "description" | "steps_to_reproduce" | "additional_information"
+                ) {
+                    let formatted = html_escape(val).replace('\n', "<br>");
+                    format!(r#"<td class="text-xs">{}</td>"#, formatted)
+                } else {
+                    format!(r#"<td>{}</td>"#, html_escape(val))
+                };
+                tds.push_str(&cell_html);
+            }
+            tbody_html.push_str(&format!(r#"<tr class="{}">{}</tr>"#, row_cls, tds));
+        }
+    }
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Print Reports ({project_title}) - MantisBT</title>
+    <link rel="icon" type="image/png" href="/images/mantis_logo.png">
+    <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
+    <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
+    <script src="/assets/mantis.js?v={asset_ver}" defer></script>
+</head>
+<body class="bg-white text-gray-900 p-4">
+    <div class="no-print flex flex-wrap items-center justify-between gap-2 mb-4 pb-3 border-b border-gray-300">
+        <div class="flex flex-wrap items-center gap-2">
+            <button type="button" class="btn btn-primary btn-sm" data-action="print">
+                <i class="fa fa-print" aria-hidden="true"></i> Print
+            </button>
+            <a class="btn btn-white btn-round btn-sm" href="{csv_url}"><i class="fa fa-download" aria-hidden="true"></i> CSV</a>
+            <a class="btn btn-white btn-round btn-sm" href="{excel_url}"><i class="fa fa-file-excel-o" aria-hidden="true"></i> Excel</a>
+            <a class="btn btn-white btn-round btn-sm" href="{word_url}"><i class="fa fa-file-word-o" aria-hidden="true"></i> Word</a>
+            <a class="btn btn-white btn-round btn-sm" href="{rss_url}"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> RSS</a>
+        </div>
+        <a class="btn btn-white btn-round btn-sm" href="{back_url}">
+            <i class="fa fa-arrow-left" aria-hidden="true"></i> Back to View Issues
+        </a>
+    </div>
+    <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <h1 class="text-lg font-bold m-0">MantisBT Issue Report — {project_title}</h1>
+        <span class="text-xs text-gray-600">User: {username} | Total Issues: {count}</span>
+    </div>
+    {truncated_notice}
+    <div class="table-responsive">
+        <table id="print-buglist" class="data-table w-full text-xs">
+            <thead>
+                <tr>{th_html}</tr>
+            </thead>
+            <tbody>
+                {tbody_html}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>"#,
+        project_title = html_escape(project_title),
+        asset_ver = asset_ver,
+        csv_url = html_escape(&build_csv_export_url(query)),
+        excel_url = html_escape(&build_excel_export_url(query)),
+        word_url = html_escape(&build_word_export_url(query)),
+        rss_url = html_escape(&rss_url),
+        back_url = html_escape(&build_view_all_bug_page_url(query, 1)),
+        username = html_escape(&ctx.user.username),
+        count = rows.len(),
+        th_html = th_html,
+        tbody_html = tbody_html,
+        truncated_notice = truncated_notice,
+    );
+
+    Html(html)
+}
+
+fn format_multiline_html(s: &str) -> String {
+    if s.trim().is_empty() {
+        return "-".to_string();
+    }
+    html_escape(s).replace('\n', "<br>\n")
+}
+
+pub fn render_word_export_doc(
+    project_title: &str,
+    entries: &[WordIssueEntry],
+    truncated_from: Option<usize>,
+) -> String {
+    let mut blocks = String::new();
+    if let Some(total) = truncated_from {
+        blocks.push_str(&format!(
+            r#"<p><strong>Notice:</strong> Word export truncated to {} of {} matching issues (MANTIS_EXPORT_MAX_ROWS limit).</p>"#,
+            entries.len(),
+            total
+        ));
+    }
+    if entries.is_empty() {
+        blocks.push_str("<p>No matching issues found.</p>");
+    } else {
+        for (idx, entry) in entries.iter().enumerate() {
+            let b = &entry.bug;
+            let handler_display = if entry.handler_name.is_empty() {
+                "-".to_string()
+            } else {
+                html_escape(&entry.handler_name)
+            };
+            let tags_display = if entry.tags.is_empty() {
+                "-".to_string()
+            } else {
+                entry
+                    .tags
+                    .iter()
+                    .map(|t| html_escape(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let view_state_label = if b.view_state == 50 {
+                "private"
+            } else {
+                "public"
+            };
+
+            let mut cf_rows = String::new();
+            for (cf_name, cf_val) in &entry.custom_fields {
+                cf_rows.push_str(&format!(
+                    "<tr><th class=\"lbl\">{}</th><td colspan=\"3\">{}</td></tr>\n",
+                    html_escape(cf_name),
+                    html_escape(cf_val)
+                ));
+            }
+
+            let mut notes_rows = String::new();
+            for n in &entry.notes {
+                let priv_tag = if n.view_state == 50 { " [private]" } else { "" };
+                notes_rows.push_str(&format!(
+                    "<div class=\"note-block\"><div class=\"note-meta\">(#{:07}) {} — {}{}</div><div>{}</div></div>\n",
+                    n.id,
+                    html_escape(&n.reporter_name),
+                    html_escape(&format_timestamp(n.date_submitted)),
+                    priv_tag,
+                    format_multiline_html(&n.note)
+                ));
+            }
+            let notes_section = if notes_rows.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<tr><th class=\"lbl\">Notes ({})</th><td colspan=\"3\">{}</td></tr>\n",
+                    entry.notes.len(),
+                    notes_rows
+                )
+            };
+
+            let page_break = if idx > 0 {
+                r#" style="page-break-before: always;""#
+            } else {
+                ""
+            };
+            blocks.push_str(&format!(
+                r#"<div class="issue-block"{page_break}>
+<h2>#{bug_id:07}: {summary}</h2>
+<table class="meta-table">
+<tr><th class="lbl">Project</th><td>{project}</td><th class="lbl">Category</th><td>{category}</td></tr>
+<tr><th class="lbl">Reporter</th><td>{reporter}</td><th class="lbl">Assigned To</th><td>{handler}</td></tr>
+<tr><th class="lbl">Status</th><td>{status}</td><th class="lbl">Resolution</th><td>{resolution}</td></tr>
+<tr><th class="lbl">Priority</th><td>{priority}</td><th class="lbl">Severity</th><td>{severity}</td></tr>
+<tr><th class="lbl">Reproducibility</th><td>{reproducibility}</td><th class="lbl">View Status</th><td>{view_state}</td></tr>
+<tr><th class="lbl">Product Version</th><td>{version}</td><th class="lbl">Target Version</th><td>{target_version}</td></tr>
+<tr><th class="lbl">Fixed in Version</th><td>{fixed_in_version}</td><th class="lbl">Build</th><td>{build}</td></tr>
+<tr><th class="lbl">Platform / OS</th><td>{platform} / {os} {os_build}</td><th class="lbl">Date Submitted / Updated</th><td>{submitted} / {updated}</td></tr>
+<tr><th class="lbl">Tags</th><td colspan="3">{tags}</td></tr>
+<tr><th class="lbl">Description</th><td colspan="3">{description}</td></tr>
+<tr><th class="lbl">Steps To Reproduce</th><td colspan="3">{steps}</td></tr>
+<tr><th class="lbl">Additional Info</th><td colspan="3">{additional}</td></tr>
+{cf_rows}{notes_section}</table>
+</div>
+"#,
+                page_break = page_break,
+                bug_id = b.id,
+                summary = html_escape(&b.summary),
+                project = html_escape(&entry.project_name),
+                category = html_escape(&entry.category_name),
+                reporter = html_escape(&entry.reporter_name),
+                handler = handler_display,
+                status = html_escape(status_label(b.status)),
+                resolution = html_escape(resolution_label(b.resolution)),
+                priority = html_escape(priority_label(b.priority)),
+                severity = html_escape(severity_label(b.severity)),
+                reproducibility = html_escape(reproducibility_label(b.reproducibility)),
+                view_state = view_state_label,
+                version = html_escape(&b.version),
+                target_version = html_escape(&b.target_version),
+                fixed_in_version = html_escape(&b.fixed_in_version),
+                build = html_escape(&b.build),
+                platform = html_escape(&b.platform),
+                os = html_escape(&b.os),
+                os_build = html_escape(&b.os_build),
+                submitted = html_escape(&format_timestamp(b.date_submitted)),
+                updated = html_escape(&format_timestamp(b.last_updated)),
+                tags = tags_display,
+                description = format_multiline_html(&entry.description),
+                steps = format_multiline_html(&entry.steps_to_reproduce),
+                additional = format_multiline_html(&entry.additional_information),
+                cf_rows = cf_rows,
+                notes_section = notes_section,
+            ));
+        }
+    }
+
+    format!(
+        r#"<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:w="urn:schemas-microsoft-com:office:word"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>MantisBT Word Export - {title}</title>
+<style>
+body {{ font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #222; }}
+h1 {{ font-size: 15pt; border-bottom: 2px solid #307ecc; padding-bottom: 4px; }}
+h2 {{ font-size: 12pt; color: #1d4ed8; margin-top: 16px; margin-bottom: 6px; }}
+table.meta-table {{ width: 100%; border-collapse: collapse; margin-bottom: 14px; }}
+table.meta-table th, table.meta-table td {{ border: 1px solid #999; padding: 4px 6px; text-align: left; vertical-align: top; }}
+table.meta-table th.lbl {{ background: #edf3f4; font-weight: bold; width: 16%; }}
+.note-block {{ border-top: 1px dashed #ccc; padding-top: 4px; margin-top: 4px; }}
+.note-meta {{ font-weight: bold; font-size: 9pt; color: #444; margin-bottom: 2px; }}
+</style>
+</head>
+<body>
+<h1>MantisBT Issues Report — {title} ({count} issue(s))</h1>
+{blocks}
+</body>
+</html>
+"#,
+        title = html_escape(project_title),
+        count = entries.len(),
+        blocks = blocks,
     )
 }
 

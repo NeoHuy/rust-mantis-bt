@@ -1079,14 +1079,43 @@ pub fn build_filter_permalink_url(filter: &BugFilter, filter_id: Option<i64>) ->
     }
 }
 
-pub fn build_csv_export_url(q: &ListBugsQuery) -> String {
+fn build_export_url(base_path: &str, q: &ListBugsQuery) -> String {
     let mut params = Vec::new();
     append_filter_query_params(q, &mut params, false);
     if params.is_empty() {
-        "/csv_export".to_string()
+        base_path.to_string()
     } else {
-        format!("/csv_export?{}", params.join("&"))
+        format!("{}?{}", base_path, params.join("&"))
     }
+}
+
+pub fn build_csv_export_url(q: &ListBugsQuery) -> String {
+    build_export_url("/csv_export", q)
+}
+
+pub fn build_print_all_bug_page_url(q: &ListBugsQuery) -> String {
+    build_export_url("/print_all_bug_page", q)
+}
+
+pub fn build_excel_export_url(q: &ListBugsQuery) -> String {
+    build_export_url("/excel_all_bug_page", q)
+}
+
+pub fn build_word_export_url(q: &ListBugsQuery) -> String {
+    build_export_url("/word_all_bug_page", q)
+}
+
+pub fn build_issues_rss_url(q: &ListBugsQuery) -> String {
+    build_issues_rss_url_for(q, 0)
+}
+
+pub fn build_issues_rss_url_for(q: &ListBugsQuery, active_project_id: i64) -> String {
+    let mut url = build_export_url("/issues_rss", q);
+    if active_project_id > 0 && q.project_id.is_none() {
+        let sep = if url.contains('?') { '&' } else { '?' };
+        url.push_str(&format!("{}project_id={}", sep, active_project_id));
+    }
+    url
 }
 
 pub fn sort_bugs(bugs: &mut [Bug], sort_key: Option<&str>, dir: Option<&str>) {

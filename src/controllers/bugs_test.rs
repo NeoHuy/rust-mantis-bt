@@ -1237,3 +1237,87 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
         former_dev_id
     )));
 }
+
+#[tokio::test]
+async fn test_phase3_m3_my_view_config_routes_save_and_reset() {
+    use crate::controllers::build_router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_id = db
+        .create_project("MyViewCfgProj", 10, 10, "", true)
+        .unwrap();
+    let cookie = test_http_login(&app, "administrator", "root", proj_id).await;
+
+    let res_cfg = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/my_view_config_page")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_cfg.status(), StatusCode::OK);
+
+    let res_save = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/my_view_config_update")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "enabled_my_comments=1&order_my_comments=1&enabled_feedback=1&order_feedback=2",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_save.status(), StatusCode::SEE_OTHER);
+
+    let res_mv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/my_view_page")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mv_html = String::from_utf8(
+        axum::body::to_bytes(res_mv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(mv_html.contains("Issues I Have Commented On"));
+    assert!(mv_html.contains("Awaiting Feedback"));
+    assert!(!mv_html.contains(r#"id="timeline""#));
+
+    let res_reset = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/my_view_config_update")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("action=reset"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_reset.status(), StatusCode::SEE_OTHER);
+    let cfg = db.get_my_view_config(1);
+    assert!(cfg.show_timeline);
+}

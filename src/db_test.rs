@@ -4724,3 +4724,151 @@ fn test_ui_m4_db_helpers_prefix_ancestors_and_overview_stats() {
     assert_eq!(stats.projects_count, 3);
     assert!(stats.users_count >= 4);
 }
+
+#[test]
+fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let dev_id = db
+        .create_user("m3_dev", "M3 Dev", "m3d@x.com", "pw", 55, true, false)
+        .unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    // 1. My View config get / set / delete round-trip
+    let def = db.get_my_view_config(dev_id);
+    assert!(def.show_timeline);
+    assert_eq!(def.enabled_boxes().len(), 6);
+
+    let mut custom = def.clone();
+    custom.show_timeline = false;
+    for b in &mut custom.boxes {
+        if b.key == "my_comments" {
+            b.enabled = true;
+            b.order = 1;
+        } else {
+            b.order += 1;
+        }
+    }
+    db.set_my_view_config(dev_id, &custom).unwrap();
+    let reloaded = db.get_my_view_config(dev_id);
+    assert!(!reloaded.show_timeline);
+    assert_eq!(
+        reloaded.enabled_boxes()[0],
+        crate::models::MyViewBox::MyComments
+    );
+
+    db.delete_config(crate::models::MY_VIEW_CONFIG_ID, 0, dev_id)
+        .unwrap();
+    assert!(db.get_my_view_config(dev_id).show_timeline);
+
+    // 2. Projects & subprojects with private subproject RBAC isolation
+    let parent_p = db.create_project("ParentBill", 10, 10, "", true).unwrap();
+    let pub_child = db.create_project("PubChildBill", 10, 10, "", true).unwrap();
+    let priv_child = db
+        .create_project("PrivChildBill", 10, 50, "", true)
+        .unwrap();
+    db.add_subproject(parent_p, pub_child, true).unwrap();
+    db.add_subproject(parent_p, priv_child, true).unwrap();
+
+    let b_parent = db
+        .create_bug(
+            parent_p,
+            1,
+            1,
+            "Parent Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let b_pub_child = db
+        .create_bug(
+            pub_child,
+            1,
+            1,
+            "Pub Child Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let b_priv_child = db
+        .create_bug(
+            priv_child,
+            1,
+            1,
+            "Priv Child Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Commented bugs + history stats
+    db.add_bugnote_with_time(b_parent, dev_id, "Dev note parent", 10, 60)
+        .unwrap();
+    db.add_bugnote_with_time(b_pub_child, dev_id, "Dev note pub child", 10, 120)
+        .unwrap();
+    db.add_bugnote_with_time(b_priv_child, admin.id, "Admin secret child", 10, 180)
+        .unwrap();
+    db.change_bug_status(b_parent, admin.id, 80, 20, Some("Fixed"))
+        .unwrap();
+
+    let commented = db.list_bugs_commented_by_user(&dev, None).unwrap();
+    let commented_ids: Vec<i64> = commented.into_iter().map(|b| b.id).collect();
+    assert!(commented_ids.contains(&b_parent));
+    assert!(commented_ids.contains(&b_pub_child));
+    assert!(!commented_ids.contains(&b_priv_child));
+
+    let (hist_counts, resolved_at) = db
+        .get_bug_history_summary_stats(&[b_parent, b_pub_child])
+        .unwrap();
+    assert!(hist_counts.get(&b_parent).copied().unwrap_or(0) >= 1);
+    assert!(resolved_at.get(&b_parent).copied().unwrap_or(0) > 0);
+
+    // 3. Billing filtered: dev with include_subprojects=true sees parent + pub_child, NOT priv_child
+    let dev_rollup = db
+        .list_time_tracking_filtered(&dev, parent_p, true, None, None)
+        .unwrap();
+    let dev_bug_ids: Vec<i64> = dev_rollup.iter().map(|e| e.bug_id).collect();
+    assert!(dev_bug_ids.contains(&b_parent));
+    assert!(dev_bug_ids.contains(&b_pub_child));
+    assert!(!dev_bug_ids.contains(&b_priv_child));
+
+    // Direct parent only (include_subprojects=false)
+    let dev_direct = db
+        .list_time_tracking_filtered(&dev, parent_p, false, None, None)
+        .unwrap();
+    assert_eq!(dev_direct.len(), 1);
+    assert_eq!(dev_direct[0].bug_id, b_parent);
+
+    // Future date window returns empty
+    let empty_future = db
+        .list_time_tracking_filtered(&admin, parent_p, true, Some(4_000_000_000), None)
+        .unwrap();
+    assert!(empty_future.is_empty());
+}

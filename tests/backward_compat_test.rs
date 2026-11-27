@@ -2460,3 +2460,37 @@ async fn test_planning_pages_and_rest_api_smoke_regression() {
     // Verify issue is deleted
     assert!(db.get_bug(new_issue_id).unwrap().is_none());
 }
+
+#[tokio::test]
+async fn test_phase3_m3_pages_backward_compat_and_no_nested_forms() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_id = db
+        .create_project("P3M3CompatProj", 10, 10, "", true)
+        .unwrap();
+    let admin_cookie = login_as_admin(&app).await;
+    let full_cookie = set_project_cookie(&app, &admin_cookie, proj_id).await;
+
+    for uri in [
+        "/my_view_page",
+        "/my_view_config_page",
+        "/summary_page",
+        "/summary_graph_page",
+        "/billing_page",
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &full_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {} failed", uri);
+        let html = response_body_string(res).await;
+        assert_no_nested_forms(&html);
+    }
+}

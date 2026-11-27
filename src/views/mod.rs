@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod bugs;
+pub mod charts;
 pub mod custom_fields;
 pub mod formatting;
 pub mod jira;
@@ -23,6 +24,26 @@ pub fn html_escape(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Escapes text for safe inclusion inside XML 1.0 text nodes and attributes,
+/// stripping disallowed XML control characters.
+pub fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if (c < ' ' && c != '\t' && c != '\n' && c != '\r') || c == '\u{FFFE}' || c == '\u{FFFF}' {
+            continue;
+        }
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
             _ => out.push(c),
         }
     }

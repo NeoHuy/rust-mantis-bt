@@ -1,15 +1,19 @@
 use crate::auth::AuthContext;
 use crate::controllers::parse_bool;
 use crate::db::Db;
-use crate::models::{Bug, BugFilter};
+use crate::models::{
+    compute_extended_summary, BillingFilterOptions, BillingIssueSummary, Bug, BugFilter,
+    ExtendedSummaryData, TimeTrackingEntry,
+};
 use crate::views;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
@@ -20,6 +24,19 @@ pub struct FlashQuery {
 #[derive(Deserialize, Default)]
 pub struct RoadmapQuery {
     pub show_released: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct SummaryQuery {
+    pub days: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct BillingQuery {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub include_subprojects: Option<String>,
+    pub cost: Option<String>,
 }
 
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
@@ -156,7 +173,7 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         .into_response()
 }
 
-pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
+fn load_extended_summary(db: &Db, ctx: &AuthContext, trend_days: i64) -> ExtendedSummaryData {
     let filter = BugFilter {
         project_id: if ctx.active_project_id > 0 {
             Some(ctx.active_project_id)
@@ -177,87 +194,64 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .unwrap_or_default()
         .into_iter()
         .collect();
+    let projects_map: HashMap<i64, String> = ctx
+        .visible_projects
+        .iter()
+        .map(|(p, _)| (p.id, p.name.clone()))
+        .collect();
 
-    let mut by_status: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
-    let mut by_severity: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
-    let mut by_priority: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
-    let mut by_category: BTreeMap<String, crate::models::SummaryCounts> = BTreeMap::new();
-    let mut by_resolution: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
-    let mut by_reporter: BTreeMap<String, crate::models::SummaryCounts> = BTreeMap::new();
-    let mut by_handler: BTreeMap<String, crate::models::SummaryCounts> = BTreeMap::new();
+    let bug_ids: Vec<i64> = bugs.iter().map(|b| b.id).collect();
+    let (history_counts, resolved_at_map) = db
+        .get_bug_history_summary_stats(&bug_ids)
+        .unwrap_or_default();
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
 
-    let mut open_count = 0usize;
-    let mut resolved_count = 0usize;
-    let mut closed_count = 0usize;
-
-    for b in &bugs {
-        by_status
-            .entry(b.status)
-            .or_default()
-            .record_status(b.status);
-        by_severity
-            .entry(b.severity)
-            .or_default()
-            .record_status(b.status);
-        by_priority
-            .entry(b.priority)
-            .or_default()
-            .record_status(b.status);
-        by_resolution
-            .entry(b.resolution)
-            .or_default()
-            .record_status(b.status);
-
-        let cat_name = categories_map
-            .get(&b.category_id)
-            .cloned()
-            .unwrap_or_else(|| "General".to_string());
-        by_category
-            .entry(cat_name)
-            .or_default()
-            .record_status(b.status);
-
-        let rep = users_map
-            .get(&b.reporter_id)
-            .cloned()
-            .unwrap_or_else(|| format!("user#{}", b.reporter_id));
-        by_reporter.entry(rep).or_default().record_status(b.status);
-
-        if b.handler_id > 0 {
-            let hnd = users_map
-                .get(&b.handler_id)
-                .cloned()
-                .unwrap_or_else(|| format!("user#{}", b.handler_id));
-            by_handler.entry(hnd).or_default().record_status(b.status);
-        }
-
-        if b.status == 90 {
-            closed_count += 1;
-        } else if b.status >= 80 {
-            resolved_count += 1;
-        } else {
-            open_count += 1;
-        }
-    }
-
-    views::planning::render_summary_page(
-        &ctx,
-        bugs.len(),
-        open_count,
-        resolved_count,
-        closed_count,
-        &by_status,
-        &by_severity,
-        &by_priority,
-        &by_category,
-        &by_resolution,
-        &by_reporter,
-        &by_handler,
+    compute_extended_summary(
+        &bugs,
+        now_ts,
+        &projects_map,
+        &categories_map,
+        &users_map,
+        &history_counts,
+        &resolved_at_map,
+        trend_days,
     )
-    .into_response()
 }
 
-pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
+pub async fn summary_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<SummaryQuery>,
+) -> Response {
+    let summary = load_extended_summary(&db, &ctx, q.days.unwrap_or(30));
+    views::planning::render_summary_page_extended(&ctx, &summary).into_response()
+}
+
+pub async fn summary_graph_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<SummaryQuery>,
+) -> Response {
+    let summary = load_extended_summary(&db, &ctx, q.days.unwrap_or(30));
+    views::planning::render_summary_graph_page(&ctx, &summary).into_response()
+}
+
+struct BillingReportData {
+    entries: Vec<TimeTrackingEntry>,
+    by_user: BTreeMap<String, i32>,
+    by_issue: Vec<BillingIssueSummary>,
+    total_mins: i32,
+    opts: BillingFilterOptions,
+}
+
+fn load_billing_report(
+    db: &Db,
+    ctx: &AuthContext,
+    q: &BillingQuery,
+) -> Result<BillingReportData, Box<Response>> {
     let eff = if ctx.active_project_id > 0 {
         db.effective_access_level(&ctx.user, ctx.active_project_id)
             .unwrap_or(0)
@@ -265,47 +259,161 @@ pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         ctx.user.access_level
     };
     if eff < 55 {
-        return forbidden(&ctx, "Developer access required to view Time Tracking.");
+        return Err(Box::new(forbidden(
+            ctx,
+            "Developer access required to view Time Tracking.",
+        )));
     }
 
-    let raw_entries = db
-        .list_time_tracking(ctx.active_project_id)
+    let from_clean = q
+        .from
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let to_clean =
+        q.to.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+    let from_ts = from_clean
+        .as_deref()
+        .map(views::parse_date_to_epoch)
+        .filter(|&t| t > 0);
+    let to_ts = to_clean
+        .as_deref()
+        .map(views::parse_date_to_epoch)
+        .filter(|&t| t > 0)
+        .map(|t| t + 86_399);
+    let include_subprojects = parse_bool(q.include_subprojects.as_deref());
+    let hourly_rate = q
+        .cost
+        .as_deref()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|r| r.is_finite() && *r >= 0.0)
+        .unwrap_or(0.0);
+
+    let entries = db
+        .list_time_tracking_filtered(
+            &ctx.user,
+            ctx.active_project_id,
+            include_subprojects,
+            from_ts,
+            to_ts,
+        )
         .unwrap_or_default();
-    let entries: Vec<_> = if ctx.active_project_id > 0 {
-        raw_entries
-    } else {
-        let mut bug_proj_cache: std::collections::HashMap<i64, Option<i64>> =
-            std::collections::HashMap::new();
-        let mut proj_access_cache: std::collections::HashMap<i64, i32> =
-            std::collections::HashMap::new();
-        raw_entries
-            .into_iter()
-            .filter(|e| {
-                let project_id = *bug_proj_cache
-                    .entry(e.bug_id)
-                    .or_insert_with(|| db.get_bug(e.bug_id).ok().flatten().map(|b| b.project_id));
-                match project_id {
-                    Some(pid) => {
-                        let p_eff = *proj_access_cache.entry(pid).or_insert_with(|| {
-                            db.effective_access_level(&ctx.user, pid).unwrap_or(0)
-                        });
-                        p_eff >= 55
-                    }
-                    None => false,
-                }
-            })
-            .collect()
-    };
 
     let mut total_mins = 0i32;
     let mut by_user: BTreeMap<String, i32> = BTreeMap::new();
+    let mut by_issue_map: HashMap<i64, BillingIssueSummary> = HashMap::new();
 
     for e in &entries {
         total_mins += e.minutes;
         *by_user.entry(e.username.clone()).or_default() += e.minutes;
+        by_issue_map
+            .entry(e.bug_id)
+            .and_modify(|item| item.minutes += e.minutes)
+            .or_insert_with(|| BillingIssueSummary {
+                bug_id: e.bug_id,
+                bug_summary: e.bug_summary.clone(),
+                project_name: e.project_name.clone(),
+                minutes: e.minutes,
+            });
     }
 
-    views::planning::render_billing_page(&ctx, &entries, &by_user, total_mins).into_response()
+    let mut by_issue: Vec<BillingIssueSummary> = by_issue_map.into_values().collect();
+    by_issue.sort_by(|a, b| {
+        b.minutes
+            .cmp(&a.minutes)
+            .then_with(|| a.bug_id.cmp(&b.bug_id))
+    });
+
+    Ok(BillingReportData {
+        entries,
+        by_user,
+        by_issue,
+        total_mins,
+        opts: BillingFilterOptions {
+            from: from_clean,
+            to: to_clean,
+            include_subprojects,
+            hourly_rate,
+        },
+    })
+}
+
+pub async fn billing_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<BillingQuery>,
+) -> Response {
+    let report = match load_billing_report(&db, &ctx, &q) {
+        Ok(r) => r,
+        Err(res) => return *res,
+    };
+
+    views::planning::render_billing_page_extended(
+        &ctx,
+        &report.entries,
+        &report.by_user,
+        &report.by_issue,
+        report.total_mins,
+        &report.opts,
+    )
+    .into_response()
+}
+
+pub async fn billing_export_csv(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<BillingQuery>,
+) -> Response {
+    let report = match load_billing_report(&db, &ctx, &q) {
+        Ok(r) => r,
+        Err(res) => return *res,
+    };
+    let csv = views::planning::render_billing_csv(&report.entries, report.opts.hourly_rate);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"billing.csv\"".to_string(),
+            ),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+        ],
+        csv,
+    )
+        .into_response()
+}
+
+pub async fn billing_export_excel(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<BillingQuery>,
+) -> Response {
+    let report = match load_billing_report(&db, &ctx, &q) {
+        Ok(r) => r,
+        Err(res) => return *res,
+    };
+    let xml = views::planning::render_billing_excel_xml(&report.entries, report.opts.hourly_rate);
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.ms-excel; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"billing.xml\"".to_string(),
+            ),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+        ],
+        xml,
+    )
+        .into_response()
 }
 
 pub async fn news_page(
@@ -501,7 +609,10 @@ pub fn router() -> Router<Db> {
         .route("/roadmap_page", get(roadmap_page))
         .route("/changelog_page", get(changelog_page))
         .route("/summary_page", get(summary_page))
+        .route("/summary_graph_page", get(summary_graph_page))
         .route("/billing_page", get(billing_page))
+        .route("/billing_export_csv", get(billing_export_csv))
+        .route("/billing_export_excel", get(billing_export_excel))
         .route("/news_page", get(news_page))
         .route("/news_add", post(news_add))
         .route("/news_edit_page/:id", get(news_edit_page))

@@ -125,7 +125,7 @@ pub fn render_custom_field_input(
                     ""
                 };
                 boxes_html.push_str(&format!(
-                    r#"<label style="margin-right:8px;"><input type="checkbox" name="custom_field_{}" value="1"{}{}> {}</label>"#,
+                    r#"<label class="inline-flex items-center mr-2 cursor-pointer"><input type="checkbox" name="custom_field_{}" value="1"{}{}> {}</label>"#,
                     cf.id,
                     checked,
                     req_attr,
@@ -142,7 +142,7 @@ pub fn render_custom_field_input(
                         ""
                     };
                     boxes_html.push_str(&format!(
-                        r#"<label style="margin-right:8px;"><input type="checkbox" name="custom_field_{}" value="{}"{}> {}</label>"#,
+                        r#"<label class="inline-flex items-center mr-2 cursor-pointer"><input type="checkbox" name="custom_field_{}" value="{}"{}> {}</label>"#,
                         cf.id,
                         html_escape(opt),
                         checked,
@@ -208,7 +208,7 @@ pub fn render_custom_field_input(
                     ""
                 };
                 radios_html.push_str(&format!(
-                    r#"<label style="margin-right:8px;"><input type="radio" name="custom_field_{}" value="{}"{}{}> {}</label>"#,
+                    r#"<label class="inline-flex items-center mr-2 cursor-pointer"><input type="radio" name="custom_field_{}" value="{}"{}{}> {}</label>"#,
                     cf.id,
                     html_escape(opt),
                     checked,
@@ -367,7 +367,7 @@ pub fn render_manage_custom_field_page(
     let mut rows_html = String::new();
     if fields.is_empty() {
         rows_html.push_str(
-            r#"<tr><td colspan="5" style="text-align:center; padding:12px;">No custom fields defined.</td></tr>"#,
+            r#"<tr><td colspan="5" class="text-center py-3 text-gray-500">No custom fields defined.</td></tr>"#,
         );
     } else {
         for (idx, (cf, linked_count)) in fields.iter().enumerate() {
@@ -454,32 +454,36 @@ pub fn render_manage_custom_field_page(
                         <tr>
                             <td class="label-col">Min / Max Length</td>
                             <td class="input-col">
-                                <input type="text" name="length_min" value="0" style="max-width:80px;">
-                                <input type="text" name="length_max" value="0" style="max-width:80px;">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <input type="text" name="length_min" value="0" class="!w-20" aria-label="Minimum length">
+                                    <input type="text" name="length_max" value="0" class="!w-20" aria-label="Maximum length">
+                                </div>
                             </td>
                         </tr>
                         <tr>
-                            <td class="label-col">Regular Expression <small style="color:#888; font-weight:normal;">(metadata)</small></td>
+                            <td class="label-col">Regular Expression <small class="text-gray-500 font-normal">(metadata)</small></td>
                             <td class="input-col"><input type="text" name="valid_regexp"></td>
                         </tr>
                         <tr>
                             <td class="label-col">Access Levels</td>
                             <td class="input-col">
-                                <label>Read: <input type="number" name="access_level_r" value="10" style="max-width:80px;"></label>
-                                <label style="margin-left:12px;">Write: <input type="number" name="access_level_rw" value="25" style="max-width:80px;"></label>
+                                <div class="flex flex-wrap items-center gap-3">
+                                    <label class="inline-flex items-center gap-1.5">Read: <input type="number" name="access_level_r" value="10" class="!w-20"></label>
+                                    <label class="inline-flex items-center gap-1.5">Write: <input type="number" name="access_level_rw" value="25" class="!w-20"></label>
+                                </div>
                             </td>
                         </tr>
                         <tr>
                             <td class="label-col">Options</td>
-                            <td class="input-col">
-                                <label><input type="checkbox" name="display_report" value="1" checked> Display When Reporting</label><br>
-                                <label><input type="checkbox" name="display_update" value="1" checked> Display When Updating</label><br>
-                                <label><input type="checkbox" name="display_resolved" value="1"> Display When Resolving</label><br>
-                                <label><input type="checkbox" name="display_closed" value="1"> Display When Closing</label><br>
-                                <label><input type="checkbox" name="require_report" value="1"> Required On Report</label><br>
-                                <label><input type="checkbox" name="require_update" value="1"> Required On Update</label><br>
-                                <label><input type="checkbox" name="require_resolved" value="1"> Required On Resolving</label><br>
-                                <label><input type="checkbox" name="require_closed" value="1"> Required On Closing</label>
+                            <td class="input-col space-y-1">
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_report" value="1" checked> Display When Reporting</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_update" value="1" checked> Display When Updating</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_resolved" value="1"> Display When Resolving</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_closed" value="1"> Display When Closing</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_report" value="1"> Required On Report</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_update" value="1"> Required On Update</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_resolved" value="1"> Required On Resolving</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_closed" value="1"> Required On Closing</label>
                             </td>
                         </tr>
                     </table>
@@ -506,19 +510,21 @@ pub fn render_manage_custom_field_edit_page(
 ) -> Html<String> {
     let mut linked_rows = String::new();
     if linked.is_empty() {
-        linked_rows.push_str(r#"<tr><td colspan="3">Not linked to any projects.</td></tr>"#);
+        linked_rows.push_str(r#"<tr><td colspan="3" class="text-center py-3 text-gray-500">Not linked to any projects.</td></tr>"#);
     } else {
-        for (p, seq) in linked {
+        for (idx, (p, seq)) in linked.iter().enumerate() {
+            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
             linked_rows.push_str(&format!(
-                r#"<tr>
+                r#"<tr class="{}">
                     <td>{}</td>
                     <td>{}</td>
                     <td>
-                        <form method="POST" action="/manage_custom_field_proj_remove/{}/{}" style="display:inline;">
-                            <button type="submit" class="btn btn-danger btn-sm">Unlink</button>
+                        <form method="POST" action="/manage_custom_field_proj_remove/{}/{}" class="inline-block m-0" data-confirm="Unlink project from this custom field?">
+                            <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-unlink" aria-hidden="true"></i> Unlink</button>
                         </form>
                     </td>
                 </tr>"#,
+                row_cls,
                 html_escape(&p.name),
                 seq,
                 cf.id,
@@ -568,44 +574,50 @@ pub fn render_manage_custom_field_edit_page(
                         <tr>
                             <td class="label-col">Min / Max Length</td>
                             <td class="input-col">
-                                <input type="text" name="length_min" value="{}" style="max-width:80px;">
-                                <input type="text" name="length_max" value="{}" style="max-width:80px;">
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <input type="text" name="length_min" value="{}" class="!w-20" aria-label="Minimum length">
+                                    <input type="text" name="length_max" value="{}" class="!w-20" aria-label="Maximum length">
+                                </div>
                             </td>
                         </tr>
                         <tr>
-                            <td class="label-col">Regular Expression <small style="color:#888; font-weight:normal;">(metadata)</small></td>
+                            <td class="label-col">Regular Expression <small class="text-gray-500 font-normal">(metadata)</small></td>
                             <td class="input-col"><input type="text" name="valid_regexp" value="{}"></td>
                         </tr>
                         <tr>
                             <td class="label-col">Access Levels</td>
                             <td class="input-col">
-                                <label>Read: <input type="number" name="access_level_r" value="{}" style="max-width:80px;"></label>
-                                <label style="margin-left:12px;">Write: <input type="number" name="access_level_rw" value="{}" style="max-width:80px;"></label>
+                                <div class="flex flex-wrap items-center gap-3">
+                                    <label class="inline-flex items-center gap-1.5">Read: <input type="number" name="access_level_r" value="{}" class="!w-20"></label>
+                                    <label class="inline-flex items-center gap-1.5">Write: <input type="number" name="access_level_rw" value="{}" class="!w-20"></label>
+                                </div>
                             </td>
                         </tr>
                         <tr>
                             <td class="label-col">Options</td>
-                            <td class="input-col">
-                                <label><input type="checkbox" name="display_report" value="1" {}> Display When Reporting</label><br>
-                                <label><input type="checkbox" name="display_update" value="1" {}> Display When Updating</label><br>
-                                <label><input type="checkbox" name="display_resolved" value="1" {}> Display When Resolving</label><br>
-                                <label><input type="checkbox" name="display_closed" value="1" {}> Display When Closing</label><br>
-                                <label><input type="checkbox" name="require_report" value="1" {}> Required On Report</label><br>
-                                <label><input type="checkbox" name="require_update" value="1" {}> Required On Update</label><br>
-                                <label><input type="checkbox" name="require_resolved" value="1" {}> Required On Resolving</label><br>
-                                <label><input type="checkbox" name="require_closed" value="1" {}> Required On Closing</label>
+                            <td class="input-col space-y-1">
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_report" value="1" {}> Display When Reporting</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_update" value="1" {}> Display When Updating</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_resolved" value="1" {}> Display When Resolving</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="display_closed" value="1" {}> Display When Closing</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_report" value="1" {}> Required On Report</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_update" value="1" {}> Required On Update</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_resolved" value="1" {}> Required On Resolving</label>
+                                <label class="block cursor-pointer"><input type="checkbox" name="require_closed" value="1" {}> Required On Closing</label>
                             </td>
                         </tr>
                     </table>
                     </div>
-                    <div class="mt-3.5 flex gap-2">
+                    <div class="mt-3.5 flex flex-wrap gap-2">
                         <button type="submit" class="btn btn-primary"><i class="fa fa-save" aria-hidden="true"></i> Update Custom Field</button>
-                        <a href="/manage_custom_field_page" class="btn btn-secondary">Back to Custom Fields</a>
+                        <a href="/manage_custom_field_page" class="btn btn-white btn-round">Back to Custom Fields</a>
                     </div>
                 </form>
-                <form method="POST" action="/manage_custom_field_delete/{}" class="mt-3">
-                    <button type="submit" class="btn btn-danger"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Custom Field</button>
-                </form>
+                <div class="mt-3 pt-3 border-t border-[#e0e6ed]">
+                    <form method="POST" action="/manage_custom_field_delete/{}" class="inline-block m-0" data-confirm="Delete this custom field? This cannot be undone.">
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Custom Field</button>
+                    </form>
+                </div>
             </div>
         </div>
         <div class="widget-box widget-color-blue2">
@@ -620,8 +632,8 @@ pub fn render_manage_custom_field_edit_page(
                     </table>
                 </div>
                 <form method="POST" action="/manage_custom_field_proj_add/{}" class="flex flex-wrap gap-2 items-center mt-3">
-                    <select name="project_id" style="width:auto;">{}</select>
-                    <input type="text" name="sequence" value="0" style="width:70px;" placeholder="Seq">
+                    <select name="project_id" class="!w-auto">{}</select>
+                    <input type="text" name="sequence" value="0" class="!w-20" placeholder="Seq">
                     <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-link" aria-hidden="true"></i> Link Project</button>
                 </form>
             </div>

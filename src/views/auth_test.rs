@@ -100,4 +100,21 @@ fn test_render_account_page() {
     assert!(html.contains("alice@example.com"));
     assert!(html.contains("developer"));
     assert!(html.contains("Account updated"));
+    assert!(html.contains(r#"class="sub-nav-tabs""#));
+    assert!(html.contains(r#"href="/account_page""#));
+    assert!(html.contains(r#"href="/api_tokens_page""#));
+    assert!(!html.contains("style="));
+}
+
+#[test]
+fn test_auth_views_no_inline_styles_or_inline_scripts() {
+    let disabled = render_signup_disabled_page().0;
+    assert!(!disabled.contains("style="));
+    assert!(!disabled.contains("<script>"));
+
+    let success = render_signup_success_page("alice").0;
+    assert!(!success.contains("style="));
+    assert!(!success.contains("<script>"));
+    assert!(success.contains(r#"data-redirect-url="/my_view_page""#));
+    assert!(success.contains("/assets/mantis.js"));
 }

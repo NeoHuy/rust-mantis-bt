@@ -148,4 +148,38 @@ fn test_render_jira_section_linked() {
     assert!(html.contains(r#"action="/view_bug_page/42/jira_sync""#));
     assert!(html.contains(r#"action="/view_bug_page/42/jira_unlink""#));
     assert!(html.contains("Unlink"));
+    assert!(html.contains(r#"data-confirm="Are you sure you want to unlink this Jira ticket?""#));
+    assert!(html.contains("data-disable-on-submit"));
+    assert!(!html.contains("style="));
+    assert!(!html.contains("onsubmit="));
+}
+
+#[test]
+fn test_jira_views_have_no_inline_styles_or_inline_js() {
+    let ctx = dummy_ctx();
+    let config = JiraResolvedConfig {
+        enabled: true,
+        base_url: "https://test.atlassian.net".to_string(),
+        email: "jira@example.com".to_string(),
+        api_token: "tok".to_string(),
+        default_issue_type: "Bug".to_string(),
+        project_key: "PROJ".to_string(),
+    };
+    let manage_html = render_manage_jira_page(
+        &ctx,
+        &config,
+        &[],
+        &[(1, "Alpha".to_string(), "ALP".to_string())],
+        &[("ALP".to_string(), 2, 1700000000)],
+        &[("Done".to_string(), 80)],
+        None,
+        None,
+    )
+    .0;
+    assert!(!manage_html.contains("style="));
+    assert!(!manage_html.contains("onsubmit="));
+    assert!(manage_html.contains("fa-plug"));
+    assert!(manage_html.contains("fa-refresh"));
+    assert!(manage_html.contains("fa-check-circle"));
+    assert!(manage_html.contains("btn btn-white btn-round btn-sm"));
 }

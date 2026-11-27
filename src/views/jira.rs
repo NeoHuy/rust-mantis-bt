@@ -57,15 +57,17 @@ pub fn render_manage_jira_page(
     };
 
     let mut project_mapping_rows = String::new();
-    for (pid, pname, mapped_key) in project_mappings {
+    for (idx, (pid, pname, mapped_key)) in project_mappings.iter().enumerate() {
+        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
         project_mapping_rows.push_str(&format!(
-            r#"<tr>
+            r#"<tr class="{}">
                 <td><strong>{}</strong></td>
                 <td>{}</td>
                 <td>
-                    <input type="text" name="project_map_{}" value="{}" placeholder="e.g. PROJ" style="width:160px;">
+                    <input type="text" name="project_map_{}" value="{}" placeholder="e.g. PROJ" class="!w-40">
                 </td>
             </tr>"#,
+            row_cls,
             pid,
             html_escape(pname),
             pid,
@@ -76,18 +78,20 @@ pub fn render_manage_jira_page(
     let mut status_mapping_rows = String::new();
     let mut row_idx = 0;
     for (j_status, m_status) in status_mappings {
+        let row_cls = if row_idx % 2 == 0 { "row-1" } else { "row-2" };
         row_idx += 1;
         status_mapping_rows.push_str(&format!(
-            r#"<tr>
+            r#"<tr class="{}">
                 <td>
-                    <input type="text" name="status_jira_{}" value="{}" placeholder="e.g. In Progress" style="width:260px;">
+                    <input type="text" name="status_jira_{}" value="{}" placeholder="e.g. In Progress" class="!w-64">
                 </td>
                 <td>
-                    <select name="status_mantis_{}" style="width:200px;">
+                    <select name="status_mantis_{}" class="!w-52">
                         {}
                     </select>
                 </td>
             </tr>"#,
+            row_cls,
             row_idx,
             html_escape(j_status),
             row_idx,
@@ -95,18 +99,20 @@ pub fn render_manage_jira_page(
         ));
     }
     for _ in 0..2 {
+        let row_cls = if row_idx % 2 == 0 { "row-1" } else { "row-2" };
         row_idx += 1;
         status_mapping_rows.push_str(&format!(
-            r#"<tr>
+            r#"<tr class="{}">
                 <td>
-                    <input type="text" name="status_jira_{}" value="" placeholder="(New Jira status)" style="width:260px;">
+                    <input type="text" name="status_jira_{}" value="" placeholder="(New Jira status)" class="!w-64">
                 </td>
                 <td>
-                    <select name="status_mantis_{}" style="width:200px;">
+                    <select name="status_mantis_{}" class="!w-52">
                         {}
                     </select>
                 </td>
             </tr>"#,
+            row_cls,
             row_idx,
             row_idx,
             render_mantis_status_options(10)
@@ -116,30 +122,33 @@ pub fn render_manage_jira_page(
     let mut cached_epics_html = String::new();
     if !cached_epics.is_empty() {
         cached_epics_html.push_str(
-            r#"<h3 style="margin-top:24px; margin-bottom:10px; font-size:14px;">Cached Jira Epics</h3>
-            <table class="table" style="max-width:800px; margin-bottom:16px;">
-                <thead>
-                    <tr>
-                        <th style="width:180px;">Jira Project Key</th>
-                        <th style="width:140px;">Cached Epics</th>
-                        <th>Last Refreshed</th>
-                    </tr>
-                </thead>
-                <tbody>"#,
+            r#"<h3 class="mt-6 mb-2.5 text-sm font-semibold text-gray-800">Cached Jira Epics</h3>
+            <div class="table-responsive">
+                <table class="data-table max-w-[800px] mb-4">
+                    <thead>
+                        <tr>
+                            <th class="w-44">Jira Project Key</th>
+                            <th class="w-36">Cached Epics</th>
+                            <th>Last Refreshed</th>
+                        </tr>
+                    </thead>
+                    <tbody>"#,
         );
-        for (pkey, count, updated_at) in cached_epics {
+        for (idx, (pkey, count, updated_at)) in cached_epics.iter().enumerate() {
+            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
             cached_epics_html.push_str(&format!(
-                r#"<tr>
+                r#"<tr class="{}">
                     <td><strong>{}</strong></td>
                     <td>{} epic(s)</td>
                     <td>{}</td>
                 </tr>"#,
+                row_cls,
                 html_escape(pkey),
                 count,
                 crate::views::format_timestamp(*updated_at)
             ));
         }
-        cached_epics_html.push_str("</tbody></table>");
+        cached_epics_html.push_str("</tbody></table></div>");
     }
 
     let env_token_active = std::env::var("MANTIS_JIRA_API_TOKEN")
@@ -147,118 +156,122 @@ pub fn render_manage_jira_page(
         .unwrap_or(false);
 
     let token_hint = if env_token_active {
-        r#"<small style="color:#2b6cb0; display:block; margin-top:2px;">(Supplied via <code>MANTIS_JIRA_API_TOKEN</code> environment variable — takes precedence over database value)</small>"#
+        r#"<small class="block mt-1 text-xs text-blue-700"><span class="badge badge-info">ENV OVERRIDE</span> Supplied via <code>MANTIS_JIRA_API_TOKEN</code> environment variable — takes precedence over database value.</small>"#
     } else if !config.api_token.is_empty() {
-        r#"<small style="color:#777; display:block; margin-top:2px;">(API Token currently saved. Leave blank to keep existing token)</small>"#
+        r#"<small class="block mt-1 text-xs text-gray-500">(API Token currently saved. Leave blank to keep existing token)</small>"#
     } else {
         ""
     };
 
     let body = format!(
         r#"{}
-        <div class="widget-box widget-color-blue2" style="margin-bottom:20px;">
+        <div class="widget-box widget-color-blue2 mb-5">
             <div class="widget-header">
                 <h4 class="widget-title"><i class="fa fa-exchange" aria-hidden="true"></i> Jira Cloud Integration Configuration</h4>
             </div>
-            <div class="widget-body" style="padding:16px;">
-                <form method="POST" action="/manage_jira_config">
+            <div class="widget-body p-4">
+                <form method="POST" action="/manage_jira_config" data-disable-on-submit>
                     <div class="table-responsive">
-                        <table class="table" style="max-width:800px;">
-                        <tr>
-                            <th style="width:220px;">Enable Jira Integration</th>
-                            <td>
-                                <label style="display:flex; align-items:center; gap:8px;">
-                                    <input type="checkbox" name="jira_enabled" value="1" {}>
-                                    <span>Enable pushing Mantis issues to Atlassian Jira Cloud</span>
-                                </label>
-                            </td>
-                        </tr>
-                        <tr>
-                            <th>Jira Base URL</th>
-                            <td>
-                                <input type="url" name="jira_base_url" value="{}" placeholder="https://yourcompany.atlassian.net" style="width:100%; max-width:400px;" required>
-                                <small style="color:#777; display:block; margin-top:2px;">Atlassian Jira Cloud URL (e.g. https://domain.atlassian.net). Internal/HTTP or on-prem hosts require <code>MANTIS_ALLOW_LOCAL_JIRA=1</code>.</small>
-                            </td>
-                        </tr>
-                        <tr>
-                            <th>Jira Account Email</th>
-                            <td>
-                                <input type="email" name="jira_email" value="{}" placeholder="bot@yourcompany.com" style="width:100%; max-width:400px;" required>
-                                <small style="color:#777; display:block; margin-top:2px;">Atlassian account email address with issue creation permission</small>
-                            </td>
-                        </tr>
-                        <tr>
-                            <th>Jira API Token</th>
-                            <td>
-                                <input type="password" name="jira_api_token" placeholder="{}" style="width:100%; max-width:400px;">
-                                {}
-                            </td>
-                        </tr>
-                        <tr>
-                            <th>Default Issue Type</th>
-                            <td>
-                                <select name="jira_default_issue_type" style="width:160px;">
-                                    <option value="Bug" {}>Bug</option>
-                                    <option value="Task" {}>Task</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <th>Default Jira Project Key</th>
-                            <td>
-                                <input type="text" name="jira_default_project_key" value="{}" placeholder="e.g. MANTIS" style="width:160px;">
-                                <small style="color:#777; display:block; margin-top:2px;">Fallback key if project is not mapped below</small>
-                            </td>
-                        </tr>
-                    </table>
-
-                    <h3 style="margin-top:24px; margin-bottom:12px; font-size:15px;">Project Mapping (Mantis Project &rarr; Jira Project Key)</h3>
-                    <table class="table" style="max-width:800px; margin-bottom:20px;">
-                        <thead>
+                        <table class="form-table form-table-left max-w-[800px]">
                             <tr>
-                                <th style="width:60px;">ID</th>
-                                <th>Mantis Project Name</th>
-                                <th style="width:200px;">Jira Project Key</th>
+                                <th class="category w-56">Enable Jira Integration</th>
+                                <td class="input-col">
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" name="jira_enabled" value="1" {}>
+                                        <span>Enable pushing Mantis issues to Atlassian Jira Cloud</span>
+                                    </label>
+                                </td>
                             </tr>
-                        </thead>
-                        <tbody>
-                            {}
-                        </tbody>
-                    </table>
-
-                    <h3 style="margin-top:24px; margin-bottom:12px; font-size:15px;">Status Mapping (Jira Status &rarr; Mantis Status)</h3>
-                    <table class="table" style="max-width:800px; margin-bottom:6px;">
-                        <thead>
                             <tr>
-                                <th style="width:280px;">Jira Status (Case-insensitive)</th>
-                                <th>Mapped Mantis Status</th>
+                                <th class="category">Jira Base URL</th>
+                                <td class="input-col">
+                                    <input type="url" name="jira_base_url" value="{}" placeholder="https://yourcompany.atlassian.net" class="!w-full !max-w-[400px]" required>
+                                    <small class="block mt-1 text-xs text-gray-500">Atlassian Jira Cloud URL (e.g. https://domain.atlassian.net). Internal/HTTP or on-prem hosts require <code>MANTIS_ALLOW_LOCAL_JIRA=1</code>.</small>
+                                </td>
                             </tr>
-                        </thead>
-                        <tbody>
-                            {}
-                        </tbody>
-                    </table>
+                            <tr>
+                                <th class="category">Jira Account Email</th>
+                                <td class="input-col">
+                                    <input type="email" name="jira_email" value="{}" placeholder="bot@yourcompany.com" class="!w-full !max-w-[400px]" required>
+                                    <small class="block mt-1 text-xs text-gray-500">Atlassian account email address with issue creation permission</small>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th class="category">Jira API Token</th>
+                                <td class="input-col">
+                                    <input type="password" name="jira_api_token" placeholder="{}" class="!w-full !max-w-[400px]">
+                                    {}
+                                </td>
+                            </tr>
+                            <tr>
+                                <th class="category">Default Issue Type</th>
+                                <td class="input-col">
+                                    <select name="jira_default_issue_type" class="!w-40">
+                                        <option value="Bug" {}>Bug</option>
+                                        <option value="Task" {}>Task</option>
+                                    </select>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th class="category">Default Jira Project Key</th>
+                                <td class="input-col">
+                                    <input type="text" name="jira_default_project_key" value="{}" placeholder="e.g. MANTIS" class="!w-40">
+                                    <small class="block mt-1 text-xs text-gray-500">Fallback key if project is not mapped below</small>
+                                </td>
+                            </tr>
+                        </table>
                     </div>
-                    <small style="color:#777; display:block; margin-bottom:20px;">When issues sync from Jira, their Mantis status will automatically update to match this mapping. Leave Jira status blank to remove a mapping.</small>
 
-                    <div style="display:flex; gap:10px; align-items:center;">
-                        <button type="submit" class="btn btn-primary">Save Jira Configuration</button>
+                    <h3 class="mt-6 mb-3 text-[15px] font-semibold text-gray-800">Project Mapping (Mantis Project &rarr; Jira Project Key)</h3>
+                    <div class="table-responsive">
+                        <table class="data-table max-w-[800px] mb-5">
+                            <thead>
+                                <tr>
+                                    <th class="w-16">ID</th>
+                                    <th>Mantis Project Name</th>
+                                    <th class="w-52">Jira Project Key</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <h3 class="mt-6 mb-3 text-[15px] font-semibold text-gray-800">Status Mapping (Jira Status &rarr; Mantis Status)</h3>
+                    <div class="table-responsive">
+                        <table class="data-table max-w-[800px] mb-1.5">
+                            <thead>
+                                <tr>
+                                    <th class="w-72">Jira Status (Case-insensitive)</th>
+                                    <th>Mapped Mantis Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {}
+                            </tbody>
+                        </table>
+                    </div>
+                    <small class="block mb-5 text-xs text-gray-500">When issues sync from Jira, their Mantis status will automatically update to match this mapping. Leave Jira status blank to remove a mapping.</small>
+
+                    <div class="flex items-center gap-2.5">
+                        <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-check-circle" aria-hidden="true"></i> Save Jira Configuration</button>
                     </div>
                 </form>
 
-                <hr style="margin:24px 0;">
+                <hr class="my-6 border-gray-200">
 
-                <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
-                    <form method="POST" action="/manage_jira_test" style="display:flex; align-items:center; gap:8px;">
-                        <button type="submit" class="btn btn-secondary">Test Connection to Jira</button>
-                        <small style="color:#666;">Verifies current credentials against Atlassian Jira /rest/api/3/myself</small>
+                <div class="flex flex-wrap items-center gap-4">
+                    <form method="POST" action="/manage_jira_test" class="flex items-center gap-2 m-0" data-disable-on-submit>
+                        <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-plug" aria-hidden="true"></i> Test Connection to Jira</button>
+                        <small class="text-xs text-gray-600">Verifies current credentials against Atlassian Jira /rest/api/3/myself</small>
                     </form>
 
-                    <form method="POST" action="/manage_jira_refresh_epics" style="display:flex; align-items:center; gap:8px;">
-                        <button type="submit" class="btn btn-secondary">
-                            <i class="fa fa-refresh"></i> Refresh Epics Cache
+                    <form method="POST" action="/manage_jira_refresh_epics" class="flex items-center gap-2 m-0" data-disable-on-submit>
+                        <button type="submit" class="btn btn-white btn-round btn-sm">
+                            <i class="fa fa-refresh" aria-hidden="true"></i> Refresh Epics Cache
                         </button>
-                        <small style="color:#666;">Fetch and update cached Jira Epics immediately (cached for 24h by default)</small>
+                        <small class="text-xs text-gray-600">Fetch and update cached Jira Epics immediately (cached for 24h by default)</small>
                     </form>
                 </div>
 
@@ -301,22 +314,22 @@ pub fn render_jira_section(
     if let Some(jl) = jira_link {
         let status_badge = if !jl.jira_status.is_empty() {
             let lower = jl.jira_status.to_lowercase();
-            let bg = if lower.contains("done")
+            let badge_cls = if lower.contains("done")
                 || lower.contains("resolved")
                 || lower.contains("closed")
             {
-                "#28a745"
+                "bg-emerald-700 text-white"
             } else if lower.contains("in progress") || lower.contains("dev") {
-                "#0052cc"
+                "bg-blue-700 text-white"
             } else if lower.contains("review") || lower.contains("testing") || lower.contains("qa")
             {
-                "#ffab00"
+                "bg-amber-600 text-white"
             } else {
-                "#6c757d"
+                "bg-gray-600 text-white"
             };
             format!(
-                r#"<span class="badge" style="background:{}; color:#fff; font-size:11px; padding:2px 6px; border-radius:2px;">{}</span>"#,
-                bg,
+                r#"<span class="inline-block px-1.5 py-0.5 text-[11px] font-semibold rounded-sm {}">{}</span>"#,
+                badge_cls,
                 html_escape(&jl.jira_status)
             )
         } else {
@@ -325,7 +338,7 @@ pub fn render_jira_section(
 
         let unlink_btn = if eff >= 55 {
             format!(
-                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" style="display:inline; margin-left:4px;" data-confirm="Are you sure you want to unlink this Jira ticket?">
+                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" class="inline-block ml-1 m-0" data-confirm="Are you sure you want to unlink this Jira ticket?">
                     <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-unlink" aria-hidden="true"></i> Unlink</button>
                 </form>"#,
                 bug_id
@@ -336,7 +349,7 @@ pub fn render_jira_section(
 
         let sync_btn = if eff >= 55 {
             format!(
-                r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;" data-disable-on-submit="true">
+                r#"<form method="POST" action="/view_bug_page/{}/jira_sync" class="inline-block m-0" data-disable-on-submit>
                     <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-refresh" aria-hidden="true"></i> Sync with Jira</button>
                 </form>"#,
                 bug_id
@@ -363,27 +376,27 @@ pub fn render_jira_section(
                         <table class="data-table">
                             <thead>
                                 <tr>
-                                    <th style="width:140px;">Jira Ticket</th>
-                                    <th style="width:100px;">Type</th>
-                                    <th style="width:120px;">Jira Status</th>
+                                    <th class="w-36">Jira Ticket</th>
+                                    <th class="w-24">Type</th>
+                                    <th class="w-32">Jira Status</th>
                                     <th>Jira URL</th>
-                                    <th style="width:210px;">Actions</th>
+                                    <th class="w-52">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <tr>
                                     <td>
-                                        <a href="{}" target="_blank" rel="noopener noreferrer" style="font-weight:bold; color:#0052cc;">
-                                            {} <i class="fa fa-external-link" style="font-size:11px;"></i>
+                                        <a href="{}" target="_blank" rel="noopener noreferrer" class="font-bold text-blue-700 hover:underline">
+                                            {} <i class="fa fa-external-link text-[11px]" aria-hidden="true"></i>
                                         </a>
                                     </td>
                                     <td>{}</td>
                                     <td>{}</td>
                                     <td>
-                                        <a href="{}" target="_blank" rel="noopener noreferrer" style="color:#555;">{}</a>
+                                        <a href="{}" target="_blank" rel="noopener noreferrer" class="text-gray-600 hover:underline">{}</a>
                                     </td>
                                     <td>
-                                        {}{}{}
+                                        <div class="flex flex-wrap items-center gap-1">{}{}{}</div>
                                     </td>
                                 </tr>
                             </tbody>
@@ -426,41 +439,41 @@ pub fn render_jira_section(
                     </div>
                 </div>
                 <div class="widget-body">
-                    <p style="margin-bottom:12px; color:#666;">No Jira ticket linked to this issue.</p>
-                    <form method="POST" action="/view_bug_page/{}/jira_sync" data-disable-on-submit="true">
+                    <p class="mb-3 text-gray-600">No Jira ticket linked to this issue.</p>
+                    <form method="POST" action="/view_bug_page/{}/jira_sync" data-disable-on-submit>
                         <div class="table-responsive">
                             <table class="form-table form-table-left">
                                 <tr>
                                     <th class="category">Jira Ticket Number</th>
                                     <td class="input-col">
-                                        <input type="text" name="jira_key" placeholder="e.g. 123 or JBC-123" style="width:260px;">
-                                        <small style="color:#777; display:block; margin-top:2px;">Leave empty to create a new Jira ticket</small>
+                                        <input type="text" name="jira_key" placeholder="e.g. 123 or JBC-123" class="!w-64">
+                                        <small class="block mt-1 text-xs text-gray-500">Leave empty to create a new Jira ticket</small>
                                     </td>
                                 </tr>
                                 <tr>
                                     <th class="category">Epic</th>
                                     <td class="input-col">
-                                        <select name="epic_key" style="min-width:240px; width:auto;">
+                                        <select name="epic_key" class="!min-w-60 !w-auto">
                                             <option value="">None (No Epic)</option>
                                             {}
                                         </select>
-                                        <small style="color:#777; display:block; margin-top:2px;">Optional parent epic in Jira</small>
+                                        <small class="block mt-1 text-xs text-gray-500">Optional parent epic in Jira</small>
                                     </td>
                                 </tr>
                                 <tr>
                                     <th class="category">Issue Type</th>
                                     <td class="input-col">
-                                        <select name="issue_type" style="width:auto;">
+                                        <select name="issue_type" class="!w-auto">
                                             <option value="Bug">Bug</option>
                                             <option value="Task">Task</option>
                                             <option value="Story">Story</option>
                                         </select>
-                                        <small style="color:#777; display:block; margin-top:2px;">Type if creating a new Jira ticket</small>
+                                        <small class="block mt-1 text-xs text-gray-500">Type if creating a new Jira ticket</small>
                                     </td>
                                 </tr>
                             </table>
                         </div>
-                        <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-refresh" aria-hidden="true"></i> Sync</button>
+                        <button type="submit" class="btn btn-primary btn-white btn-round btn-sm mt-3"><i class="fa fa-refresh" aria-hidden="true"></i> Sync</button>
                     </form>
                 </div>
             </div>"#,
@@ -480,7 +493,7 @@ pub fn render_jira_section(
                 </div>
             </div>
             <div class="widget-body">
-                <p style="color:#666;">No Jira ticket linked to this issue.</p>
+                <p class="text-gray-600 m-0">No Jira ticket linked to this issue.</p>
             </div>
         </div>"#
             .to_string()

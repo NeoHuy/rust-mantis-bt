@@ -100,3 +100,54 @@ fn test_render_user_create_error() {
     assert!(html.contains("Username already exists"));
     assert!(html.contains("/manage_user_create_page"));
 }
+
+#[test]
+fn test_manage_users_nav_aria_label_and_no_inline_styles() {
+    let ctx = dummy_admin_ctx();
+    let sample_user = User {
+        id: 2,
+        username: "alice".to_string(),
+        realname: "Alice".to_string(),
+        email: "alice@example.com".to_string(),
+        password: "hash".to_string(),
+        enabled: 1,
+        protected: 0,
+        access_level: 25,
+        login_count: 1,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: "c2".to_string(),
+        last_visit: 0,
+        date_created: 0,
+    };
+    let html = render_manage_users_page_with_prefix(&ctx, &[sample_user], "", false, "A").0;
+    assert!(html.contains(
+        r#"<nav class="flex flex-wrap gap-1 mb-3" aria-label="Filter users by initial">"#
+    ));
+    assert!(
+        html.contains(r#"href="/manage_user_page?prefix=A" class="btn btn-primary btn-sm">A</a>"#)
+    );
+    assert!(html.contains("btn btn-danger btn-white btn-round btn-sm"));
+    assert!(!html.contains("style="));
+    assert!(!html.contains("onsubmit="));
+}
+
+#[test]
+fn test_normalize_user_prefix_ab() {
+    assert_eq!(
+        crate::controllers::users::normalize_user_prefix(Some("Ab")),
+        "A"
+    );
+    assert_eq!(
+        crate::controllers::users::normalize_user_prefix(Some(" z ")),
+        "Z"
+    );
+    assert_eq!(
+        crate::controllers::users::normalize_user_prefix(Some("0-9")),
+        "0-9"
+    );
+    assert_eq!(
+        crate::controllers::users::normalize_user_prefix(Some("all")),
+        ""
+    );
+}

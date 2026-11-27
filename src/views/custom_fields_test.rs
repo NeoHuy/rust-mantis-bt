@@ -486,3 +486,89 @@ fn test_manage_custom_field_edit_renders_human_readable_type_label() {
     let html_unknown = render_manage_custom_field_edit_page(&ctx, &cf_unknown, &[], None, None).0;
     assert!(html_unknown.contains(r#"<option value="99" selected>Unknown (99)</option>"#));
 }
+
+fn assert_no_nested_forms(html: &str) {
+    let mut depth = 0usize;
+    let mut rest = html;
+    while let Some(pos) = rest.find('<') {
+        rest = &rest[pos + 1..];
+        let lower = rest.get(..6).unwrap_or(rest).to_ascii_lowercase();
+        if lower.starts_with("form")
+            && rest
+                .as_bytes()
+                .get(4)
+                .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>')
+        {
+            depth += 1;
+            assert!(depth <= 1, "Nested <form> detected in HTML");
+        } else if lower.starts_with("/form>") {
+            depth = depth.saturating_sub(1);
+        }
+    }
+}
+
+#[test]
+fn test_custom_fields_views_no_inline_styles_and_wcag_buttons() {
+    let user = crate::models::User {
+        id: 1,
+        username: "admin".to_string(),
+        realname: "Admin".to_string(),
+        email: "admin@x.com".to_string(),
+        password: "hash".to_string(),
+        enabled: 1,
+        protected: 0,
+        access_level: 90,
+        login_count: 1,
+        lost_password_request_count: 0,
+        failed_login_count: 0,
+        cookie_string: "c".to_string(),
+        last_visit: 0,
+        date_created: 0,
+    };
+    let ctx = AuthContext {
+        user,
+        active_project_id: 0,
+        visible_projects: vec![],
+    };
+    let cf = CustomField {
+        id: 1,
+        name: "Platform".to_string(),
+        field_type: 0,
+        possible_values: "".to_string(),
+        default_value: "".to_string(),
+        valid_regexp: "".to_string(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 255,
+        display_report: 1,
+        display_update: 1,
+        display_resolved: 0,
+        display_closed: 0,
+        require_report: 0,
+        require_update: 0,
+        require_resolved: 0,
+        require_closed: 0,
+        filter_by: 0,
+    };
+    let proj = crate::models::Project {
+        id: 2,
+        name: "Demo".to_string(),
+        status: 10,
+        enabled: 1,
+        view_state: 10,
+        access_min: 10,
+        description: "".to_string(),
+        category_id: 0,
+        inherit_global: 1,
+    };
+
+    let manage_html = render_manage_custom_field_page(&ctx, &[(cf.clone(), 1)], None, None).0;
+    assert!(!manage_html.contains("style="));
+    assert_no_nested_forms(&manage_html);
+
+    let edit_html = render_manage_custom_field_edit_page(&ctx, &cf, &[(proj, 0)], None, None).0;
+    assert!(!edit_html.contains("style="));
+    assert!(edit_html.contains("btn btn-danger btn-white btn-round btn-sm"));
+    assert_no_nested_forms(&edit_html);
+}

@@ -650,6 +650,18 @@
     }
   }
 
+  function initDisableOnSubmit() {
+    var forms = document.querySelectorAll('form[data-disable-on-submit]');
+    for (var i = 0; i < forms.length; i++) {
+      (function (form) {
+        form.addEventListener('submit', function () {
+          var btn = form.querySelector('button[type="submit"], input[type="submit"]');
+          if (btn) btn.disabled = true;
+        });
+      })(forms[i]);
+    }
+  }
+
   window.MantisBT = window.MantisBT || {};
   window.MantisBT.getCsrfToken = getCsrfToken;
 
@@ -664,6 +676,7 @@
     initSelectAllCheckboxes();
     initSavedFilterQuickSelect();
     initConfirmButtons();
+    initDisableOnSubmit();
     initCountdownRedirect();
     initDropzones();
     initBulkActionForm();

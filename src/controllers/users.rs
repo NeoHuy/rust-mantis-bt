@@ -55,6 +55,25 @@ pub fn router() -> Router<Db> {
         .route("/manage_user_delete/:id", post(manage_user_delete))
 }
 
+pub fn normalize_user_prefix(raw: Option<&str>) -> String {
+    let trimmed = raw.map(|s| s.trim()).unwrap_or("");
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {
+        return String::new();
+    }
+    if trimmed == "0-9" {
+        return "0-9".to_string();
+    }
+    if let Some(ch) = trimmed.chars().next() {
+        if ch.is_ascii_alphabetic() {
+            return ch.to_ascii_uppercase().to_string();
+        }
+        if ch.is_ascii_digit() {
+            return "0-9".to_string();
+        }
+    }
+    String::new()
+}
+
 pub async fn manage_user_page(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -66,12 +85,13 @@ pub async fn manage_user_page(
 
     let search_trimmed = query.search.as_deref().filter(|s| !s.trim().is_empty());
     let enabled_only = query.filter_enabled.is_some();
-    let prefix_trimmed = query
-        .prefix
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-    let users = match db.list_users_filtered(search_trimmed, enabled_only, prefix_trimmed) {
+    let normalized_prefix = normalize_user_prefix(query.prefix.as_deref());
+    let prefix_arg = if normalized_prefix.is_empty() {
+        None
+    } else {
+        Some(normalized_prefix.as_str())
+    };
+    let users = match db.list_users_filtered(search_trimmed, enabled_only, prefix_arg) {
         Ok(list) => list,
         Err(e) => {
             return (
@@ -92,7 +112,7 @@ pub async fn manage_user_page(
         &users,
         query.search.as_deref().unwrap_or(""),
         enabled_only,
-        prefix_trimmed.unwrap_or(""),
+        &normalized_prefix,
     )
     .into_response()
 }

@@ -17,7 +17,7 @@ pub fn render_manage_tags_page(
     let mut rows_html = String::new();
     if tags.is_empty() {
         rows_html.push_str(
-            r#"<tr><td colspan="4" style="text-align:center; padding:12px;">No tags defined.</td></tr>"#,
+            r#"<tr><td colspan="4" class="text-center py-3 text-gray-500">No tags defined.</td></tr>"#,
         );
     } else {
         for (idx, (t, count)) in tags.iter().enumerate() {
@@ -28,7 +28,7 @@ pub fn render_manage_tags_page(
             };
             let actions = if ctx.user.access_level >= 70 {
                 format!(
-                    r#"<form method="POST" action="/tag_delete/{}" style="display:inline;" data-confirm="Delete tag?"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
+                    r#"<form method="POST" action="/tag_delete/{}" class="inline-block m-0" data-confirm="Delete tag?"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
                     t.id
                 )
             } else {
@@ -127,22 +127,26 @@ pub fn render_tag_view_page(
 
     let edit_form = if ctx.user.access_level >= 70 {
         format!(
-            r#"<div class="panel">
-                <div class="panel-header">Edit Tag</div>
-                <div class="panel-body">
+            r#"<div class="widget-box widget-color-blue2">
+                <div class="widget-header">
+                    <h4 class="widget-title"><i class="fa fa-pencil" aria-hidden="true"></i> Edit Tag</h4>
+                </div>
+                <div class="widget-body">
                     <form method="POST" action="/tag_update/{}">
-                        <table class="form-table">
-                            <tr>
-                                <td class="label-col">Tag Name *</td>
-                                <td class="input-col"><input type="text" name="name" value="{}" required></td>
-                            </tr>
-                            <tr>
-                                <td class="label-col">Description</td>
-                                <td class="input-col"><textarea name="description">{}</textarea></td>
-                            </tr>
-                        </table>
-                        <div style="margin-top:14px;">
-                            <button type="submit" class="btn">Update Tag</button>
+                        <div class="table-responsive">
+                            <table class="form-table">
+                                <tr>
+                                    <td class="label-col">Tag Name <span class="required">*</span></td>
+                                    <td class="input-col"><input type="text" name="name" value="{}" required></td>
+                                </tr>
+                                <tr>
+                                    <td class="label-col">Description</td>
+                                    <td class="input-col"><textarea name="description">{}</textarea></td>
+                                </tr>
+                            </table>
+                        </div>
+                        <div class="mt-3.5">
+                            <button type="submit" class="btn btn-primary"><i class="fa fa-save" aria-hidden="true"></i> Update Tag</button>
                         </div>
                     </form>
                 </div>
@@ -157,32 +161,36 @@ pub fn render_tag_view_page(
 
     let content = format!(
         r#"{err_banner}
-        <div class="panel">
-            <div class="panel-header">Tag: {name}</div>
-            <div class="panel-body">
-                <table class="form-table">
-                    <tr>
-                        <td class="label-col">Tag Name</td>
-                        <td class="input-col"><strong>{name}</strong></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Description</td>
-                        <td class="input-col">{desc}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Created By</td>
-                        <td class="input-col">{creator}</td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Attached Issues</td>
-                        <td class="input-col">
-                            <a href="/view_all_bug_page?tag_id={tag_id}" class="btn btn-secondary btn-sm">{count} issue(s) &nearr;</a>
-                        </td>
-                    </tr>
-                </table>
-                <div style="margin-top:14px; display:flex; gap:8px;">
-                    <a href="/manage_tags_page" class="btn btn-secondary">Back to Tags</a>
-                    <a href="/view_all_bug_page?tag_id={tag_id}" class="btn btn-secondary">View Attached Issues</a>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-tag" aria-hidden="true"></i> Tag: {name}</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Tag Name</td>
+                            <td class="input-col"><strong>{name}</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Description</td>
+                            <td class="input-col">{desc}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Created By</td>
+                            <td class="input-col">{creator}</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Attached Issues</td>
+                            <td class="input-col">
+                                <a href="/view_all_bug_page?tag_id={tag_id}" class="btn btn-white btn-round btn-sm">{count} issue(s) &nearr;</a>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="mt-3.5 flex flex-wrap gap-2">
+                    <a href="/manage_tags_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back to Tags</a>
+                    <a href="/view_all_bug_page?tag_id={tag_id}" class="btn btn-white btn-round btn-sm"><i class="fa fa-list" aria-hidden="true"></i> View Attached Issues</a>
                 </div>
             </div>
         </div>

@@ -51,10 +51,12 @@ pub fn render_manage_users_page_with_prefix(
                 <td>{}</td>
                 <td>{}</td>
                 <td>
-                    <a href="/manage_user_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>
-                    <form action="/manage_user_delete/{}" method="POST" style="display:inline; margin-left:4px;" data-confirm="Are you sure you want to delete this user?">
-                        <button type="submit" class="btn btn-danger btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
-                    </form>
+                    <div class="flex flex-wrap items-center gap-1">
+                        <a href="/manage_user_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>
+                        <form action="/manage_user_delete/{}" method="POST" class="inline-block m-0" data-confirm="Are you sure you want to delete this user?">
+                            <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
+                        </form>
+                    </div>
                 </td>
             </tr>"#,
             row_class,
@@ -131,18 +133,18 @@ pub fn render_manage_users_page_with_prefix(
                 </div>
             </div>
             <div class="widget-body">
-                <div class="flex flex-wrap gap-1 mb-3" aria-label="Filter users by starting letter">
+                <nav class="flex flex-wrap gap-1 mb-3" aria-label="Filter users by initial">
                     {}
-                </div>
+                </nav>
                 <form method="GET" action="/manage_user_page" class="flex flex-wrap items-center gap-3 mb-3 pb-3 border-b border-[#e5e5e5]">
                     <input type="hidden" name="prefix" value="{}" />
                     <label for="search">Search:</label>
-                    <input type="text" name="search" id="search" value="{}" placeholder="Filter by username, real name or email" style="width:250px;" />
+                    <input type="text" name="search" id="search" value="{}" placeholder="Filter by username, real name or email" class="!w-64" />
                     <label class="flex items-center cursor-pointer">
                         <input type="checkbox" name="filter_enabled" value="1" {} /> Enabled only
                     </label>
                     <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-filter" aria-hidden="true"></i> Apply Filter</button>
-                    <a href="/manage_user_page" class="btn btn-secondary btn-sm">Reset</a>
+                    <a href="/manage_user_page" class="btn btn-white btn-round btn-sm">Reset</a>
                 </form>
 
                 <div class="table-responsive">
@@ -274,9 +276,9 @@ pub fn render_user_edit_page(ctx: &AuthContext, target_user: &User) -> Html<Stri
     let delete_btn = if target_user.protected == 0 {
         format!(
             r#"
-            <div style="margin-top: 12px; border-top: 1px solid #e0e6ed; padding-top: 12px;">
-                <form action="/manage_user_delete/{}" method="POST" style="display:inline;" data-confirm="Are you sure you want to delete this user?">
-                    <button type="submit" class="btn btn-danger">Delete User</button>
+            <div class="mt-3 pt-3 border-t border-[#e0e6ed]">
+                <form action="/manage_user_delete/{}" method="POST" class="inline-block m-0" data-confirm="Are you sure you want to delete this user?">
+                    <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete User</button>
                 </form>
             </div>
             "#,
@@ -360,7 +362,7 @@ pub fn render_user_edit_page(ctx: &AuthContext, target_user: &User) -> Html<Stri
 pub fn render_user_create_error(ctx: &AuthContext, err: &str) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to create user: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_user_create_page" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_user_create_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err)
     );
     (
@@ -376,7 +378,7 @@ pub fn render_user_update_error(
 ) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to update user: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_user_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_user_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err),
         id
     );
@@ -389,7 +391,7 @@ pub fn render_user_update_error(
 pub fn render_user_delete_error(ctx: &AuthContext, err: &str) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to delete user: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_user_page" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_user_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err)
     );
     (

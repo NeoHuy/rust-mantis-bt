@@ -63,6 +63,10 @@ fn test_render_signup_success_page() {
     assert!(html.contains("Go to Dashboard Now"));
     assert!(html.contains("href=\"/my_view_page\""));
     assert!(html.contains("id=\"countdown\""));
+    assert!(html.contains(r#"data-redirect-url="/my_view_page""#));
+    assert!(html.contains(r#"data-redirect-seconds="5""#));
+    assert!(html.contains(r#"src="/assets/mantis.js?v="#));
+    assert!(!html.contains("<script>"));
 }
 
 #[test]

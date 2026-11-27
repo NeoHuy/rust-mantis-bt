@@ -126,3 +126,21 @@ fn test_render_layout_reporter_hides_admin_and_billing_items() {
     assert!(!html.contains("Invite Users"));
     assert!(!html.contains(r#"href="/billing_page""#));
 }
+
+#[test]
+fn test_render_account_tabs_and_manage_columns_layout() {
+    let tabs = render_account_tabs("Manage Columns");
+    assert!(tabs.contains(r#"href="/account_page""#));
+    assert!(tabs.contains(r#"href="/account_manage_columns_page" class="active""#));
+    assert!(tabs.contains(r#"href="/api_tokens_page""#));
+
+    let ctx = AuthContext {
+        user: make_test_user(90),
+        active_project_id: 0,
+        visible_projects: vec![],
+    };
+    let html = render_layout("Manage Columns", &ctx, None, "<p>Cols</p>").0;
+    assert!(html.contains(r#"class="sub-nav-tabs""#));
+    assert!(html.contains(r#"href="/account_manage_columns_page" class="active""#));
+    assert!(!html.contains(r#"class="nav-tabs""#));
+}

@@ -434,10 +434,11 @@
 
   function initConfirmButtons() {
     document.addEventListener('submit', function (e) {
+      if (e.defaultPrevented) return;
       var form = e.target;
       if (!form || !form.getAttribute) return;
-      var confirmMsg = form.getAttribute('data-confirm');
-      if (confirmMsg) {
+      if (form.hasAttribute('data-confirm')) {
+        var confirmMsg = form.getAttribute('data-confirm') || 'Are you sure?';
         if (!window.confirm(confirmMsg)) {
           e.preventDefault();
           return;
@@ -452,6 +453,7 @@
     });
 
     document.addEventListener('click', function (e) {
+      if (e.defaultPrevented) return;
       var el = e.target && e.target.closest ? e.target.closest('[data-confirm]') : null;
       if (!el || el.tagName === 'FORM') return;
       var msg = el.getAttribute('data-confirm') || 'Are you sure?';
@@ -471,7 +473,7 @@
         }
         var rawSecs = parseInt(container.getAttribute('data-redirect-seconds') || '5', 10);
         var seconds = isNaN(rawSecs) || rawSecs < 1 ? 5 : rawSecs;
-        var countdownEl = container.querySelector('[data-redirect-countdown]') || document.getElementById('countdown');
+        var countdownEl = container.querySelector('[data-redirect-countdown]');
         if (countdownEl) {
           countdownEl.textContent = String(seconds);
         }

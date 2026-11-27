@@ -404,19 +404,31 @@ async fn test_core_pages_have_zero_inline_js_and_zero_inline_event_handlers() {
             10,
         )
         .unwrap();
+    db.add_bugnote(bug_id, admin.id, "Test note for CSP", 10)
+        .unwrap();
 
     let app = build_router(db);
     let cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
 
     let view_bug_uri = format!("/view_bug_page/{}", bug_id);
+    let proj_edit_uri = format!("/manage_proj_edit_page/{}", proj_id);
+    let user_edit_uri = format!("/manage_user_edit_page/{}", admin.id);
+    let rev_view_uri = format!("/bug_revision_view_page/{}", bug_id);
     let pages: &[(&str, bool)] = &[
         ("/my_view_page", true),
+        ("/my_view_config_page", true),
         ("/view_all_bug_page", true),
+        ("/print_all_bug_page", true),
         ("/bug_report_page", true),
         (view_bug_uri.as_str(), true),
+        (rev_view_uri.as_str(), true),
         ("/news_page", true),
+        ("/summary_page", true),
         ("/manage_proj_page", true),
+        (proj_edit_uri.as_str(), true),
         ("/manage_user_page", true),
+        (user_edit_uri.as_str(), true),
+        ("/manage_tags_page", true),
         ("/manage_email_queue_page", true),
         ("/manage_overview_page", true),
         ("/account_page", true),
@@ -425,6 +437,31 @@ async fn test_core_pages_have_zero_inline_js_and_zero_inline_event_handlers() {
         ("/signup_page", false),
         ("/login", false),
     ];
+
+    let inline_handler_re = regex::Regex::new(r#"(?i)\son[a-z]+\s*="#).unwrap();
+    let assert_no_inline_js = |uri: &str, html: &str| {
+        let lower = html.to_ascii_lowercase();
+        let mut search_from = 0;
+        while let Some(idx) = lower[search_from..].find("<script") {
+            let abs_idx = search_from + idx;
+            let tag_end = lower[abs_idx..]
+                .find('>')
+                .map(|e| abs_idx + e)
+                .unwrap_or(lower.len());
+            let tag_slice = &lower[abs_idx..tag_end];
+            assert!(
+                tag_slice.contains("src="),
+                "Inline <script> found on {uri}: {}",
+                &html[abs_idx..tag_end.min(abs_idx + 120)]
+            );
+            search_from = tag_end;
+        }
+        assert!(
+            !inline_handler_re.is_match(html),
+            "Inline event handler found on {uri}: {:?}",
+            inline_handler_re.find(html).map(|m| m.as_str())
+        );
+    };
 
     for &(uri, with_auth) in pages {
         let mut req_builder = Request::builder().uri(uri);
@@ -454,31 +491,10 @@ async fn test_core_pages_have_zero_inline_js_and_zero_inline_event_handlers() {
             .await
             .unwrap();
         let html = String::from_utf8_lossy(&bytes);
-        let lower = html.to_ascii_lowercase();
-
-        // Every <script tag must have a src= attribute (no inline <script>)
-        let mut search_from = 0;
-        while let Some(idx) = lower[search_from..].find("<script") {
-            let abs_idx = search_from + idx;
-            let tag_end = lower[abs_idx..]
-                .find('>')
-                .map(|e| abs_idx + e)
-                .unwrap_or(lower.len());
-            let tag_slice = &lower[abs_idx..tag_end];
-            assert!(
-                tag_slice.contains("src="),
-                "Inline <script> found on {uri}: {}",
-                &html[abs_idx..tag_end.min(abs_idx + 120)]
-            );
-            search_from = tag_end;
-        }
-
-        // Zero inline event handlers
-        for attr in ["onclick=", "onchange=", "onsubmit="] {
-            assert!(
-                !lower.contains(attr),
-                "Inline handler '{attr}' found on {uri}"
-            );
-        }
+        assert_no_inline_js(uri, &html);
     }
+
+    // Also verify signup success HTML has zero inline JS / handlers
+    let signup_success_html = crate::views::auth::render_signup_success_page("csp_user").0;
+    assert_no_inline_js("render_signup_success_page", &signup_success_html);
 }

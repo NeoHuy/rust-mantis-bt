@@ -8,9 +8,15 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn test_manage_overview_page_requires_admin() {
     let db = Db::open_in_memory().unwrap();
+    let dev_id = db
+        .create_user("dev_overview", "Dev", "dev@x.com", "pw", 55, true, false)
+        .unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
     let app = build_router(db);
 
+    // Unauthenticated redirects to /login
     let res = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/manage_overview_page")
@@ -19,9 +25,26 @@ async fn test_manage_overview_page_requires_admin() {
         )
         .await
         .unwrap();
-
-    // Unauthenticated redirects to /login
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
+
+    // Logged-in non-admin (< 90) receives 403 Forbidden / Access Denied
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/manage_overview_page")
+                .header(
+                    "Cookie",
+                    format!("MANTIS_STRING_COOKIE={}", dev.cookie_string),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("Access Denied"));
 }
 
 #[tokio::test]

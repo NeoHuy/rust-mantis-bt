@@ -85,3 +85,32 @@ fn test_render_charts_top_n_sorted_with_other_and_full_total() {
     assert!(collision_bar.contains(">Other<"));
     assert!(collision_bar.contains("Other (combined)"));
 }
+
+#[test]
+fn test_trend_y_axis_ticks_are_unique_increasing_integers() {
+    for max_val in [1usize, 2, 3, 5, 9] {
+        let svg = render_issues_trend_svg(
+            "Trend",
+            &[TrendPoint {
+                label: "2026-11-01".to_string(),
+                opened: max_val,
+                resolved: 0,
+                cumulative_open: max_val,
+            }],
+        );
+        let ticks: Vec<usize> = svg
+            .split("text-anchor=\"end\" font-size=\"10\" fill=\"#6b7280\">")
+            .skip(1)
+            .filter_map(|s| s.split('<').next()?.parse().ok())
+            .collect();
+        assert!(ticks.len() >= 2, "max_val={} ticks={:?}", max_val, ticks);
+        assert_eq!(ticks[0], 0);
+        assert_eq!(*ticks.last().unwrap(), max_val);
+        assert!(
+            ticks.windows(2).all(|w| w[0] < w[1]),
+            "max_val={} ticks={:?}",
+            max_val,
+            ticks
+        );
+    }
+}

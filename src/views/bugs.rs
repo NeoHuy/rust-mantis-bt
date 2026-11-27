@@ -434,7 +434,7 @@ pub fn render_my_view_box_with_meta(
             <div class="widget-header widget-header-small">
                 <h4 class="widget-title lighter">
                     <i class="fa {}" aria-hidden="true"></i>
-                    <a href="{}" class="text-white hover:text-white hover:underline">{} ({})</a>
+                    <a href="{}" class="text-white hover:text-white hover:underline">{}</a>
                     <span class="badge" style="background:rgba(0,0,0,0.22); color:#ffffff;">{}</span>
                 </h4>
                 <div class="widget-toolbar">
@@ -460,7 +460,6 @@ pub fn render_my_view_box_with_meta(
         html_escape(icon),
         html_escape(link),
         html_escape(title),
-        bugs.len(),
         range_badge,
         html_escape(link),
         rows
@@ -898,11 +897,7 @@ fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String 
     render_sortable_th_with_title(q, sort_key, label, None)
 }
 
-fn count_active_filters(
-    filter: &BugFilter,
-    query: &ListBugsQuery,
-    allowed_cf_ids: &HashSet<i64>,
-) -> usize {
+fn count_active_filters(filter: &BugFilter, allowed_cf_ids: &HashSet<i64>) -> usize {
     let mut count = 0;
     if filter
         .search
@@ -1003,9 +998,6 @@ fn count_active_filters(
         if allowed_cf_ids.contains(fid) && vals.iter().any(|s| !s.trim().is_empty()) {
             count += 1;
         }
-    }
-    if query.filter_id.unwrap_or(0) > 0 {
-        count += 1;
     }
     count
 }
@@ -2234,7 +2226,7 @@ pub fn render_view_all_bug_page(
         .map(|(cf, _)| cf.id)
         .collect();
     let search_val = filter.search.as_deref().unwrap_or("");
-    let active_filter_count = count_active_filters(filter, query, &allowed_cf_ids);
+    let active_filter_count = count_active_filters(filter, &allowed_cf_ids);
     let active_filter_badge = if active_filter_count > 0 {
         format!(
             r#"<span class="badge" style="background:#f89406; color:#ffffff;">Active ({})</span>"#,

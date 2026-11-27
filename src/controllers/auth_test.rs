@@ -139,3 +139,41 @@ async fn test_login_submit_lockout_blocks_login_without_enumeration() {
     .await;
     assert_eq!(resp_nonexistent.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn test_login_page_alias_route() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = router().with_state(db.clone());
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login_page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let user = db.authenticate("administrator", "root").unwrap().unwrap();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/login_page")
+                .header(
+                    "cookie",
+                    format!("MANTIS_STRING_COOKIE={}", user.cookie_string),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers().get("location").unwrap(), "/my_view_page");
+}

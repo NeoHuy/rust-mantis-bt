@@ -206,7 +206,7 @@ async fn test_custom_fields_tags_monitors_and_my_view() {
     )
     .unwrap();
     assert!(my_view_html.contains("Assigned to Me"));
-    assert!(my_view_html.contains("Monitored by Me (1)"));
+    assert!(my_view_html.contains(">Monitored by Me</a>"));
     assert!(my_view_html.contains("Crash on Safari"));
 }
 

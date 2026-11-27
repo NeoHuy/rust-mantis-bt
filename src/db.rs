@@ -4210,7 +4210,7 @@ impl Db {
             last_modified: row.get(6)?,
             note_type: row.get(7)?,
             note_attr: row.get(8)?,
-            time_tracking: row.get(9)?,
+            time_tracking: row.get::<_, i64>(9)?.clamp(0, i64::from(i32::MAX)) as i32,
             note: row.get(10)?,
         })
     }

@@ -4965,4 +4965,6 @@ fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
         .list_time_tracking_filtered(&dev, parent_p, false, None, None)
         .unwrap();
     assert!(big_entries.iter().any(|e| e.minutes == i32::MAX));
+    let notes_with_big = db.list_bugnotes(b_parent, 55).unwrap();
+    assert!(notes_with_big.iter().any(|n| n.time_tracking == i32::MAX));
 }

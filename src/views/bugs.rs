@@ -2560,11 +2560,11 @@ pub fn render_view_all_bug_page(
         permalink_bar,
         total,
         range_badge,
-        build_print_all_bug_page_url(query),
-        build_csv_export_url(query),
-        build_excel_export_url(query),
-        build_word_export_url(query),
-        rss_export_url,
+        html_escape(&build_print_all_bug_page_url(query)),
+        html_escape(&build_csv_export_url(query)),
+        html_escape(&build_excel_export_url(query)),
+        html_escape(&build_word_export_url(query)),
+        html_escape(&rss_export_url),
         html_escape(return_query),
         per_page_html,
         prev_link,
@@ -4882,6 +4882,7 @@ pub fn render_excel_xml(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_print_all_bug_page(
     ctx: &AuthContext,
     project_title: &str,
@@ -4890,9 +4891,19 @@ pub fn render_print_all_bug_page(
     col_keys: &[String],
     bugs: &[Bug],
     rows: &[Vec<String>],
+    truncated_from: Option<usize>,
 ) -> Html<String> {
     let asset_ver = env!("CARGO_PKG_VERSION");
     let rss_url = build_issues_rss_url_for(query, ctx.active_project_id);
+    let truncated_notice = truncated_from
+        .map(|total| {
+            format!(
+                r#"<div class="flash-error mb-3"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> Export capped at {} of {} matching issues (<code>MANTIS_EXPORT_MAX_ROWS</code>).</div>"#,
+                rows.len(),
+                total
+            )
+        })
+        .unwrap_or_default();
 
     let mut th_html = String::new();
     for h in headers {
@@ -4982,6 +4993,7 @@ pub fn render_print_all_bug_page(
         <h1 class="text-lg font-bold m-0">MantisBT Issue Report — {project_title}</h1>
         <span class="text-xs text-gray-600">User: {username} | Total Issues: {count}</span>
     </div>
+    {truncated_notice}
     <div class="table-responsive">
         <table id="print-buglist" class="data-table w-full text-xs">
             <thead>
@@ -5005,6 +5017,7 @@ pub fn render_print_all_bug_page(
         count = rows.len(),
         th_html = th_html,
         tbody_html = tbody_html,
+        truncated_notice = truncated_notice,
     );
 
     Html(html)

@@ -107,6 +107,11 @@ fn allow_full_query_token() -> bool {
         .unwrap_or(false)
 }
 
+fn has_bearer_scheme(auth_hdr: &str) -> bool {
+    let mut parts = auth_hdr.split_whitespace();
+    matches!(parts.next(), Some(scheme) if scheme.eq_ignore_ascii_case("bearer"))
+}
+
 fn authenticate_rss_request(
     db: &Db,
     headers: &HeaderMap,
@@ -116,7 +121,7 @@ fn authenticate_rss_request(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && has_bearer_scheme(s))
     {
         let raw = extract_bearer_token(auth_hdr);
         if raw.is_empty() {
@@ -144,7 +149,7 @@ fn authenticate_rss_request(
         return match db.authenticate_api_token_with_scope(candidate) {
             Ok(Some((_, user, scope))) => {
                 if let Some(ref req_user) = extra.username {
-                    if !user.username.eq_ignore_ascii_case(req_user) {
+                    if user.username != *req_user {
                         return Err(Box::new(rss_unauthorized(
                             "Invalid or revoked RSS feed token",
                         )));

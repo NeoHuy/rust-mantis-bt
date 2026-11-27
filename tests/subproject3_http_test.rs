@@ -1959,3 +1959,145 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
         .unwrap();
     assert_eq!(res_revoked.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn test_phase3_m2_cross_project_cf_access_in_csv_and_excel_exports() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use rust_mantis_bt::models::ColumnContext;
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_a = db.create_project("ExpCfA", 10, 10, "", true).unwrap();
+    let proj_b = db.create_project("ExpCfB", 10, 10, "", true).unwrap();
+    let mgr_id = db
+        .create_user(
+            "exp_cf_mgr",
+            "Exp Mgr",
+            "expmgr@test.com",
+            "pass123",
+            70,
+            true,
+            false,
+        )
+        .unwrap();
+    let dev_a_id = db
+        .create_user(
+            "exp_cf_dev_a",
+            "Exp Dev A",
+            "expdeva@test.com",
+            "pass123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    db.set_project_user(proj_a, dev_a_id, 55).unwrap();
+    db.set_project_user(proj_b, dev_a_id, 25).unwrap();
+    let dev_a = db.get_user_by_id(dev_a_id).unwrap().unwrap();
+
+    let cf_id = db
+        .create_custom_field_full(
+            "DevOnlyNote",
+            0,
+            "",
+            "",
+            "",
+            55,
+            55,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_id, proj_a, 0).unwrap();
+    db.link_custom_field_to_project(cf_id, proj_b, 0).unwrap();
+
+    let b_a = db
+        .create_bug(
+            proj_a,
+            mgr_id,
+            0,
+            "BugInProjA",
+            "DescA",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let b_b = db
+        .create_bug(
+            proj_b,
+            mgr_id,
+            0,
+            "BugInProjB",
+            "DescB",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_id, b_a, mgr_id, "CF_PROJ_A_ALLOWED")
+        .unwrap();
+    db.set_custom_field_value(cf_id, b_b, mgr_id, "CF_PROJ_B_FORBIDDEN")
+        .unwrap();
+
+    let cols = vec![
+        "id".to_string(),
+        "summary".to_string(),
+        format!("custom_field_{}", cf_id),
+    ];
+    db.set_user_columns(&dev_a, 0, ColumnContext::Csv, &cols)
+        .unwrap();
+    db.set_user_columns(&dev_a, 0, ColumnContext::Excel, &cols)
+        .unwrap();
+
+    let cookie =
+        set_project_cookie(&app, &login_user(&app, "exp_cf_dev_a", "pass123").await, 0).await;
+
+    for uri in ["/csv_export", "/excel_all_bug_page"] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {}", uri);
+        let body = String::from_utf8(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("CF_PROJ_A_ALLOWED"), "{} missing A", uri);
+        assert!(!body.contains("CF_PROJ_B_FORBIDDEN"), "{} leaked B CF", uri);
+    }
+}

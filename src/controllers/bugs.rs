@@ -668,7 +668,7 @@ fn check_project_filter_access(
     None
 }
 
-fn word_export_max_rows() -> usize {
+fn export_max_rows() -> usize {
     std::env::var("MANTIS_EXPORT_MAX_ROWS")
         .ok()
         .and_then(|s| s.trim().parse::<usize>().ok())
@@ -693,6 +693,7 @@ struct ExportTabularDataset {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
     project_title: String,
+    truncated_from: Option<usize>,
 }
 
 fn load_filtered_export_bugs(
@@ -776,8 +777,21 @@ fn prepare_tabular_export_dataset(
     q: &ListBugsQuery,
     col_ctx: ColumnContext,
     format_last_updated: bool,
+    apply_row_cap: bool,
 ) -> Result<ExportTabularDataset, Box<Response>> {
-    let prepared = load_filtered_export_bugs(db, ctx, q)?;
+    let mut prepared = load_filtered_export_bugs(db, ctx, q)?;
+    let truncated_from = if apply_row_cap {
+        let max_rows = export_max_rows();
+        if prepared.bugs.len() > max_rows {
+            let total = prepared.bugs.len();
+            prepared.bugs.truncate(max_rows);
+            Some(total)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let accessible_cf_ids: HashSet<i64> = prepared.accessible_cfs.iter().map(|c| c.id).collect();
     let raw_cols = db
         .get_user_columns_with_cfs(
@@ -963,6 +977,7 @@ fn prepare_tabular_export_dataset(
         headers,
         rows,
         project_title: prepared.project_title,
+        truncated_from,
     })
 }
 
@@ -972,10 +987,11 @@ pub async fn csv_export(
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
-    let dataset = match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Csv, false) {
-        Ok(d) => d,
-        Err(res) => return *res,
-    };
+    let dataset =
+        match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Csv, false, false) {
+            Ok(d) => d,
+            Err(res) => return *res,
+        };
 
     let header_cells: Vec<String> = dataset
         .headers
@@ -1010,10 +1026,11 @@ pub async fn print_all_bug_page(
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
-    let dataset = match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Print, true) {
-        Ok(d) => d,
-        Err(res) => return *res,
-    };
+    let dataset =
+        match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Print, true, true) {
+            Ok(d) => d,
+            Err(res) => return *res,
+        };
 
     views::bugs::render_print_all_bug_page(
         &ctx,
@@ -1023,6 +1040,7 @@ pub async fn print_all_bug_page(
         &dataset.col_keys,
         &dataset.bugs,
         &dataset.rows,
+        dataset.truncated_from,
     )
     .into_response()
 }
@@ -1033,10 +1051,11 @@ pub async fn excel_all_bug_page(
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
-    let dataset = match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Excel, true) {
-        Ok(d) => d,
-        Err(res) => return *res,
-    };
+    let dataset =
+        match prepare_tabular_export_dataset(&db, &ctx, &q, ColumnContext::Excel, true, true) {
+            Ok(d) => d,
+            Err(res) => return *res,
+        };
 
     let xml = views::bugs::render_excel_xml(
         &dataset.project_title,
@@ -1074,7 +1093,7 @@ pub async fn word_all_bug_page(
         Err(res) => return *res,
     };
 
-    let max_rows = word_export_max_rows();
+    let max_rows = export_max_rows();
     let truncated_from = if prepared.bugs.len() > max_rows {
         let total = prepared.bugs.len();
         prepared.bugs.truncate(max_rows);

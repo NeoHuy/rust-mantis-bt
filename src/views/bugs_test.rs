@@ -2207,6 +2207,7 @@ fn test_render_print_and_word_exports_escape_html_and_no_nested_forms() {
         &col_keys,
         std::slice::from_ref(&bug),
         &rows,
+        None,
     )
     .0;
     assert!(print_html.contains("data-action=\"print\""));

@@ -30,7 +30,7 @@ async fn test_rss_requires_auth_and_supports_pat_bearer_and_query_token() {
     let (_, rss_pat) = db
         .create_api_token_with_scope(1, "rss-reader", "rss")
         .unwrap();
-    let app = build_router(db);
+    let app = build_router(db.clone());
 
     // 1. Unauthenticated returns 401 Unauthorized
     let res_unauth = app
@@ -131,4 +131,90 @@ async fn test_rss_requires_auth_and_supports_pat_bearer_and_query_token() {
         .await
         .unwrap();
     assert_eq!(res_good_key.status(), StatusCode::OK);
+
+    // 6. Non-Bearer Authorization (e.g. reverse proxy Basic) falls through to session cookie auth
+    let login_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=administrator&password=root"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let adm_cookie = login_res
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let res_basic_fallback = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/issues_rss")
+                .header("authorization", "Basic dXNlcjpwYXNz")
+                .header("cookie", &adm_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_basic_fallback.status(), StatusCode::OK);
+
+    // 7. Token creation normalizes RSS/API scopes cleanly and rejects unknown scopes instead of downgrading to full api
+    let res_bad_scope = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api_token_create")
+                .header("cookie", &adm_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("name=bad_scope_tok&scope=read"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_bad_scope.status(), StatusCode::SEE_OTHER);
+    let bad_loc = res_bad_scope
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(bad_loc.contains("err=Invalid"));
+    assert!(db
+        .list_api_tokens(1)
+        .unwrap()
+        .iter()
+        .all(|t| t.name != "bad_scope_tok"));
+
+    let res_upper_rss = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api_token_create")
+                .header("cookie", &adm_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("name=upper_rss_tok&scope=RSS"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_upper_rss.status(), StatusCode::SEE_OTHER);
+    let created_rss = db
+        .list_api_tokens(1)
+        .unwrap()
+        .into_iter()
+        .find(|t| t.name == "upper_rss_tok")
+        .expect("RSS token should be created");
+    assert_eq!(created_rss.scope, "rss");
 }

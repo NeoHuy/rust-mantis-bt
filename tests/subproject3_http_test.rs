@@ -2269,7 +2269,29 @@ async fn test_saved_filter_shows_accurate_active_count_and_login_page_alias() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
-    let fid = db.list_visible_filters(1, 0).unwrap()[0].id;
+    let location = res
+        .headers()
+        .get("location")
+        .expect("filter_save redirect location")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let admin = db
+        .get_user_by_username("administrator")
+        .unwrap()
+        .expect("seed administrator");
+    let fid = db
+        .list_visible_filters(admin.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "High Only")
+        .expect("saved filter")
+        .id;
+    assert!(
+        location.starts_with(&format!("/view_all_bug_page?filter_id={}", fid)),
+        "unexpected redirect location: {}",
+        location
+    );
 
     let res = app
         .clone()

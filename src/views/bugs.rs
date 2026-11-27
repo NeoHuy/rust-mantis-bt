@@ -262,6 +262,9 @@ pub struct ViewIssuesMeta {
     pub custom_field_values: HashMap<(i64, i64), String>,
     pub bug_tags_map: HashMap<i64, Vec<String>>,
     pub bug_texts_map: HashMap<i64, (String, String, String)>,
+    pub can_save_public: Option<bool>,
+    pub can_save_filter: Option<bool>,
+    pub deletable_filter_ids: Option<HashSet<i64>>,
 }
 
 pub fn render_priority_icon(priority: i32) -> String {
@@ -767,7 +770,11 @@ fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String 
     render_sortable_th_with_title(q, sort_key, label, None)
 }
 
-fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
+fn count_active_filters(
+    filter: &BugFilter,
+    query: &ListBugsQuery,
+    allowed_cf_ids: &HashSet<i64>,
+) -> usize {
     let mut count = 0;
     if filter
         .search
@@ -828,26 +835,30 @@ fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
     if filter
         .date_submitted_from
         .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+        .map(str::trim)
+        .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
+        .is_some()
         || filter
             .date_submitted_to
             .as_deref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
+            .is_some()
     {
         count += 1;
     }
     if filter
         .last_updated_from
         .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+        .map(str::trim)
+        .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
+        .is_some()
         || filter
             .last_updated_to
             .as_deref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
+            .is_some()
     {
         count += 1;
     }
@@ -857,8 +868,8 @@ fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
     if !filter.effective_note_user_ids().is_empty() {
         count += 1;
     }
-    for vals in filter.custom_fields.values() {
-        if vals.iter().any(|s| !s.trim().is_empty()) {
+    for (fid, vals) in &filter.custom_fields {
+        if allowed_cf_ids.contains(fid) && vals.iter().any(|s| !s.trim().is_empty()) {
             count += 1;
         }
     }
@@ -1969,9 +1980,14 @@ pub fn render_view_all_bug_page(
             sf_sel,
             html_escape(&sf.name)
         ));
-        let delete_btn = if sf.user_id == ctx.user.id
-            || (sf.is_public != 0 && ctx.user.access_level >= 70)
-        {
+        let can_del = meta
+            .deletable_filter_ids
+            .as_ref()
+            .map(|ids| ids.contains(&sf.id))
+            .unwrap_or_else(|| {
+                sf.user_id == ctx.user.id || (sf.is_public != 0 && ctx.user.access_level >= 70)
+            });
+        let delete_btn = if can_del {
             format!(
                 r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" data-confirm="Delete filter?" title="Delete filter">Delete</button></form>"#,
                 sf.id
@@ -1986,12 +2002,14 @@ pub fn render_view_all_bug_page(
             delete_btn
         ));
     }
-    let manage_filters_btn = if ctx.user.access_level >= 25 {
+    let can_save_filter = meta.can_save_filter.unwrap_or(ctx.user.access_level >= 25);
+    let can_save_public = meta.can_save_public.unwrap_or(ctx.user.access_level >= 70);
+    let manage_filters_btn = if can_save_filter {
         r#"<a href="/manage_filter_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-sliders" aria-hidden="true"></i> Manage Filters</a>"#
     } else {
         ""
     };
-    let saved_filters_section = if saved_filters.is_empty() && ctx.user.access_level < 25 {
+    let saved_filters_section = if saved_filters.is_empty() && !can_save_filter {
         String::new()
     } else {
         format!(
@@ -2073,8 +2091,13 @@ pub fn render_view_all_bug_page(
         ));
     }
 
+    let allowed_cf_ids: HashSet<i64> = meta
+        .filter_custom_fields
+        .iter()
+        .map(|(cf, _)| cf.id)
+        .collect();
     let search_val = filter.search.as_deref().unwrap_or("");
-    let active_filter_count = count_active_filters(filter, query);
+    let active_filter_count = count_active_filters(filter, query, &allowed_cf_ids);
     let active_filter_badge = if active_filter_count > 0 {
         format!(
             r#"<span class="badge" style="background:#f89406; color:#ffffff;">Active ({})</span>"#,
@@ -2084,11 +2107,6 @@ pub fn render_view_all_bug_page(
         String::new()
     };
 
-    let allowed_cf_ids: HashSet<i64> = meta
-        .filter_custom_fields
-        .iter()
-        .map(|(cf, _)| cf.id)
-        .collect();
     let version_scope_hidden_inputs = if let Some(pid) = query.project_id.filter(|&x| x > 0) {
         format!(r#"<input type="hidden" name="project_id" value="{}">"#, pid)
     } else {
@@ -2113,12 +2131,20 @@ pub fn render_view_all_bug_page(
     );
     save_hidden_inputs.push_str(&version_scope_hidden_inputs);
 
-    let public_checkbox = if ctx.user.access_level >= 70 {
+    let mut adv_form_hidden_inputs = version_scope_hidden_inputs.clone();
+    for v in filter.effective_hide_statuses() {
+        adv_form_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="hide_statuses" value="{}">"#,
+            v
+        ));
+    }
+
+    let public_checkbox = if can_save_public {
         r#"<label class="text-xs inline-flex items-center gap-1"><input type="checkbox" name="is_public" value="1"> Public</label>"#
     } else {
         ""
     };
-    let save_filter_form = if ctx.user.access_level >= 25 {
+    let save_filter_form = if can_save_filter {
         format!(
             r#"<form method="POST" action="/filter_save" class="flex flex-wrap gap-2 items-center mt-2">
                 {}
@@ -2132,7 +2158,9 @@ pub fn render_view_all_bug_page(
         String::new()
     };
 
-    let permalink_url = build_filter_permalink_url(filter, query.filter_id);
+    let mut permalink_filter = filter.clone();
+    permalink_filter.retain_custom_fields(&allowed_cf_ids);
+    let permalink_url = build_filter_permalink_url(&permalink_filter, query.filter_id);
     let permalink_bar = format!(
         r#"<div class="flex flex-wrap items-center gap-2 mt-2">
             <label for="filter_permalink_input" class="text-xs font-semibold text-gray-700"><i class="fa fa-link" aria-hidden="true"></i> Permalink:</label>
@@ -2479,7 +2507,7 @@ pub fn render_view_all_bug_page(
         html_escape(cur_sort),
         html_escape(cur_dir),
         cur_per_page_str,
-        version_scope_hidden_inputs,
+        adv_form_hidden_inputs,
         reporter_opts,
         handler_opts,
         monitored_opts,

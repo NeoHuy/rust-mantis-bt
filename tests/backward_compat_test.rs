@@ -792,7 +792,7 @@ async fn test_milestone1_pagination_sorting_sticky_pinning_and_filter_delete_per
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     assert!(db.get_filter(f_owner).unwrap().is_none());
 
-    // Manager can delete any filter
+    // Manager (70) cannot delete another user's private filter -> 403 Forbidden
     let f_owner2 = db
         .save_filter(
             rep1_id,
@@ -806,7 +806,7 @@ async fn test_milestone1_pagination_sorting_sticky_pinning_and_filter_delete_per
         )
         .unwrap();
 
-    let res = app
+    let res_mgr_priv_del = app
         .clone()
         .oneshot(
             Request::builder()
@@ -818,8 +818,74 @@ async fn test_milestone1_pagination_sorting_sticky_pinning_and_filter_delete_per
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res_mgr_priv_del.status(), StatusCode::FORBIDDEN);
+    assert!(db.get_filter(f_owner2).unwrap().is_some());
+
+    // Administrator (90) can moderation-delete another user's private filter
+    let admin_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=administrator&password=root"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let admin_cookie = admin_login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let res_adm_del = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/filter_delete/{}", f_owner2))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_adm_del.status(), StatusCode::SEE_OTHER);
     assert!(db.get_filter(f_owner2).unwrap().is_none());
+
+    // Manager (70) can delete another user's public filter in their managed project
+    let f_pub = db
+        .save_filter(
+            rep1_id,
+            proj_id,
+            true,
+            "PublicFilterToModerate",
+            &BugFilter {
+                status: Some(50),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let res_mgr_pub_del = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/filter_delete/{}", f_pub))
+                .header("cookie", &full_mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_pub_del.status(), StatusCode::SEE_OTHER);
+    assert!(db.get_filter(f_pub).unwrap().is_none());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

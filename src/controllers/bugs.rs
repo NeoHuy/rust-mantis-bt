@@ -315,25 +315,25 @@ pub(crate) fn filter_from_query(
             .date_submitted_from
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
             .map(String::from),
         date_submitted_to: q
             .date_submitted_to
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
             .map(String::from),
         last_updated_from: q
             .last_updated_from
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
             .map(String::from),
         last_updated_to: q
             .last_updated_to
             .as_deref()
             .map(str::trim)
-            .filter(|s| !s.is_empty())
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
             .map(String::from),
         relationship_type: q.relationship_type.filter(|&rt| (-1..=6).contains(&rt)),
         relationship_bug_id: q.relationship_bug_id.filter(|&id| id > 0),
@@ -1116,6 +1116,44 @@ pub async fn view_all_bug_page(
         .list_distinct_bug_versions_for_user(&ctx.user, effective_project_id)
         .unwrap_or_default();
 
+    let can_save_public = if effective_project_id > 0 {
+        db.effective_access_level(&ctx.user, effective_project_id)
+            .unwrap_or(0)
+            >= 70
+    } else {
+        ctx.user.access_level >= 70
+    };
+    let can_save_filter = if effective_project_id > 0 {
+        db.effective_access_level(&ctx.user, effective_project_id)
+            .unwrap_or(0)
+            >= 25
+    } else if ctx.user.access_level >= 25 {
+        true
+    } else {
+        ctx.visible_projects
+            .iter()
+            .filter(|(p, _)| p.enabled != 0)
+            .any(|(p, _)| db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25)
+    };
+    let mut deletable_filter_ids = HashSet::new();
+    for sf in &saved_filters {
+        let can_del = if sf.is_public == 0 {
+            sf.user_id == ctx.user.id || ctx.user.access_level >= 90
+        } else if sf.user_id == ctx.user.id {
+            true
+        } else if sf.project_id > 0 {
+            *eff_cache.entry(sf.project_id).or_insert_with(|| {
+                db.effective_access_level(&ctx.user, sf.project_id)
+                    .unwrap_or(0)
+            }) >= 70
+        } else {
+            ctx.user.access_level >= 70
+        };
+        if can_del {
+            deletable_filter_ids.insert(sf.id);
+        }
+    }
+
     let meta = views::bugs::ViewIssuesMeta {
         note_counts,
         file_counts,
@@ -1127,6 +1165,9 @@ pub async fn view_all_bug_page(
         custom_field_values,
         bug_tags_map,
         bug_texts_map,
+        can_save_public: Some(can_save_public),
+        can_save_filter: Some(can_save_filter),
+        deletable_filter_ids: Some(deletable_filter_ids),
     };
 
     views::bugs::render_view_all_bug_page(

@@ -95,3 +95,149 @@ async fn test_manage_filter_update_inaccessible_project_denied() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn test_project_only_manager_public_filter_move_and_private_delete_rbac() {
+    use crate::controllers::build_router;
+    use crate::models::BugFilter;
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_a = db.create_project("ProjMgrA", 10, 10, "", true).unwrap();
+    let proj_b = db.create_project("ProjMgrB", 10, 10, "", true).unwrap();
+
+    // User is global Reporter (25), Manager (70) ONLY on proj_a, Reporter (25) on proj_b.
+    let u_id = db
+        .create_user(
+            "proj_only_mgr",
+            "Proj Mgr",
+            "pmgr@x.com",
+            "pw123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    db.set_project_user(proj_a, u_id, 70).unwrap();
+    let u = db.authenticate("proj_only_mgr", "pw123").unwrap().unwrap();
+    let u_cookie = format!("MANTIS_STRING_COOKIE={}", u.cookie_string);
+
+    // 1. Project-only manager CAN save a public filter on proj_a.
+    let res_save_pub = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &u_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=ProjAPublic&project_id={}&is_public=1",
+                    proj_a
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_save_pub.status(), StatusCode::SEE_OTHER);
+    let loc = res_save_pub
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(loc.contains("msg=Filter+saved"));
+    let fid: i64 = loc
+        .split("filter_id=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // 2. Moving that public filter to All Projects (0) or unmanaged proj_b is denied (403).
+    for dest_pid in [0, proj_b] {
+        let res_move = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/manage_filter_update/{}", fid))
+                    .header("cookie", &u_cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "name=ProjAPublic&project_id={}",
+                        dest_pid
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res_move.status(), StatusCode::FORBIDDEN);
+        let (sf, _) = db.get_filter(fid).unwrap().unwrap();
+        assert_eq!(sf.project_id, proj_a);
+    }
+
+    // 3. Another Manager (global 70) cannot delete a user's private filter (403).
+    let priv_fid = db
+        .save_filter(u_id, proj_a, false, "UserPrivate", &BugFilter::default())
+        .unwrap();
+    db.create_user(
+        "global_mgr",
+        "Global Mgr",
+        "gmgr@x.com",
+        "pw123",
+        70,
+        true,
+        false,
+    )
+    .unwrap();
+    let mgr = db.authenticate("global_mgr", "pw123").unwrap().unwrap();
+    let mgr_cookie = format!("MANTIS_STRING_COOKIE={}", mgr.cookie_string);
+    let res_mgr_del = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/filter_delete/{}", priv_fid))
+                .header("cookie", &mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_del.status(), StatusCode::FORBIDDEN);
+    assert!(db.get_filter(priv_fid).unwrap().is_some());
+
+    // 4. Oversized saved filter body exceeding 32KB JSON limit is rejected cleanly with ?err=.
+    let mut big_body = format!("name=TooBig&project_id={}", proj_a);
+    for i in 0..100 {
+        big_body.push_str(&format!("&version={}_{}", i, "x".repeat(400)));
+    }
+    let res_big = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &u_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(big_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_big.status(), StatusCode::SEE_OTHER);
+    let big_loc = res_big
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(big_loc.contains("err=Filter+definition+exceeds+maximum+allowed+size"));
+}

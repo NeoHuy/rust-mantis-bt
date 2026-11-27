@@ -20,6 +20,21 @@ fn filter_manager_access(db: &Db, user: &crate::models::User, project_id: i64) -
     }
 }
 
+fn has_filter_reporter_access(db: &Db, ctx: &AuthContext, project_id: i64) -> bool {
+    if project_id > 0 {
+        db.effective_access_level(&ctx.user, project_id)
+            .unwrap_or(0)
+            >= 25
+    } else if ctx.user.access_level >= 25 {
+        true
+    } else {
+        ctx.visible_projects
+            .iter()
+            .filter(|(p, _)| p.enabled != 0)
+            .any(|(p, _)| db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25)
+    }
+}
+
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
     let body = format!(
         r#"<div class="flash-error">Access Denied: {}</div>"#,
@@ -47,10 +62,6 @@ pub struct UpdateFilterForm {
 }
 
 pub async fn filter_save(State(db): State<Db>, ctx: AuthContext, body: Bytes) -> Response {
-    if ctx.user.access_level < 25 {
-        return forbidden(&ctx, "Reporter access required to save filters.");
-    }
-
     let pairs = parse_query_pairs(&String::from_utf8_lossy(&body));
     let mut name = String::new();
     let mut is_public_raw: Option<String> = None;
@@ -74,6 +85,9 @@ pub async fn filter_save(State(db): State<Db>, ctx: AuthContext, body: Bytes) ->
         .project_id
         .filter(|&v| v > 0)
         .unwrap_or(ctx.active_project_id);
+    if !has_filter_reporter_access(&db, &ctx, save_project_id) {
+        return forbidden(&ctx, "Reporter access required to save filters.");
+    }
     if is_public && filter_manager_access(&db, &ctx.user, save_project_id) < 70 {
         return forbidden(&ctx, "Manager access required to save public filters.");
     }
@@ -99,7 +113,7 @@ pub async fn manage_filter_page(
     ctx: AuthContext,
     Query(q): Query<FlashQuery>,
 ) -> Response {
-    if ctx.user.access_level < 25 {
+    if !has_filter_reporter_access(&db, &ctx, ctx.active_project_id) {
         return forbidden(&ctx, "Reporter access required to manage saved filters.");
     }
 
@@ -155,7 +169,7 @@ pub async fn manage_filter_edit_page(
     Path(id): Path<i64>,
     Query(q): Query<FlashQuery>,
 ) -> Response {
-    if ctx.user.access_level < 25 {
+    if !has_filter_reporter_access(&db, &ctx, ctx.active_project_id) {
         return forbidden(&ctx, "Reporter access required to manage saved filters.");
     }
 
@@ -232,7 +246,7 @@ pub async fn manage_filter_update(
     Path(id): Path<i64>,
     axum::Form(form): axum::Form<UpdateFilterForm>,
 ) -> Response {
-    if ctx.user.access_level < 25 {
+    if !has_filter_reporter_access(&db, &ctx, ctx.active_project_id) {
         return forbidden(&ctx, "Reporter access required to manage saved filters.");
     }
 
@@ -283,6 +297,9 @@ pub async fn manage_filter_update(
     {
         return forbidden(&ctx, "You do not have access to the selected project.");
     }
+    if !has_filter_reporter_access(&db, &ctx, new_project_id) {
+        return forbidden(&ctx, "Reporter access required on the destination project.");
+    }
 
     let can_toggle_public =
         sf.user_id == ctx.user.id && filter_manager_access(&db, &ctx.user, new_project_id) >= 70;
@@ -303,6 +320,15 @@ pub async fn manage_filter_update(
         }
         sf.is_public != 0
     };
+    if new_is_public
+        && new_project_id != sf.project_id
+        && filter_manager_access(&db, &ctx.user, new_project_id) < 70
+    {
+        return forbidden(
+            &ctx,
+            "Manager access required on the destination project to keep a filter public.",
+        );
+    }
 
     bf.project_id = if new_project_id > 0 {
         Some(new_project_id)
@@ -351,13 +377,25 @@ pub async fn filter_delete(
 
     let (sf, _) = match db.get_filter(id) {
         Ok(Some(v)) => v,
-        _ => {
+        Ok(None) => {
             let target = if return_to_manage {
                 "/manage_filter_page?err=Filter+not+found"
             } else {
                 "/view_all_bug_page?err=Filter+not+found"
             };
             return Redirect::to(target).into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::render_error_page(
+                    &ctx,
+                    "Database Error",
+                    Some("Failed to load saved filter."),
+                    "",
+                ),
+            )
+                .into_response()
         }
     };
 
@@ -370,15 +408,31 @@ pub async fn filter_delete(
         return forbidden(&ctx, "You do not have access to this filter's project.");
     }
 
-    if sf.user_id != ctx.user.id && filter_manager_access(&db, &ctx.user, sf.project_id) < 70 {
-        return forbidden(&ctx, "Cannot delete another user's filter.");
+    if sf.is_public == 0 {
+        if sf.user_id != ctx.user.id && ctx.user.access_level < 90 {
+            return forbidden(
+                &ctx,
+                "Private saved filters can only be deleted by their owner or an Administrator.",
+            );
+        }
+    } else if sf.user_id != ctx.user.id && filter_manager_access(&db, &ctx.user, sf.project_id) < 70
+    {
+        return forbidden(&ctx, "Cannot delete another user's public filter.");
     }
 
-    let _ = db.delete_filter(id);
-    if return_to_manage {
-        Redirect::to("/manage_filter_page?msg=Filter+deleted").into_response()
+    let base = if return_to_manage {
+        "/manage_filter_page"
     } else {
-        Redirect::to("/view_all_bug_page?msg=Filter+deleted").into_response()
+        "/view_all_bug_page"
+    };
+    match db.delete_filter(id) {
+        Ok(()) => Redirect::to(&format!("{}?msg=Filter+deleted", base)).into_response(),
+        Err(e) => Redirect::to(&format!(
+            "{}?err={}",
+            base,
+            url_encode(&sanitize_error_message(&e.to_string()))
+        ))
+        .into_response(),
     }
 }
 

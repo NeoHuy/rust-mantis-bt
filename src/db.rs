@@ -42,6 +42,8 @@ pub struct BugCreateExtras<'a> {
     pub handler_id: Option<i64>,
 }
 
+const MAX_FILTER_JSON_BYTES: usize = 32_768;
+
 impl Db {
     pub(crate) fn from_connection(conn: Connection) -> Self {
         Self {
@@ -6027,6 +6029,9 @@ impl Db {
             return Err("Filter name must be 64 characters or fewer".to_string());
         }
         let json = serde_json::to_string(filter).map_err(|e| e.to_string())?;
+        if json.len() > MAX_FILTER_JSON_BYTES {
+            return Err("Filter definition exceeds maximum allowed size".to_string());
+        }
         let conn = self.conn();
         conn.execute(
             "INSERT INTO mantis_filters_table (user_id, project_id, is_public, name, filter_string)
@@ -6120,36 +6125,7 @@ impl Db {
         user: &User,
         project_id: i64,
     ) -> rusqlite::Result<Vec<SavedFilter>> {
-        let filters = {
-            let conn = self.conn();
-            let mut stmt = conn.prepare(
-                "SELECT id, user_id, project_id, is_public, name, filter_string
-                 FROM mantis_filters_table
-                 WHERE (user_id = ?1 OR is_public = 1)
-                   AND (project_id = 0 OR project_id = ?2 OR ?2 = 0)
-                 ORDER BY name ASC, id ASC",
-            )?;
-            let rows = stmt.query_map(params![user.id, project_id], |row| {
-                Ok(SavedFilter {
-                    id: row.get(0)?,
-                    user_id: row.get(1)?,
-                    project_id: row.get(2)?,
-                    is_public: row.get(3)?,
-                    name: row.get(4)?,
-                    filter_string: row.get(5)?,
-                })
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-
-        let mut out = Vec::with_capacity(filters.len());
-        for sf in filters {
-            if sf.project_id > 0 && self.effective_access_level(user, sf.project_id)? < 10 {
-                continue;
-            }
-            out.push(sf);
-        }
-        Ok(out)
+        self.list_visible_filters_for_user(user, project_id)
     }
 
     pub fn update_filter(
@@ -6167,12 +6143,12 @@ impl Db {
         if trimmed.chars().count() > 64 {
             return Err("Filter name must be 64 characters or fewer".to_string());
         }
-        if trimmed.chars().count() > 64 {
-            return Err("Filter name must be 64 characters or fewer".to_string());
-        }
         let conn = self.conn();
         if let Some(bf) = filter {
             let json = serde_json::to_string(bf).map_err(|e| e.to_string())?;
+            if json.len() > MAX_FILTER_JSON_BYTES {
+                return Err("Filter definition exceeds maximum allowed size".to_string());
+            }
             let rows = conn
                 .execute(
                     "UPDATE mantis_filters_table

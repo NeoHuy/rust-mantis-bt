@@ -1238,3 +1238,15 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
         former_dev_id
     )));
 }
+
+#[test]
+fn test_sanitize_spreadsheet_cell_tabs_returns_and_leading_whitespace() {
+    assert_eq!(sanitize_spreadsheet_cell("\t=1+1"), "'\t=1+1");
+    assert_eq!(sanitize_spreadsheet_cell("\r@SUM(A1)"), "'\r@SUM(A1)");
+    assert_eq!(
+        sanitize_spreadsheet_cell("  +cmd|'calc'!A0"),
+        "'  +cmd|'calc'!A0"
+    );
+    assert_eq!(sanitize_spreadsheet_cell("-1+1"), "'-1+1");
+    assert_eq!(sanitize_spreadsheet_cell("normal text"), "normal text");
+}

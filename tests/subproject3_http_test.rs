@@ -739,8 +739,7 @@ async fn test_http_advanced_filters_manage_filters_and_column_customization() {
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     let rep_fid = db.list_visible_filters(rep_id, proj_id).unwrap()[0].id;
 
-    // Manager tries to view Reporter's private filter via permalink -> allowed (>= 70),
-    // whereas another Reporter cannot!
+    // Private saved filters are owner-only on view: another Reporter cannot view Reporter1's private filter!
     let other_rep_id = db
         .create_user(
             "p3_rep2",
@@ -1211,4 +1210,51 @@ async fn test_http_advanced_filters_manage_filters_and_column_customization() {
     .unwrap();
     assert!(c1_csv.contains("SECRET_PROJ_A_OK"));
     assert!(!c1_csv.contains("SECRET_PROJ_B_LEAK"));
+
+    // Advanced filter form preserves hide_statuses across Apply and uses per-project UI permissions
+    db.set_project_user(proj_a, rep_id, 70).unwrap();
+    let rep_a_cookie = set_project_cookie(&app, &rep_cookie, proj_a).await;
+    let res_adv_hs = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page?hide_statuses=80,90")
+                .header("cookie", &rep_a_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_adv_hs.status(), StatusCode::OK);
+    let adv_hs_html = String::from_utf8(
+        axum::body::to_bytes(res_adv_hs.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(adv_hs_html.contains(r#"<input type="hidden" name="hide_statuses" value="80">"#));
+    assert!(adv_hs_html.contains(r#"<input type="hidden" name="hide_statuses" value="90">"#));
+    // Project-only Manager sees Public checkbox on proj_a, hidden when switching to proj_b
+    assert!(adv_hs_html.contains(r#"name="is_public""#));
+
+    let rep_b_cookie = set_project_cookie(&app, &rep_cookie, proj_b).await;
+    let res_proj_b_view = app
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page")
+                .header("cookie", &rep_b_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let proj_b_html = String::from_utf8(
+        axum::body::to_bytes(res_proj_b_view.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!proj_b_html.contains(r#"name="is_public""#));
 }

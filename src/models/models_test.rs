@@ -1095,4 +1095,31 @@ fn test_advanced_bug_filter_parsing_urls_and_columns() {
     bf.retain_custom_fields(&allowed_cf);
     assert!(bf.custom_fields.contains_key(&5));
     assert!(!bf.custom_fields.contains_key(&99));
+
+    // Malformed percent decoding preserves valid subsequent % escapes
+    let pairs = parse_query_pairs("q=%ZZ%20ok%2B&a=%2");
+    assert_eq!(
+        pairs,
+        vec![
+            ("q".to_string(), "%ZZ ok+".to_string()),
+            ("a".to_string(), "%2".to_string()),
+        ]
+    );
+
+    // Multi-value filter parsing caps values per field and distinct custom fields
+    let mut excess_pairs = Vec::new();
+    for i in 1..=(MAX_FILTER_VALUES_PER_FIELD + 25) {
+        excess_pairs.push(("status".to_string(), i.to_string()));
+        excess_pairs.push(("custom_field_1".to_string(), format!("v{}", i)));
+    }
+    for cf_id in 2..=(MAX_FILTER_CUSTOM_FIELDS + 10) {
+        excess_pairs.push((format!("custom_field_{}", cf_id), "x".to_string()));
+    }
+    let parsed_excess = ListBugsQuery::from_urlencoded_pairs(&excess_pairs);
+    assert_eq!(parsed_excess.statuses.len(), MAX_FILTER_VALUES_PER_FIELD);
+    assert_eq!(parsed_excess.custom_fields.len(), MAX_FILTER_CUSTOM_FIELDS);
+    assert_eq!(
+        parsed_excess.custom_fields.get(&1).unwrap().len(),
+        MAX_FILTER_VALUES_PER_FIELD
+    );
 }

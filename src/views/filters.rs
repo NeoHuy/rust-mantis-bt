@@ -182,9 +182,7 @@ pub fn render_manage_filter_page(
                 r#"<span class="badge badge-info">Private</span>"#
             };
             let permalink = format!("/view_all_bug_page?filter_id={}", sf.id);
-            let can_manage = manageable_ids.contains(&sf.id)
-                || sf.user_id == ctx.user.id
-                || (sf.is_public != 0 && ctx.user.access_level >= 70);
+            let can_manage = manageable_ids.contains(&sf.id);
             let edit_btn = if can_manage {
                 format!(
                     r#"<a href="/manage_filter_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>"#,

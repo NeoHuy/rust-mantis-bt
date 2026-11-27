@@ -402,13 +402,22 @@ pub struct ListBugsQuery {
     pub custom_fields: BTreeMap<i64, Vec<String>>,
 }
 
+pub const MAX_FILTER_VALUES_PER_FIELD: usize = 100;
+pub const MAX_FILTER_CUSTOM_FIELDS: usize = 50;
+
 fn push_unique_i32(vec: &mut Vec<i32>, val: i32, allow_neg_one: bool) {
+    if vec.len() >= MAX_FILTER_VALUES_PER_FIELD {
+        return;
+    }
     if (val > 0 || (allow_neg_one && val == -1)) && !vec.contains(&val) {
         vec.push(val);
     }
 }
 
 fn push_unique_i64(vec: &mut Vec<i64>, val: i64, allow_neg_one: bool) {
+    if vec.len() >= MAX_FILTER_VALUES_PER_FIELD {
+        return;
+    }
     if (val > 0 || (allow_neg_one && val == -1)) && !vec.contains(&val) {
         vec.push(val);
     }
@@ -416,6 +425,9 @@ fn push_unique_i64(vec: &mut Vec<i64>, val: i64, allow_neg_one: bool) {
 
 fn parse_i32_tokens(raw: &str, out: &mut Vec<i32>, allow_neg_one: bool) {
     for part in raw.split(',') {
+        if out.len() >= MAX_FILTER_VALUES_PER_FIELD {
+            break;
+        }
         if let Ok(v) = part.trim().parse::<i32>() {
             push_unique_i32(out, v, allow_neg_one);
         }
@@ -424,6 +436,9 @@ fn parse_i32_tokens(raw: &str, out: &mut Vec<i32>, allow_neg_one: bool) {
 
 fn parse_i64_tokens(raw: &str, out: &mut Vec<i64>, allow_neg_one: bool) {
     for part in raw.split(',') {
+        if out.len() >= MAX_FILTER_VALUES_PER_FIELD {
+            break;
+        }
         if let Ok(v) = part.trim().parse::<i64>() {
             push_unique_i64(out, v, allow_neg_one);
         }
@@ -431,6 +446,9 @@ fn parse_i64_tokens(raw: &str, out: &mut Vec<i64>, allow_neg_one: bool) {
 }
 
 fn parse_str_token(raw: &str, out: &mut Vec<String>) {
+    if out.len() >= MAX_FILTER_VALUES_PER_FIELD {
+        return;
+    }
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed == "[any]" {
         return;
@@ -442,33 +460,32 @@ fn parse_str_token(raw: &str, out: &mut Vec<String>) {
 }
 
 fn url_decode_lossy(s: &str) -> String {
-    let mut bytes = Vec::with_capacity(s.len());
-    let mut iter = s.bytes();
-    while let Some(b) = iter.next() {
-        match b {
-            b'+' => bytes.push(b' '),
+    let raw = s.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i] {
+            b'+' => {
+                bytes.push(b' ');
+                i += 1;
+            }
             b'%' => {
-                let h1 = iter.next();
-                let h2 = iter.next();
-                if let (Some(c1), Some(c2)) = (h1, h2) {
-                    let hex = [c1, c2];
-                    if let Ok(s_hex) = std::str::from_utf8(&hex) {
+                if i + 2 < raw.len() {
+                    if let Ok(s_hex) = std::str::from_utf8(&raw[i + 1..i + 3]) {
                         if let Ok(val) = u8::from_str_radix(s_hex, 16) {
                             bytes.push(val);
+                            i += 3;
                             continue;
                         }
                     }
-                    bytes.push(b'%');
-                    bytes.push(c1);
-                    bytes.push(c2);
-                } else {
-                    bytes.push(b'%');
-                    if let Some(c) = h1 {
-                        bytes.push(c);
-                    }
                 }
+                bytes.push(b'%');
+                i += 1;
             }
-            _ => bytes.push(b),
+            b => {
+                bytes.push(b);
+                i += 1;
+            }
         }
     }
     String::from_utf8_lossy(&bytes).to_string()
@@ -666,11 +683,18 @@ impl ListBugsQuery {
                 other => {
                     if let Some(id_str) = other.strip_prefix("custom_field_") {
                         if let Ok(fid) = id_str.parse::<i64>() {
-                            if fid > 0 && !trimmed.is_empty() && trimmed != "[any]" {
+                            if fid > 0
+                                && !trimmed.is_empty()
+                                && trimmed != "[any]"
+                                && (q.custom_fields.contains_key(&fid)
+                                    || q.custom_fields.len() < MAX_FILTER_CUSTOM_FIELDS)
+                            {
                                 let entry = q.custom_fields.entry(fid).or_default();
-                                let s = trimmed.to_string();
-                                if !entry.contains(&s) {
-                                    entry.push(s);
+                                if entry.len() < MAX_FILTER_VALUES_PER_FIELD {
+                                    let s = trimmed.to_string();
+                                    if !entry.contains(&s) {
+                                        entry.push(s);
+                                    }
                                 }
                             }
                         }

@@ -1,4 +1,4 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @source "../../src/views";
 
 @theme {
@@ -940,16 +940,52 @@
     vertical-align: middle;
   }
 
-  table.data-table tr.row-1 {
+  table.data-table tr.zebra-odd {
     background-color: #ffffff;
   }
 
-  table.data-table tr.row-2 {
+  table.data-table tr.zebra-even {
     background-color: #f9f9f9;
   }
 
   table.data-table tr:hover {
     background-color: #f1f5f9;
+  }
+
+  .mantis-dropzone {
+    border: 2px dashed #bbb;
+    border-radius: 4px;
+    padding: 12px;
+    text-align: center;
+    background: #fafafa;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+  }
+
+  .mantis-dropzone.is-dragover {
+    border-color: #0052cc;
+    background: #f0f5ff;
+  }
+
+  .mantis-dropzone-input {
+    display: none;
+  }
+
+  .mantis-dropzone-prompt {
+    margin: 0;
+    font-size: 13px;
+    color: #555;
+  }
+
+  .mantis-dropzone-browse {
+    color: #0052cc;
+    text-decoration: underline;
+  }
+
+  .mantis-dropzone-list {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #333;
   }
 
   .form-table {

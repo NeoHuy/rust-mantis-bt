@@ -23,7 +23,11 @@ pub fn render_manage_users_page_with_prefix(
 ) -> Html<String> {
     let mut rows_html = String::new();
     for (idx, u) in users.iter().enumerate() {
-        let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_class = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let lvl_str = AccessLevel::from_i32(u.access_level)
             .map(|a| a.as_str())
             .unwrap_or("unknown");
@@ -48,7 +52,7 @@ pub fn render_manage_users_page_with_prefix(
                 <td>{}</td>
                 <td>
                     <a href="/manage_user_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>
-                    <form action="/manage_user_delete/{}" method="POST" style="display:inline; margin-left:4px;" onsubmit="return confirm('Are you sure you want to delete this user?');">
+                    <form action="/manage_user_delete/{}" method="POST" style="display:inline; margin-left:4px;" data-confirm="Are you sure you want to delete this user?">
                         <button type="submit" class="btn btn-danger btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>
@@ -271,7 +275,7 @@ pub fn render_user_edit_page(ctx: &AuthContext, target_user: &User) -> Html<Stri
         format!(
             r#"
             <div style="margin-top: 12px; border-top: 1px solid #e0e6ed; padding-top: 12px;">
-                <form action="/manage_user_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this user?');">
+                <form action="/manage_user_delete/{}" method="POST" style="display:inline;" data-confirm="Are you sure you want to delete this user?">
                     <button type="submit" class="btn btn-danger">Delete User</button>
                 </form>
             </div>

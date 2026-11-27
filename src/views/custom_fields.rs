@@ -371,7 +371,11 @@ pub fn render_manage_custom_field_page(
         );
     } else {
         for (idx, (cf, linked_count)) in fields.iter().enumerate() {
-            let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_class = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             let ftype = CustomFieldType::from_i32(cf.field_type)
                 .map(|t| t.as_str())
                 .unwrap_or("string");

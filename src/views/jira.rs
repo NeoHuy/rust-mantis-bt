@@ -325,7 +325,7 @@ pub fn render_jira_section(
 
         let unlink_btn = if eff >= 55 {
             format!(
-                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" style="display:inline; margin-left:4px;" onsubmit="return confirm('Are you sure you want to unlink this Jira ticket?');">
+                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" style="display:inline; margin-left:4px;" data-confirm="Are you sure you want to unlink this Jira ticket?">
                     <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-unlink" aria-hidden="true"></i> Unlink</button>
                 </form>"#,
                 bug_id
@@ -336,7 +336,7 @@ pub fn render_jira_section(
 
         let sync_btn = if eff >= 55 {
             format!(
-                r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;" onsubmit="this.querySelector('button[type=submit]').disabled=true;">
+                r#"<form method="POST" action="/view_bug_page/{}/jira_sync" style="display:inline;" data-disable-on-submit="true">
                     <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-refresh" aria-hidden="true"></i> Sync with Jira</button>
                 </form>"#,
                 bug_id
@@ -427,7 +427,7 @@ pub fn render_jira_section(
                 </div>
                 <div class="widget-body">
                     <p style="margin-bottom:12px; color:#666;">No Jira ticket linked to this issue.</p>
-                    <form method="POST" action="/view_bug_page/{}/jira_sync" onsubmit="this.querySelector('button[type=submit]').disabled=true;">
+                    <form method="POST" action="/view_bug_page/{}/jira_sync" data-disable-on-submit="true">
                         <div class="table-responsive">
                             <table class="form-table form-table-left">
                                 <tr>

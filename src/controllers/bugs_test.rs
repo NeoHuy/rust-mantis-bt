@@ -1101,7 +1101,7 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
     assert!(view_html.contains("btn-white btn-round"));
     assert!(view_html.contains("Close</button>"));
     assert!(view_html.contains(r#"aria-controls="widget-body-bugnotes""#));
-    assert!(view_html.contains(r#"onsubmit="return confirm('Close this issue?');""#));
+    assert!(view_html.contains(r#"data-confirm="Close this issue?""#));
 
     // 1b. Reporter / Developer (< 70) must NOT see Close button or Delete Issue button
     let dev2_id = db

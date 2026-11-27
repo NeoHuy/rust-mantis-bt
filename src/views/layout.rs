@@ -65,18 +65,19 @@ pub fn render_layout(
         ));
     }
 
-    let is_manage_page = title.contains("Manage")
-        || title.contains("Overview")
-        || title.contains("Project")
-        || title.contains("User")
-        || title.contains("Custom Field")
-        || title.contains("Plugin")
-        || title.contains("Email Queue")
-        || title.contains("Tag");
-
     let is_account_page = title.contains("My Account")
         || title.contains("API Tokens")
         || title.contains("Manage Columns");
+
+    let is_manage_page = !is_account_page
+        && (title.contains("Manage")
+            || title.contains("Overview")
+            || title.contains("Project")
+            || title.contains("User")
+            || title.contains("Custom Field")
+            || title.contains("Plugin")
+            || title.contains("Email Queue")
+            || title.contains("Tag"));
 
     // Left Sidebar items (MantisBT 2.28.4 .skin-3 compact)
     let mut sidebar_items: Vec<(&str, &str, &str, bool)> = vec![
@@ -145,7 +146,9 @@ pub fn render_layout(
 
     // Contextual Sub-Navigation Tabs for Manage & Account pages (MantisBT 2.x style)
     let mut sub_tabs_html = String::new();
-    if is_manage_page {
+    if is_account_page {
+        sub_tabs_html = render_account_tabs(title);
+    } else if is_manage_page {
         let active_tab = if title.contains("Overview") {
             "overview"
         } else if title.contains("User") {
@@ -166,30 +169,6 @@ pub fn render_layout(
             ""
         };
         sub_tabs_html = crate::views::render_manage_tabs(ctx, active_tab);
-    } else if is_account_page {
-        let acc_act = if title == "My Account" {
-            r#" class="active""#
-        } else {
-            ""
-        };
-        let col_act = if title == "Manage Columns" {
-            r#" class="active""#
-        } else {
-            ""
-        };
-        let tok_act = if title == "API Tokens" {
-            r#" class="active""#
-        } else {
-            ""
-        };
-        sub_tabs_html.push_str(&format!(
-            r#"<div class="sub-nav-tabs">
-                <a href="/account_page"{}>My Account</a>
-                <a href="/account_manage_columns_page"{}>Manage Columns</a>
-                <a href="/api_tokens_page"{}>API Tokens</a>
-            </div>"#,
-            acc_act, col_act, tok_act
-        ));
     }
 
     let report_top_btn = if ctx.user.access_level >= 25 {
@@ -225,7 +204,7 @@ pub fn render_layout(
     <link rel="alternate" type="application/rss+xml" title="News RSS" href="/news_rss">
     <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
     <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
-    <script>try{{if(localStorage.getItem('mantis_sidebar_collapsed')==='1')document.documentElement.classList.add('sidebar-collapsed-init');}}catch(_){{}}</script>
+    <script src="/assets/mantis-init.js?v={asset_ver}"></script>
     <script src="/assets/mantis.js?v={asset_ver}" defer></script>
 </head>
 <body class="skin-3" data-username="{username}">
@@ -272,7 +251,7 @@ pub fn render_layout(
                     <div class="dropdown-user-meta">{username} ({role})</div>
                     <a href="/account_page" class="dropdown-item-link"><i class="fa fa-user" aria-hidden="true"></i> My Account</a>
                     <a href="/account_manage_columns_page" class="dropdown-item-link"><i class="fa fa-columns" aria-hidden="true"></i> Manage Columns</a>
-                    <a href="/account_manage_api_tokens_page" class="dropdown-item-link"><i class="fa fa-key" aria-hidden="true"></i> API Tokens</a>
+                    <a href="/api_tokens_page" class="dropdown-item-link"><i class="fa fa-key" aria-hidden="true"></i> API Tokens</a>
                     <a href="/issues_rss" class="dropdown-item-link"><i class="fa fa-rss" aria-hidden="true"></i> Issues RSS</a>
                     <a href="/news_rss" class="dropdown-item-link"><i class="fa fa-rss" aria-hidden="true"></i> News RSS</a>
                     <div class="dropdown-divider"></div>
@@ -387,6 +366,32 @@ pub fn render_unauthenticated_layout(
     );
 
     Html(html)
+}
+
+pub fn render_account_tabs(title: &str) -> String {
+    let acc_act = if title == "My Account" {
+        r#" class="active""#
+    } else {
+        ""
+    };
+    let col_act = if title == "Manage Columns" {
+        r#" class="active""#
+    } else {
+        ""
+    };
+    let tok_act = if title == "API Tokens" {
+        r#" class="active""#
+    } else {
+        ""
+    };
+    format!(
+        r#"<div class="sub-nav-tabs">
+            <a href="/account_page"{}>My Account</a>
+            <a href="/account_manage_columns_page"{}>Manage Columns</a>
+            <a href="/api_tokens_page"{}>API Tokens</a>
+        </div>"#,
+        acc_act, col_act, tok_act
+    )
 }
 
 #[cfg(test)]

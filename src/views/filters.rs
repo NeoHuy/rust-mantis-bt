@@ -163,7 +163,11 @@ pub fn render_manage_filter_page(
         );
     } else {
         for (idx, sf) in filters.iter().enumerate() {
-            let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_class = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             let proj_name = if sf.project_id == 0 {
                 "All Projects".to_string()
             } else {

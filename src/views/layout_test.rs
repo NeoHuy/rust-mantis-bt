@@ -83,7 +83,7 @@ fn test_render_layout_authenticated_admin_shell() {
 
     // User dropdown menu with POST /logout
     assert!(html.contains(r#"href="/account_page""#));
-    assert!(html.contains(r#"href="/account_manage_api_tokens_page""#));
+    assert!(html.contains(r#"href="/api_tokens_page""#));
     assert!(html.contains(r#"action="/logout" method="POST""#));
 
     // Font Awesome sidebar icons & collapse toggle

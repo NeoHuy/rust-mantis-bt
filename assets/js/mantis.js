@@ -433,17 +433,109 @@
   }
 
   function initConfirmButtons() {
-    var confirmEls = document.querySelectorAll('[data-confirm]');
-    for (var i = 0; i < confirmEls.length; i++) {
-      (function (el) {
-        var evt = el.tagName === 'FORM' ? 'submit' : 'click';
-        el.addEventListener(evt, function (e) {
-          var msg = el.getAttribute('data-confirm') || 'Are you sure?';
-          if (!window.confirm(msg)) {
-            e.preventDefault();
+    document.addEventListener('submit', function (e) {
+      var form = e.target;
+      if (!form || !form.getAttribute) return;
+      var confirmMsg = form.getAttribute('data-confirm');
+      if (confirmMsg) {
+        if (!window.confirm(confirmMsg)) {
+          e.preventDefault();
+          return;
+        }
+      }
+      if (form.getAttribute('data-disable-on-submit') === 'true') {
+        var btn = form.querySelector('button[type="submit"]');
+        if (btn) {
+          btn.disabled = true;
+        }
+      }
+    });
+
+    document.addEventListener('click', function (e) {
+      var el = e.target && e.target.closest ? e.target.closest('[data-confirm]') : null;
+      if (!el || el.tagName === 'FORM') return;
+      var msg = el.getAttribute('data-confirm') || 'Are you sure?';
+      if (!window.confirm(msg)) {
+        e.preventDefault();
+      }
+    });
+  }
+
+  function initCountdownRedirect() {
+    var containers = document.querySelectorAll('[data-redirect-url]');
+    for (var i = 0; i < containers.length; i++) {
+      (function (container) {
+        var url = (container.getAttribute('data-redirect-url') || '').trim();
+        if (!url || url.charAt(0) !== '/' || url.charAt(1) === '/' || url.charAt(1) === '\\') {
+          return;
+        }
+        var rawSecs = parseInt(container.getAttribute('data-redirect-seconds') || '5', 10);
+        var seconds = isNaN(rawSecs) || rawSecs < 1 ? 5 : rawSecs;
+        var countdownEl = container.querySelector('[data-redirect-countdown]') || document.getElementById('countdown');
+        if (countdownEl) {
+          countdownEl.textContent = String(seconds);
+        }
+        var interval = window.setInterval(function () {
+          seconds -= 1;
+          if (countdownEl) {
+            countdownEl.textContent = String(seconds);
+          }
+          if (seconds <= 0) {
+            window.clearInterval(interval);
+            window.location.href = url;
+          }
+        }, 1000);
+      })(containers[i]);
+    }
+  }
+
+  function initDropzones() {
+    var zones = document.querySelectorAll('[data-dropzone]');
+    for (var i = 0; i < zones.length; i++) {
+      (function (dz) {
+        var inputId = dz.getAttribute('data-dropzone-input');
+        var listId = dz.getAttribute('data-dropzone-list');
+        var inp = inputId ? document.getElementById(inputId) : dz.querySelector('input[type="file"]');
+        var fl = listId ? document.getElementById(listId) : null;
+        if (!inp) return;
+
+        function updateList() {
+          if (!fl) return;
+          var files = inp.files;
+          if (!files || files.length === 0) {
+            fl.textContent = '';
+            return;
+          }
+          var names = [];
+          for (var j = 0; j < files.length; j++) {
+            names.push(files[j].name + ' (' + Math.round(files[j].size / 1024) + ' KB)');
+          }
+          fl.textContent = 'Selected: ' + names.join(', ');
+        }
+
+        dz.addEventListener('click', function (e) {
+          if (e.target !== inp) {
+            inp.click();
           }
         });
-      })(confirmEls[i]);
+        dz.addEventListener('dragover', function (e) {
+          e.preventDefault();
+          dz.classList.add('is-dragover');
+        });
+        dz.addEventListener('dragleave', function (e) {
+          e.preventDefault();
+          dz.classList.remove('is-dragover');
+        });
+        dz.addEventListener('drop', function (e) {
+          e.preventDefault();
+          dz.classList.remove('is-dragover');
+          if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+            inp.files = e.dataTransfer.files;
+            updateList();
+          }
+        });
+        inp.addEventListener('change', updateList);
+      })(zones[i]);
     }
   }
 
@@ -570,6 +662,8 @@
     initSelectAllCheckboxes();
     initSavedFilterQuickSelect();
     initConfirmButtons();
+    initCountdownRedirect();
+    initDropzones();
     initBulkActionForm();
     initCopyButtons();
     initPrintButtons();

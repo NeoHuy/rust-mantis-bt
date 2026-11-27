@@ -10,7 +10,15 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+fn filter_manager_access(db: &Db, user: &crate::models::User, project_id: i64) -> i32 {
+    if project_id > 0 {
+        db.effective_access_level(user, project_id).unwrap_or(0)
+    } else {
+        user.access_level
+    }
+}
 
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
     let body = format!(
@@ -55,10 +63,6 @@ pub async fn filter_save(State(db): State<Db>, ctx: AuthContext, body: Bytes) ->
     }
 
     let is_public = parse_bool(is_public_raw.as_deref());
-    if is_public && ctx.user.access_level < 70 {
-        return forbidden(&ctx, "Manager access required to save public filters.");
-    }
-
     let q = ListBugsQuery::from_urlencoded_pairs(&pairs);
     if let Some(pid) = q.project_id.filter(|&v| v > 0) {
         let eff = db.effective_access_level(&ctx.user, pid).unwrap_or(0);
@@ -70,6 +74,9 @@ pub async fn filter_save(State(db): State<Db>, ctx: AuthContext, body: Bytes) ->
         .project_id
         .filter(|&v| v > 0)
         .unwrap_or(ctx.active_project_id);
+    if is_public && filter_manager_access(&db, &ctx.user, save_project_id) < 70 {
+        return forbidden(&ctx, "Manager access required to save public filters.");
+    }
     let filter =
         crate::controllers::bugs::filter_from_query(&db, &ctx.user, save_project_id, &q, true);
 
@@ -100,6 +107,24 @@ pub async fn manage_filter_page(
         .list_manageable_filters(&ctx.user, ctx.active_project_id)
         .unwrap_or_default();
 
+    let mut proj_eff_cache: HashMap<i64, i32> = HashMap::new();
+    let mut manageable_ids = HashSet::new();
+    for sf in &filters {
+        let can_manage = if sf.user_id == ctx.user.id {
+            true
+        } else if sf.is_public != 0 {
+            let eff = *proj_eff_cache
+                .entry(sf.project_id)
+                .or_insert_with(|| filter_manager_access(&db, &ctx.user, sf.project_id));
+            eff >= 70
+        } else {
+            false
+        };
+        if can_manage {
+            manageable_ids.insert(sf.id);
+        }
+    }
+
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
         .unwrap_or_default()
@@ -115,6 +140,7 @@ pub async fn manage_filter_page(
     views::filters::render_manage_filter_page(
         &ctx,
         &filters,
+        &manageable_ids,
         &users_map,
         &projects_map,
         q.msg.as_deref(),
@@ -133,14 +159,23 @@ pub async fn manage_filter_edit_page(
         return forbidden(&ctx, "Reporter access required to manage saved filters.");
     }
 
-    let (sf, bf) = match db.get_filter(id) {
+    let (sf, mut bf) = match db.get_filter(id) {
         Ok(Some(v)) => v,
-        _ => return views::render_not_found_page(&ctx, "Saved filter not found"),
+        Ok(None) => return views::render_not_found_page(&ctx, "Saved filter not found"),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::render_error_page(
+                    &ctx,
+                    "Database Error",
+                    Some("Failed to load saved filter."),
+                    "",
+                ),
+            )
+                .into_response()
+        }
     };
 
-    if sf.user_id != ctx.user.id && ctx.user.access_level < 70 {
-        return forbidden(&ctx, "Cannot edit another user's filter.");
-    }
     if sf.project_id > 0
         && db
             .effective_access_level(&ctx.user, sf.project_id)
@@ -149,6 +184,29 @@ pub async fn manage_filter_edit_page(
     {
         return forbidden(&ctx, "You do not have access to this filter's project.");
     }
+
+    let proj_mgr = filter_manager_access(&db, &ctx.user, sf.project_id) >= 70;
+    if sf.is_public == 0 {
+        if sf.user_id != ctx.user.id {
+            return forbidden(
+                &ctx,
+                "Private saved filters can only be viewed or edited by their owner.",
+            );
+        }
+    } else if sf.user_id != ctx.user.id && !proj_mgr {
+        return forbidden(&ctx, "Cannot edit another user's public filter.");
+    }
+
+    let allowed_cf_ids: HashSet<i64> = db
+        .list_accessible_custom_fields_for_user(&ctx.user, sf.project_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|cf| cf.filter_by != 0)
+        .map(|cf| cf.id)
+        .collect();
+    bf.retain_custom_fields(&allowed_cf_ids);
+
+    let can_toggle_public = sf.user_id == ctx.user.id && proj_mgr;
 
     let projects: Vec<(i64, String)> = ctx
         .visible_projects
@@ -161,6 +219,7 @@ pub async fn manage_filter_edit_page(
         &sf,
         &bf,
         &projects,
+        can_toggle_public,
         q.msg.as_deref(),
         q.err.as_deref(),
     )
@@ -179,12 +238,21 @@ pub async fn manage_filter_update(
 
     let (sf, mut bf) = match db.get_filter(id) {
         Ok(Some(v)) => v,
-        _ => return views::render_not_found_page(&ctx, "Saved filter not found"),
+        Ok(None) => return views::render_not_found_page(&ctx, "Saved filter not found"),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::render_error_page(
+                    &ctx,
+                    "Database Error",
+                    Some("Failed to load saved filter."),
+                    "",
+                ),
+            )
+                .into_response()
+        }
     };
 
-    if sf.user_id != ctx.user.id && ctx.user.access_level < 70 {
-        return forbidden(&ctx, "Cannot edit another user's filter.");
-    }
     if sf.project_id > 0
         && db
             .effective_access_level(&ctx.user, sf.project_id)
@@ -194,17 +262,17 @@ pub async fn manage_filter_update(
         return forbidden(&ctx, "You do not have access to this filter's project.");
     }
 
-    let new_is_public = if ctx.user.access_level >= 70 {
-        match form.is_public.as_deref() {
-            Some(v) => parse_bool(Some(v)),
-            None => sf.is_public != 0,
+    let cur_proj_mgr = filter_manager_access(&db, &ctx.user, sf.project_id) >= 70;
+    if sf.is_public == 0 {
+        if sf.user_id != ctx.user.id {
+            return forbidden(
+                &ctx,
+                "Private saved filters can only be edited by their owner.",
+            );
         }
-    } else {
-        if parse_bool(form.is_public.as_deref()) && sf.is_public == 0 {
-            return forbidden(&ctx, "Manager access required to publish filters.");
-        }
-        sf.is_public != 0
-    };
+    } else if sf.user_id != ctx.user.id && !cur_proj_mgr {
+        return forbidden(&ctx, "Cannot edit another user's public filter.");
+    }
 
     let new_project_id = form.project_id.filter(|&p| p >= 0).unwrap_or(sf.project_id);
     if new_project_id > 0
@@ -216,11 +284,41 @@ pub async fn manage_filter_update(
         return forbidden(&ctx, "You do not have access to the selected project.");
     }
 
+    let can_toggle_public =
+        sf.user_id == ctx.user.id && filter_manager_access(&db, &ctx.user, new_project_id) >= 70;
+    let new_is_public = if can_toggle_public {
+        match form.is_public.as_deref() {
+            Some(v) => parse_bool(Some(v)),
+            None => sf.is_public != 0,
+        }
+    } else {
+        if let Some(raw_pub) = form.is_public.as_deref() {
+            let requested = parse_bool(Some(raw_pub));
+            if requested != (sf.is_public != 0) {
+                return forbidden(
+                    &ctx,
+                    "Only the filter owner with Manager privileges may change filter visibility.",
+                );
+            }
+        }
+        sf.is_public != 0
+    };
+
     bf.project_id = if new_project_id > 0 {
         Some(new_project_id)
     } else {
         None
     };
+    if new_project_id != sf.project_id {
+        let allowed_cf_ids: HashSet<i64> = db
+            .list_accessible_custom_fields_for_user(&ctx.user, new_project_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|cf| cf.filter_by != 0)
+            .map(|cf| cf.id)
+            .collect();
+        bf.retain_custom_fields(&allowed_cf_ids);
+    }
     if let Some(mt) = form.match_type {
         bf.match_type = if mt == FILTER_MATCH_ANY {
             FILTER_MATCH_ANY
@@ -263,9 +361,6 @@ pub async fn filter_delete(
         }
     };
 
-    if sf.user_id != ctx.user.id && ctx.user.access_level < 70 {
-        return forbidden(&ctx, "Cannot delete another user's filter.");
-    }
     if sf.project_id > 0
         && db
             .effective_access_level(&ctx.user, sf.project_id)
@@ -273,6 +368,10 @@ pub async fn filter_delete(
             < 10
     {
         return forbidden(&ctx, "You do not have access to this filter's project.");
+    }
+
+    if sf.user_id != ctx.user.id && filter_manager_access(&db, &ctx.user, sf.project_id) < 70 {
+        return forbidden(&ctx, "Cannot delete another user's filter.");
     }
 
     let _ = db.delete_filter(id);

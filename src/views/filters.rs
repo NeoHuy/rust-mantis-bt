@@ -6,7 +6,7 @@ use crate::models::{
 use crate::views::html_escape;
 use crate::views::layout::render_layout;
 use axum::response::Html;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn summarize_filter_criteria(filter: &BugFilter) -> Vec<String> {
     let mut parts = Vec::new();
@@ -146,6 +146,7 @@ fn summarize_filter_criteria(filter: &BugFilter) -> Vec<String> {
 pub fn render_manage_filter_page(
     ctx: &AuthContext,
     filters: &[SavedFilter],
+    manageable_ids: &HashSet<i64>,
     users_map: &HashMap<i64, String>,
     projects_map: &HashMap<i64, String>,
     msg: Option<&str>,
@@ -181,7 +182,9 @@ pub fn render_manage_filter_page(
                 r#"<span class="badge badge-info">Private</span>"#
             };
             let permalink = format!("/view_all_bug_page?filter_id={}", sf.id);
-            let can_manage = sf.user_id == ctx.user.id || ctx.user.access_level >= 70;
+            let can_manage = manageable_ids.contains(&sf.id)
+                || sf.user_id == ctx.user.id
+                || (sf.is_public != 0 && ctx.user.access_level >= 70);
             let edit_btn = if can_manage {
                 format!(
                     r#"<a href="/manage_filter_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>"#,
@@ -286,6 +289,7 @@ pub fn render_manage_filter_edit_page(
     sf: &SavedFilter,
     filter: &BugFilter,
     projects: &[(i64, String)],
+    can_toggle_public: bool,
     msg: Option<&str>,
     err: Option<&str>,
 ) -> Html<String> {
@@ -311,7 +315,7 @@ pub fn render_manage_filter_edit_page(
         ));
     }
 
-    let visibility_row = if ctx.user.access_level >= 70 {
+    let visibility_row = if can_toggle_public {
         let pub_checked = if sf.is_public != 0 { "checked" } else { "" };
         let priv_checked = if sf.is_public == 0 { "checked" } else { "" };
         format!(
@@ -319,7 +323,7 @@ pub fn render_manage_filter_edit_page(
                 <td class="label-col">Visibility</td>
                 <td class="input-col">
                     <label class="inline-label"><input type="radio" name="is_public" value="1" {}> Public (visible to all users with project access)</label>
-                    <label class="inline-label"><input type="radio" name="is_public" value="0" {}> Private (only visible to owner &amp; managers)</label>
+                    <label class="inline-label"><input type="radio" name="is_public" value="0" {}> Private (only visible to owner)</label>
                 </td>
             </tr>"#,
             pub_checked, priv_checked
@@ -333,7 +337,7 @@ pub fn render_manage_filter_edit_page(
         format!(
             r#"<tr>
                 <td class="label-col">Visibility</td>
-                <td class="input-col"><strong>{}</strong> <span class="text-xs text-gray-500">(Manager privileges required to share filters publicly)</span></td>
+                <td class="input-col"><strong>{}</strong> <span class="text-xs text-gray-500">(Owner with Manager privileges required to change visibility)</span></td>
             </tr>"#,
             label
         )

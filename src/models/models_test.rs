@@ -1067,4 +1067,32 @@ fn test_advanced_bug_filter_parsing_urls_and_columns() {
         &allowed_cf,
     );
     assert_eq!(filtered, vec!["id", "custom_field_5"]);
+
+    assert_eq!(
+        RelationshipType::Blocks.complement(),
+        RelationshipType::BlockedBy
+    );
+    assert_eq!(
+        RelationshipType::BlockedBy.complement(),
+        RelationshipType::Blocks
+    );
+    assert_eq!(
+        RelationshipType::ParentOf.complement(),
+        RelationshipType::ChildOf
+    );
+    assert_eq!(
+        RelationshipType::DuplicateOf.complement(),
+        RelationshipType::HasDuplicate
+    );
+    assert_eq!(
+        RelationshipType::RelatedTo.complement(),
+        RelationshipType::RelatedTo
+    );
+
+    let mut bf = BugFilter::default();
+    bf.custom_fields.insert(5, vec!["Chrome".to_string()]);
+    bf.custom_fields.insert(99, vec!["Secret".to_string()]);
+    bf.retain_custom_fields(&allowed_cf);
+    assert!(bf.custom_fields.contains_key(&5));
+    assert!(!bf.custom_fields.contains_key(&99));
 }

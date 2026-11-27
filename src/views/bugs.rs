@@ -1305,6 +1305,12 @@ fn render_filter_hidden_inputs(
             v
         ));
     }
+    for v in filter.effective_hide_statuses() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="hide_statuses" value="{}">"#,
+            v
+        ));
+    }
     for v in filter.effective_priorities() {
         out.push_str(&format!(
             r#"<input type="hidden" name="priority" value="{}">"#,
@@ -1963,7 +1969,9 @@ pub fn render_view_all_bug_page(
             sf_sel,
             html_escape(&sf.name)
         ));
-        let delete_btn = if sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
+        let delete_btn = if sf.user_id == ctx.user.id
+            || (sf.is_public != 0 && ctx.user.access_level >= 70)
+        {
             format!(
                 r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" data-confirm="Delete filter?" title="Delete filter">Delete</button></form>"#,
                 sf.id

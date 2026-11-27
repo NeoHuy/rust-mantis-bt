@@ -949,4 +949,266 @@ async fn test_http_advanced_filters_manage_filters_and_column_customization() {
     assert!(csv.starts_with("Id,Summary,AdminSecret\r\n"));
     assert!(csv.contains("'=CMD|'calc'!A0"));
     assert!(csv.contains("'=SUM(1,2)"));
+
+    // 6. C1/M1/M2/M4 HTTP regressions:
+    // a) Missing saved filter redirects with err flash instead of 404
+    let res_missing_f = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page?filter_id=999999")
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_missing_f.status(), StatusCode::SEE_OTHER);
+    assert!(res_missing_f
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("Saved+filter+not+found"));
+
+    // b) Manager cannot list, view, edit, or publish Reporter's private filter; Admin can moderation-delete it
+    let res_mgr_mf = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/manage_filter_page")
+                .header("cookie", &mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_mf.status(), StatusCode::OK);
+    let mgr_mf_html = String::from_utf8(
+        axum::body::to_bytes(res_mgr_mf.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!mgr_mf_html.contains("Renamed Rep Filter"));
+
+    let res_mgr_priv_view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?filter_id={}", rep_fid))
+                .header("cookie", &mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_priv_view.status(), StatusCode::FORBIDDEN);
+
+    let res_mgr_priv_edit = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/manage_filter_edit_page/{}", rep_fid))
+                .header("cookie", &mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_priv_edit.status(), StatusCode::FORBIDDEN);
+
+    let res_mgr_priv_upd = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/manage_filter_update/{}", rep_fid))
+                .header("cookie", &mgr_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=Hijacked&project_id={}&is_public=1",
+                    proj_id
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_priv_upd.status(), StatusCode::FORBIDDEN);
+
+    // c) M1: Public saved filter containing restricted custom field + target_version hides secret CF from Reporter HTML/chip URL
+    let mut f_with_secret_cf = rust_mantis_bt::models::BugFilter {
+        project_id: Some(proj_id),
+        target_versions: vec!["v2.0".to_string()],
+        ..Default::default()
+    };
+    f_with_secret_cf
+        .custom_fields
+        .insert(cf_secret, vec!["TOPSECRET_VAL".to_string()]);
+    let pub_cf_fid = db
+        .save_filter(mgr_id, proj_id, true, "Team CF Filter", &f_with_secret_cf)
+        .unwrap();
+    let res_rep_pub_cf = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?filter_id={}", pub_cf_fid))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rep_pub_cf.status(), StatusCode::OK);
+    let rep_pub_cf_html = String::from_utf8(
+        axum::body::to_bytes(res_rep_pub_cf.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!rep_pub_cf_html.contains("TOPSECRET_VAL"));
+    assert!(!rep_pub_cf_html.contains(&format!("custom_field_{}", cf_secret)));
+
+    // d) C1: Override-elevated Manager on proj_a vs Reporter on proj_b viewing All Projects + cf_secret (access_level_r=70)
+    let cf_mgr_only = db
+        .create_custom_field_full(
+            "MgrOnlyCode",
+            0,
+            "",
+            "",
+            "",
+            70,
+            70,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    let proj_a = db.create_project("C1ProjA", 10, 10, "", true).unwrap();
+    let proj_b = db.create_project("C1ProjB", 10, 10, "", true).unwrap();
+    db.link_custom_field_to_project(cf_mgr_only, proj_a, 1)
+        .unwrap();
+    db.link_custom_field_to_project(cf_mgr_only, proj_b, 2)
+        .unwrap();
+    db.set_project_user(proj_a, rep_id, 70).unwrap();
+    let cat_a = db.list_effective_categories(proj_a).unwrap()[0].id;
+    let cat_b = db.list_effective_categories(proj_b).unwrap()[0].id;
+    let bug_a = db
+        .create_bug_full_with_mentions(
+            proj_a,
+            rep_id,
+            cat_a,
+            "BugA C1",
+            "DescA",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+            &[],
+            rust_mantis_bt::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+    let bug_b = db
+        .create_bug_full_with_mentions(
+            proj_b,
+            mgr_id,
+            cat_b,
+            "BugB C1",
+            "DescB",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+            &[],
+            rust_mantis_bt::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_mgr_only, bug_a, mgr_id, "SECRET_PROJ_A_OK")
+        .unwrap();
+    db.set_custom_field_value(cf_mgr_only, bug_b, mgr_id, "SECRET_PROJ_B_LEAK")
+        .unwrap();
+    let rep_all_cookie = set_project_cookie(&app, &rep_cookie, 0).await;
+    let res_rep_cols = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/account_manage_columns_update")
+                .header("cookie", &rep_all_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id=0&view_issues_columns=id,summary,custom_field_{}&print_issues_columns=id,summary&csv_columns=id,summary,custom_field_{}&excel_columns=id,summary",
+                    cf_mgr_only, cf_mgr_only
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rep_cols.status(), StatusCode::SEE_OTHER);
+
+    let res_c1_view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/view_all_bug_page")
+                .header("cookie", &rep_all_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_c1_view.status(), StatusCode::OK);
+    let c1_view_html = String::from_utf8(
+        axum::body::to_bytes(res_c1_view.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(c1_view_html.contains("SECRET_PROJ_A_OK"));
+    assert!(!c1_view_html.contains("SECRET_PROJ_B_LEAK"));
+
+    let res_c1_csv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/csv_export")
+                .header("cookie", &rep_all_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_c1_csv.status(), StatusCode::OK);
+    let c1_csv = String::from_utf8(
+        axum::body::to_bytes(res_c1_csv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(c1_csv.contains("SECRET_PROJ_A_OK"));
+    assert!(!c1_csv.contains("SECRET_PROJ_B_LEAK"));
 }

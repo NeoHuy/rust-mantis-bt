@@ -42,14 +42,56 @@ fn test_save_filter_query_with_sort_dir_per_page() {
 
 #[test]
 fn test_update_filter_form_fields() {
-    let form = UpdateFilterForm {
-        name: "Renamed Filter".to_string(),
-        project_id: Some(2),
-        is_public: Some("1".to_string()),
-        match_type: Some(1),
-    };
+    let form: UpdateFilterForm = serde_json::from_str(
+        r#"{"name":"Renamed Filter","project_id":2,"is_public":"1","match_type":1}"#,
+    )
+    .unwrap();
     assert_eq!(form.name, "Renamed Filter");
     assert_eq!(form.project_id, Some(2));
     assert_eq!(form.is_public.as_deref(), Some("1"));
     assert_eq!(form.match_type, Some(1));
+}
+
+#[tokio::test]
+async fn test_manage_filter_update_inaccessible_project_denied() {
+    use crate::controllers::build_router;
+    use crate::models::BugFilter;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let rep_id = db
+        .create_user(
+            "flt_rep",
+            "Flt Rep",
+            "fltrep@x.com",
+            "pw123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let rep = db.authenticate("flt_rep", "pw123").unwrap().unwrap();
+    let cookie = format!("MANTIS_STRING_COOKIE={}", rep.cookie_string);
+    let pub_proj = db.create_project("PubFltProj", 10, 10, "", true).unwrap();
+    let priv_proj = db.create_project("PrivFltProj", 10, 50, "", true).unwrap();
+    let fid = db
+        .save_filter(rep_id, pub_proj, false, "My Filter", &BugFilter::default())
+        .unwrap();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/manage_filter_update/{}", fid))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("name=Moved&project_id={}", priv_proj)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }

@@ -513,18 +513,20 @@
           }
           if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(val).then(showCopied).catch(function () {
+              var ok = false;
               if (el.select) {
                 el.select();
-                try { document.execCommand('copy'); } catch (_) {}
+                try { ok = document.execCommand('copy'); } catch (_) {}
               }
-              showCopied();
+              if (ok) showCopied();
             });
           } else {
+            var ok = false;
             if (el.select) {
               el.select();
-              try { document.execCommand('copy'); } catch (_) {}
+              try { ok = document.execCommand('copy'); } catch (_) {}
             }
-            showCopied();
+            if (ok) showCopied();
           }
         });
       })(btns[i]);

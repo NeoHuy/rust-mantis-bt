@@ -5008,4 +5008,124 @@ fn test_phase3_advanced_filtering_and_columns_config() {
             &["id".to_string(), format!("custom_field_{}", cf_secret)],
         )
         .is_err());
+
+    // 8. M3: Bidirectional relationship filtering (Blocks/BlockedBy & -1)
+    let f_blocks_b3 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(3), // Blocks
+        relationship_bug_id: Some(b3),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_blocks_b3, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+    let f_blocked_by_b1 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(4), // BlockedBy
+        relationship_bug_id: Some(b1),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_blocked_by_b1, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b3]
+    );
+    let f_any_rel_b1 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(-1),
+        relationship_bug_id: Some(b1),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_any_rel_b1, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b3]
+    );
+
+    // 9. C1: Per-bug access_level_r check in get_bugs_custom_field_values_map across projects
+    let proj_elev = db.create_project("ElevatedProj", 10, 10, "", true).unwrap();
+    db.set_project_user(proj_elev, rep_id, 70).unwrap();
+    db.link_custom_field_to_project(cf_secret, proj_elev, 1)
+        .unwrap();
+    let cat_elev = db.list_effective_categories(proj_elev).unwrap()[0].id;
+    let b_elev = db
+        .create_bug_full_with_mentions(
+            proj_elev,
+            rep_id,
+            cat_elev,
+            "Elev bug",
+            "Desc",
+            "",
+            "",
+            40,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+            &[],
+            crate::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_secret, b_elev, admin.id, "ELEVATED_SECRET")
+        .unwrap();
+    let mut requested_cf = HashSet::new();
+    requested_cf.insert(cf_secret);
+    let bug_b1_rec = db.get_bug(b1).unwrap().unwrap();
+    let bug_elev_rec = db.get_bug(b_elev).unwrap().unwrap();
+    let rep_cf_vals = db
+        .get_bugs_custom_field_values_map(&rep, &[bug_b1_rec, bug_elev_rec], &requested_cf)
+        .unwrap();
+    assert_eq!(
+        rep_cf_vals.get(&(b_elev, cf_secret)).map(String::as_str),
+        Some("ELEVATED_SECRET")
+    );
+    assert!(!rep_cf_vals.contains_key(&(b1, cf_secret)));
+
+    // 10. M2 + Minor #3: Manager cannot list other users' private filters; columns fall back to project 0
+    let rep_priv_fid = db
+        .save_filter(
+            rep_id,
+            proj_id,
+            false,
+            "Only Rep Private",
+            &BugFilter::default(),
+        )
+        .unwrap();
+    let mgr_manageable = db.list_manageable_filters(&dev, proj_id).unwrap();
+    assert!(!mgr_manageable.iter().any(|sf| sf.id == rep_priv_fid));
+    assert!(db
+        .save_filter(
+            rep_id,
+            proj_id,
+            false,
+            &"x".repeat(65),
+            &BugFilter::default()
+        )
+        .is_err());
+
+    db.set_user_columns(
+        &rep,
+        0,
+        crate::models::ColumnContext::View,
+        &["id".to_string(), "summary".to_string()],
+    )
+    .unwrap();
+    let fallback_cols = db
+        .get_user_columns(&rep, proj_id, crate::models::ColumnContext::View)
+        .unwrap();
+    assert_eq!(fallback_cols, vec!["id", "summary"]);
 }

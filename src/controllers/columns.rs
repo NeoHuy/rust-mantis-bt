@@ -12,17 +12,21 @@ use serde::Deserialize;
 
 #[derive(Deserialize, Default)]
 pub struct ColumnsPageQuery {
-    pub project_id: Option<i64>,
+    pub project_id: Option<String>,
     pub msg: Option<String>,
     pub err: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct UpdateColumnsForm {
     pub project_id: Option<i64>,
+    #[serde(default)]
     pub view_issues_columns: String,
+    #[serde(default)]
     pub print_issues_columns: String,
+    #[serde(default)]
     pub csv_columns: String,
+    #[serde(default)]
     pub excel_columns: String,
 }
 
@@ -48,8 +52,11 @@ pub async fn account_manage_columns_page(
     ctx: AuthContext,
     Query(q): Query<ColumnsPageQuery>,
 ) -> Response {
-    let project_id = q
+    let parsed_pid = q
         .project_id
+        .as_deref()
+        .and_then(|s| s.trim().parse::<i64>().ok());
+    let project_id = parsed_pid
         .filter(|&p| p >= 0)
         .unwrap_or(ctx.active_project_id);
 
@@ -65,17 +72,39 @@ pub async fn account_manage_columns_page(
     let accessible_cfs = db
         .list_accessible_custom_fields_for_user(&ctx.user, project_id)
         .unwrap_or_default();
+    let accessible_cf_ids: std::collections::HashSet<i64> =
+        accessible_cfs.iter().map(|c| c.id).collect();
     let view_cols = db
-        .get_user_columns(&ctx.user, project_id, ColumnContext::View)
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            project_id,
+            ColumnContext::View,
+            &accessible_cf_ids,
+        )
         .unwrap_or_default();
     let print_cols = db
-        .get_user_columns(&ctx.user, project_id, ColumnContext::Print)
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            project_id,
+            ColumnContext::Print,
+            &accessible_cf_ids,
+        )
         .unwrap_or_default();
     let csv_cols = db
-        .get_user_columns(&ctx.user, project_id, ColumnContext::Csv)
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            project_id,
+            ColumnContext::Csv,
+            &accessible_cf_ids,
+        )
         .unwrap_or_default();
     let excel_cols = db
-        .get_user_columns(&ctx.user, project_id, ColumnContext::Excel)
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            project_id,
+            ColumnContext::Excel,
+            &accessible_cf_ids,
+        )
         .unwrap_or_default();
 
     views::columns::render_manage_columns_page(
@@ -107,43 +136,29 @@ pub async fn account_manage_columns_update(
         return forbidden(&ctx, "You do not have access to this project.");
     }
 
-    let accessible_cfs = db
-        .list_accessible_custom_fields_for_user(&ctx.user, project_id)
-        .unwrap_or_default();
-
-    let contexts_and_inputs = [
-        (ColumnContext::View, form.view_issues_columns.as_str()),
-        (ColumnContext::Print, form.print_issues_columns.as_str()),
-        (ColumnContext::Csv, form.csv_columns.as_str()),
-        (ColumnContext::Excel, form.excel_columns.as_str()),
+    let entries = vec![
+        (
+            ColumnContext::View,
+            parse_columns_input(&form.view_issues_columns),
+        ),
+        (
+            ColumnContext::Print,
+            parse_columns_input(&form.print_issues_columns),
+        ),
+        (ColumnContext::Csv, parse_columns_input(&form.csv_columns)),
+        (
+            ColumnContext::Excel,
+            parse_columns_input(&form.excel_columns),
+        ),
     ];
 
-    let mut validated_all = Vec::with_capacity(4);
-    for (col_ctx, raw) in contexts_and_inputs {
-        let parsed = parse_columns_input(raw);
-        match crate::models::validate_columns_list(&parsed, &accessible_cfs) {
-            Ok(valid) => validated_all.push((col_ctx, valid)),
-            Err(e) => {
-                let err_msg = format!("{}: {}", col_ctx.label(), e);
-                return Redirect::to(&format!(
-                    "/account_manage_columns_page?project_id={}&err={}",
-                    project_id,
-                    url_encode(&sanitize_error_message(&err_msg))
-                ))
-                .into_response();
-            }
-        }
-    }
-
-    for (col_ctx, valid) in validated_all {
-        if let Err(e) = db.set_user_columns(&ctx.user, project_id, col_ctx, &valid) {
-            return Redirect::to(&format!(
-                "/account_manage_columns_page?project_id={}&err={}",
-                project_id,
-                url_encode(&sanitize_error_message(&e))
-            ))
-            .into_response();
-        }
+    if let Err(e) = db.set_user_columns_batch(&ctx.user, project_id, &entries) {
+        return Redirect::to(&format!(
+            "/account_manage_columns_page?project_id={}&err={}",
+            project_id,
+            url_encode(&sanitize_error_message(&e))
+        ))
+        .into_response();
     }
 
     Redirect::to(&format!(
@@ -168,12 +183,19 @@ pub async fn account_manage_columns_reset(
         return forbidden(&ctx, "You do not have access to this project.");
     }
 
-    let _ = db.reset_user_columns(ctx.user.id, project_id);
-    Redirect::to(&format!(
-        "/account_manage_columns_page?project_id={}&msg=Columns+reset+to+defaults",
-        project_id
-    ))
-    .into_response()
+    match db.reset_user_columns(ctx.user.id, project_id) {
+        Ok(()) => Redirect::to(&format!(
+            "/account_manage_columns_page?project_id={}&msg=Columns+reset+to+defaults",
+            project_id
+        ))
+        .into_response(),
+        Err(e) => Redirect::to(&format!(
+            "/account_manage_columns_page?project_id={}&err={}",
+            project_id,
+            url_encode(&sanitize_error_message(&e.to_string()))
+        ))
+        .into_response(),
+    }
 }
 
 pub fn router() -> Router<Db> {

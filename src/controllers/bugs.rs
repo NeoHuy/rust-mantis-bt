@@ -342,19 +342,24 @@ pub(crate) fn filter_from_query(
     }
 }
 
-fn resolve_bug_filter(
+enum FilterResolveError {
+    Forbidden(&'static str),
+    NotFound(&'static str),
+    Internal(&'static str),
+}
+
+fn resolve_bug_filter_inner(
     db: &Db,
     ctx: &AuthContext,
     q: &ListBugsQuery,
-) -> Result<BugFilter, Box<Response>> {
+) -> Result<BugFilter, FilterResolveError> {
     if let Some(fid) = q.filter_id.filter(|&id| id > 0) {
         match db.get_filter(fid) {
             Ok(Some((sf, mut bf))) => {
-                if sf.is_public == 0 && sf.user_id != ctx.user.id && ctx.user.access_level < 70 {
-                    return Err(Box::new(forbidden(
-                        ctx,
+                if sf.is_public == 0 && sf.user_id != ctx.user.id {
+                    return Err(FilterResolveError::Forbidden(
                         "You do not have permission to view this private filter.",
-                    )));
+                    ));
                 }
                 if sf.project_id > 0
                     && db
@@ -362,10 +367,9 @@ fn resolve_bug_filter(
                         .unwrap_or(0)
                         < 10
                 {
-                    return Err(Box::new(forbidden(
-                        ctx,
+                    return Err(FilterResolveError::Forbidden(
                         "You do not have access to this filter's project.",
-                    )));
+                    ));
                 }
 
                 if let Some(pid) = q.project_id.filter(|&v| v > 0) {
@@ -374,10 +378,9 @@ fn resolve_bug_filter(
                     bf.project_id = Some(ctx.active_project_id);
                 } else if let Some(bf_pid) = bf.project_id.filter(|&p| p > 0) {
                     if db.effective_access_level(&ctx.user, bf_pid).unwrap_or(0) < 10 {
-                        return Err(Box::new(forbidden(
-                            ctx,
+                        return Err(FilterResolveError::Forbidden(
                             "You do not have access to this project.",
-                        )));
+                        ));
                     }
                 }
                 let tv = q.effective_target_versions();
@@ -407,9 +410,19 @@ fn resolve_bug_filter(
                         bf.per_page = Some(clamp_per_page(Some(pp)));
                     }
                 }
+                let eff_pid = bf.project_id.unwrap_or(0);
+                let accessible_cf_ids: HashSet<i64> = db
+                    .list_accessible_custom_fields_for_user(&ctx.user, eff_pid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|cf| cf.filter_by != 0)
+                    .map(|cf| cf.id)
+                    .collect();
+                bf.retain_custom_fields(&accessible_cf_ids);
                 return Ok(bf);
             }
-            _ => return Err(Box::new(not_found(ctx, "Saved filter not found."))),
+            Ok(None) => return Err(FilterResolveError::NotFound("Saved filter not found.")),
+            Err(_) => return Err(FilterResolveError::Internal("Failed to load saved filter.")),
         }
     }
 
@@ -420,6 +433,24 @@ fn resolve_bug_filter(
         q,
         false,
     ))
+}
+
+fn resolve_bug_filter(
+    db: &Db,
+    ctx: &AuthContext,
+    q: &ListBugsQuery,
+) -> Result<BugFilter, Box<Response>> {
+    resolve_bug_filter_inner(db, ctx, q).map_err(|err| match err {
+        FilterResolveError::Forbidden(msg) => Box::new(forbidden(ctx, msg)),
+        FilterResolveError::NotFound(msg) => Box::new(not_found(ctx, msg)),
+        FilterResolveError::Internal(msg) => Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::render_error_page(ctx, "Database Error", Some(msg), ""),
+            )
+                .into_response(),
+        ),
+    })
 }
 
 pub fn router() -> Router<Db> {
@@ -686,19 +717,26 @@ pub async fn csv_export(
         .or(filter.dir.as_deref());
     sort_bugs(&mut bugs, effective_sort, effective_dir);
 
+    let effective_project_id = filter.project_id.unwrap_or(ctx.active_project_id);
+    let accessible_cfs = db
+        .list_accessible_custom_fields_for_user(&ctx.user, effective_project_id)
+        .unwrap_or_default();
+    let accessible_cf_ids: HashSet<i64> = accessible_cfs.iter().map(|c| c.id).collect();
     let raw_cols = db
-        .get_user_columns(&ctx.user, ctx.active_project_id, ColumnContext::Csv)
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            effective_project_id,
+            ColumnContext::Csv,
+            &accessible_cf_ids,
+        )
         .unwrap_or_else(|_| {
-            crate::models::default_columns_for_context(ColumnContext::Csv, ctx.active_project_id)
+            crate::models::default_columns_for_context(ColumnContext::Csv, effective_project_id)
         });
     let csv_cols: Vec<String> = raw_cols
         .into_iter()
         .filter(|c| c != "selection" && c != "edit")
         .collect();
 
-    let accessible_cfs = db
-        .list_accessible_custom_fields_for_user(&ctx.user, ctx.active_project_id)
-        .unwrap_or_default();
     let cf_names: HashMap<i64, String> = accessible_cfs
         .iter()
         .map(|cf| (cf.id, cf.name.clone()))
@@ -723,7 +761,7 @@ pub async fn csv_export(
     let categories_map = db.list_all_categories_map().unwrap_or_default();
 
     let cf_values_map = if !cf_ids_in_cols.is_empty() {
-        db.get_bugs_custom_field_values_map(&bugs, &cf_ids_in_cols)
+        db.get_bugs_custom_field_values_map(&ctx.user, &bugs, &cf_ids_in_cols)
             .unwrap_or_default()
     } else {
         HashMap::new()
@@ -747,11 +785,13 @@ pub async fn csv_export(
         .iter()
         .any(|c| c == "bugnotes_count" || c == "attachment_count")
     {
-        let mut eff_map = HashMap::new();
+        let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+        let mut eff_map = HashMap::with_capacity(bugs.len());
         for b in &bugs {
-            let eff = db
-                .effective_access_level(&ctx.user, b.project_id)
-                .unwrap_or(0);
+            let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
+                db.effective_access_level(&ctx.user, b.project_id)
+                    .unwrap_or(0)
+            });
             eff_map.insert(b.id, eff);
         }
         db.get_bug_note_and_file_counts(&bug_ids, &eff_map)
@@ -895,9 +935,19 @@ pub async fn view_all_bug_page(
         return resp;
     }
 
-    let filter = match resolve_bug_filter(&db, &ctx, &q) {
+    let filter = match resolve_bug_filter_inner(&db, &ctx, &q) {
         Ok(f) => f,
-        Err(res) => return *res,
+        Err(FilterResolveError::Forbidden(msg)) => return forbidden(&ctx, msg),
+        Err(FilterResolveError::NotFound(_)) => {
+            return Redirect::to("/view_all_bug_page?err=Saved+filter+not+found").into_response();
+        }
+        Err(FilterResolveError::Internal(msg)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::render_error_page(&ctx, "Database Error", Some(msg), ""),
+            )
+                .into_response();
+        }
     };
     if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
         return resp;
@@ -1000,17 +1050,22 @@ pub async fn view_all_bug_page(
         .get_bug_note_and_file_counts(&paged_bug_ids, &bug_access_levels)
         .unwrap_or_default();
 
-    let view_columns = db
-        .get_user_columns(&ctx.user, ctx.active_project_id, ColumnContext::View)
-        .unwrap_or_else(|_| {
-            crate::models::default_columns_for_context(ColumnContext::View, ctx.active_project_id)
-        });
-
     let accessible_cfs = db
-        .list_accessible_custom_fields_for_user(&ctx.user, ctx.active_project_id)
+        .list_accessible_custom_fields_for_user(&ctx.user, effective_project_id)
         .unwrap_or_default();
-    let project_versions_list = if ctx.active_project_id > 0 {
-        db.list_versions(ctx.active_project_id).unwrap_or_default()
+    let accessible_cf_ids: HashSet<i64> = accessible_cfs.iter().map(|c| c.id).collect();
+    let view_columns = db
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            effective_project_id,
+            ColumnContext::View,
+            &accessible_cf_ids,
+        )
+        .unwrap_or_else(|_| {
+            crate::models::default_columns_for_context(ColumnContext::View, effective_project_id)
+        });
+    let project_versions_list = if effective_project_id > 0 {
+        db.list_versions(effective_project_id).unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -1036,7 +1091,7 @@ pub async fn view_all_bug_page(
         .filter_map(|c| parse_custom_field_column_id(c))
         .collect();
     let custom_field_values = if !cf_ids_in_cols.is_empty() {
-        db.get_bugs_custom_field_values_map(&paged_bugs, &cf_ids_in_cols)
+        db.get_bugs_custom_field_values_map(&ctx.user, &paged_bugs, &cf_ids_in_cols)
             .unwrap_or_default()
     } else {
         HashMap::new()
@@ -1058,7 +1113,7 @@ pub async fn view_all_bug_page(
     };
 
     let versions = db
-        .list_distinct_bug_versions_for_user(&ctx.user, ctx.active_project_id)
+        .list_distinct_bug_versions_for_user(&ctx.user, effective_project_id)
         .unwrap_or_default();
 
     let meta = views::bugs::ViewIssuesMeta {

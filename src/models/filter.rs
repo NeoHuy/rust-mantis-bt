@@ -1,7 +1,7 @@
 use crate::models::bug::Bug;
 use crate::models::custom_field::is_valid_ymd;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 pub const FILTER_MATCH_ALL: i32 = 0;
 pub const FILTER_MATCH_ANY: i32 = 1;
@@ -214,6 +214,11 @@ impl BugFilter {
 
     pub fn effective_note_user_ids(&self) -> Vec<i64> {
         merge_positive_i64(None, &self.note_user_ids)
+    }
+
+    pub fn retain_custom_fields(&mut self, allowed_cf_ids: &HashSet<i64>) {
+        self.custom_fields
+            .retain(|fid, _| allowed_cf_ids.contains(fid));
     }
 
     pub fn to_list_query(&self) -> ListBugsQuery {

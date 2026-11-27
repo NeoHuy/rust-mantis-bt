@@ -70,5 +70,38 @@ fn test_render_manage_columns_page_contexts_and_no_nested_forms() {
     assert!(html.contains("Environment"));
     assert!(html.contains(r#"action="/account_manage_columns_update""#));
     assert!(html.contains(r#"action="/account_manage_columns_reset""#));
-    assert!(!html.contains("<form><form"));
+    assert_no_nested_forms(&html);
+}
+
+fn assert_no_nested_forms(html: &str) {
+    let mut depth = 0i32;
+    let mut rest = html;
+    while !rest.is_empty() {
+        let open_pos = rest.find("<form");
+        let close_pos = rest.find("</form");
+        match (open_pos, close_pos) {
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                assert!(depth <= 1, "Detected nested <form> tag in HTML");
+                rest = &rest[o + 5..];
+            }
+            (Some(_), Some(c)) => {
+                depth -= 1;
+                assert!(depth >= 0, "Mismatched </form> tag in HTML");
+                rest = &rest[c + 6..];
+            }
+            (Some(o), None) => {
+                depth += 1;
+                assert!(depth <= 1, "Detected nested <form> tag in HTML");
+                rest = &rest[o + 5..];
+            }
+            (None, Some(c)) => {
+                depth -= 1;
+                assert!(depth >= 0, "Mismatched </form> tag in HTML");
+                rest = &rest[c + 6..];
+            }
+            (None, None) => break,
+        }
+    }
+    assert_eq!(depth, 0, "Unclosed <form> tag in HTML");
 }

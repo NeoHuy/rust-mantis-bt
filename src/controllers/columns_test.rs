@@ -22,19 +22,21 @@ fn test_user(id: i64, access_level: i32) -> User {
 
 #[test]
 fn test_columns_update_form_deserializes() {
-    let form = UpdateColumnsForm {
-        project_id: Some(0),
-        view_issues_columns: "id, priority, summary".to_string(),
-        print_issues_columns: "id, summary".to_string(),
-        csv_columns: "id, summary".to_string(),
-        excel_columns: "id, summary".to_string(),
-    };
+    let form: UpdateColumnsForm = serde_json::from_str(
+        r#"{"project_id":0,"view_issues_columns":"id, priority, summary","print_issues_columns":"id, summary"}"#,
+    )
+    .unwrap();
     assert_eq!(form.project_id, Some(0));
     assert!(form.view_issues_columns.contains("priority"));
+    assert_eq!(form.csv_columns, "");
+    assert_eq!(form.excel_columns, "");
+
+    let q_bad: ColumnsPageQuery = serde_json::from_str(r#"{"project_id":"abc"}"#).unwrap();
+    assert_eq!(q_bad.project_id.as_deref(), Some("abc"));
 }
 
 #[tokio::test]
-async fn test_columns_http_update_and_reset_cycle() {
+async fn test_columns_http_update_reset_and_inaccessible_project() {
     use crate::controllers::build_router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -44,6 +46,54 @@ async fn test_columns_http_update_and_reset_cycle() {
     let app = build_router(db.clone());
     let admin = db.authenticate("administrator", "root").unwrap().unwrap();
     let cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
+
+    // Lenient query with non-numeric project_id returns 200
+    let res_bad_q = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/account_manage_columns_page?project_id=abc")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_bad_q.status(), StatusCode::OK);
+
+    // Reporter updating columns for inaccessible private project gets 403 Forbidden
+    let rep_id = db
+        .create_user(
+            "col_rep",
+            "Col Rep",
+            "colrep@x.com",
+            "pw123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let rep = db.authenticate("col_rep", "pw123").unwrap().unwrap();
+    let rep_cookie = format!("MANTIS_STRING_COOKIE={}", rep.cookie_string);
+    let priv_proj = db.create_project("PrivColProj", 10, 50, "", true).unwrap();
+    let _ = rep_id;
+    let res_deny = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/account_manage_columns_update")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "project_id={}&view_issues_columns=id,summary&print_issues_columns=id,summary&csv_columns=id,summary&excel_columns=id,summary",
+                    priv_proj
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_deny.status(), StatusCode::FORBIDDEN);
 
     let res = app
         .clone()

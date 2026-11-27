@@ -235,6 +235,18 @@ impl RelationshipType {
             Self::ChildOf => "child of",
         }
     }
+
+    pub fn complement(self) -> Self {
+        match self {
+            Self::RelatedTo => Self::RelatedTo,
+            Self::DuplicateOf => Self::HasDuplicate,
+            Self::HasDuplicate => Self::DuplicateOf,
+            Self::Blocks => Self::BlockedBy,
+            Self::BlockedBy => Self::Blocks,
+            Self::ParentOf => Self::ChildOf,
+            Self::ChildOf => Self::ParentOf,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

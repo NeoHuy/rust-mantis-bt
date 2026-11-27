@@ -55,6 +55,8 @@ pub fn router() -> Router<Db> {
         .route("/manage_user_delete/:id", post(manage_user_delete))
 }
 
+/// Normalizes a user-initial filter query parameter to `""` (All), `"0-9"` (any digit,
+/// matching the `0-9` quick-filter button), or a single uppercase ASCII letter `"A"`–`"Z"`.
 pub fn normalize_user_prefix(raw: Option<&str>) -> String {
     let trimmed = raw.map(|s| s.trim()).unwrap_or("");
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("all") {

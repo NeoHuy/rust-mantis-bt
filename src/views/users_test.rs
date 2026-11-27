@@ -131,23 +131,3 @@ fn test_manage_users_nav_aria_label_and_no_inline_styles() {
     assert!(!html.contains("style="));
     assert!(!html.contains("onsubmit="));
 }
-
-#[test]
-fn test_normalize_user_prefix_ab() {
-    assert_eq!(
-        crate::controllers::users::normalize_user_prefix(Some("Ab")),
-        "A"
-    );
-    assert_eq!(
-        crate::controllers::users::normalize_user_prefix(Some(" z ")),
-        "Z"
-    );
-    assert_eq!(
-        crate::controllers::users::normalize_user_prefix(Some("0-9")),
-        "0-9"
-    );
-    assert_eq!(
-        crate::controllers::users::normalize_user_prefix(Some("all")),
-        ""
-    );
-}

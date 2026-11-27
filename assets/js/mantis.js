@@ -654,7 +654,8 @@
     var forms = document.querySelectorAll('form[data-disable-on-submit]');
     for (var i = 0; i < forms.length; i++) {
       (function (form) {
-        form.addEventListener('submit', function () {
+        form.addEventListener('submit', function (e) {
+          if (e.defaultPrevented) return;
           var btn = form.querySelector('button[type="submit"], input[type="submit"]');
           if (btn) btn.disabled = true;
         });

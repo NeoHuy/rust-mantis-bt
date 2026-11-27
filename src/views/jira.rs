@@ -323,7 +323,7 @@ pub fn render_jira_section(
                 "bg-blue-700 text-white"
             } else if lower.contains("review") || lower.contains("testing") || lower.contains("qa")
             {
-                "bg-amber-600 text-white"
+                "bg-amber-700 text-white"
             } else {
                 "bg-gray-600 text-white"
             };
@@ -338,7 +338,7 @@ pub fn render_jira_section(
 
         let unlink_btn = if eff >= 55 {
             format!(
-                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" class="inline-block ml-1 m-0" data-confirm="Are you sure you want to unlink this Jira ticket?">
+                r#"<form method="POST" action="/view_bug_page/{}/jira_unlink" class="inline-block ml-1" data-confirm="Are you sure you want to unlink this Jira ticket?">
                     <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-unlink" aria-hidden="true"></i> Unlink</button>
                 </form>"#,
                 bug_id

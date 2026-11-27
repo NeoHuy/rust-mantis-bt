@@ -792,7 +792,7 @@ async fn test_milestone1_pagination_sorting_sticky_pinning_and_filter_delete_per
     assert_eq!(res.status(), StatusCode::SEE_OTHER);
     assert!(db.get_filter(f_owner).unwrap().is_none());
 
-    // Manager can delete any filter
+    // Manager (70) cannot delete another user's private filter -> 403 Forbidden
     let f_owner2 = db
         .save_filter(
             rep1_id,
@@ -806,7 +806,7 @@ async fn test_milestone1_pagination_sorting_sticky_pinning_and_filter_delete_per
         )
         .unwrap();
 
-    let res = app
+    let res_mgr_priv_del = app
         .clone()
         .oneshot(
             Request::builder()
@@ -818,8 +818,74 @@ async fn test_milestone1_pagination_sorting_sticky_pinning_and_filter_delete_per
         )
         .await
         .unwrap();
-    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    assert_eq!(res_mgr_priv_del.status(), StatusCode::FORBIDDEN);
+    assert!(db.get_filter(f_owner2).unwrap().is_some());
+
+    // Administrator (90) can moderation-delete another user's private filter
+    let admin_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=administrator&password=root"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let admin_cookie = admin_login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let res_adm_del = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/filter_delete/{}", f_owner2))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_adm_del.status(), StatusCode::SEE_OTHER);
     assert!(db.get_filter(f_owner2).unwrap().is_none());
+
+    // Manager (70) can delete another user's public filter in their managed project
+    let f_pub = db
+        .save_filter(
+            rep1_id,
+            proj_id,
+            true,
+            "PublicFilterToModerate",
+            &BugFilter {
+                status: Some(50),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let res_mgr_pub_del = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/filter_delete/{}", f_pub))
+                .header("cookie", &full_mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_mgr_pub_del.status(), StatusCode::SEE_OTHER);
+    assert!(db.get_filter(f_pub).unwrap().is_none());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -2459,4 +2525,54 @@ async fn test_planning_pages_and_rest_api_smoke_regression() {
 
     // Verify issue is deleted
     assert!(db.get_bug(new_issue_id).unwrap().is_none());
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. Phase 3.1 Regressions: Advanced Filters, Manage Filters & Column Config
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_phase3_m1_backward_compat_and_no_nested_forms() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_id = db.create_project("P3CompatProj", 10, 10, "", true).unwrap();
+    let admin_cookie = login_as_admin(&app).await;
+    let full_cookie = set_project_cookie(&app, &admin_cookie, proj_id).await;
+
+    // 1. Legacy BugFilter JSON without Phase 3.1 fields deserializes cleanly & works via permalink
+    let fid = db
+        .save_filter(
+            1,
+            proj_id,
+            true,
+            "Legacy Compat Filter",
+            &BugFilter {
+                project_id: Some(proj_id),
+                status: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    for uri in [
+        format!("/view_all_bug_page?filter_id={}", fid),
+        "/manage_filter_page".to_string(),
+        format!("/manage_filter_edit_page/{}", fid),
+        format!("/account_manage_columns_page?project_id={}", proj_id),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&uri)
+                    .header("cookie", &full_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {} failed", uri);
+        let html = response_body_string(res).await;
+        assert_no_nested_forms(&html);
+    }
 }

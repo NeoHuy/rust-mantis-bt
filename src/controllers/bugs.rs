@@ -2,11 +2,12 @@ use super::{sanitize_error_message, url_encode};
 use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::models::{
-    clamp_per_page, sort_bugs, BugFilter, BugUpdate, CustomFieldType, ListBugsQuery, User,
+    clamp_per_page, parse_custom_field_column_id, sort_bugs, BugFilter, BugUpdate, ColumnContext,
+    CustomFieldType, ListBugsQuery, User, FILTER_MATCH_ANY,
 };
 use crate::views;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, RawQuery, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
@@ -156,26 +157,241 @@ fn upload_dir() -> String {
     std::env::var("MANTIS_UPLOAD_DIR").unwrap_or_default()
 }
 
-fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilter {
-    if let Some(fid) = q.filter_id {
-        if let Ok(Some((sf, mut bf))) = db.get_filter(fid) {
-            if sf.is_public != 0 || sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
+pub(crate) fn filter_from_query(
+    db: &Db,
+    user: &User,
+    active_project_id: i64,
+    q: &ListBugsQuery,
+    strip_inaccessible_cfs: bool,
+) -> BugFilter {
+    let kw =
+        q.q.clone()
+            .or_else(|| q.search.clone())
+            .filter(|s| !s.trim().is_empty());
+
+    let effective_project_id = q.project_id.filter(|&v| v > 0).unwrap_or(active_project_id);
+
+    let mut filtered_cfs = std::collections::BTreeMap::new();
+    if strip_inaccessible_cfs {
+        let accessible_cf_ids: HashSet<i64> = db
+            .list_accessible_custom_fields_for_user(user, effective_project_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|cf| cf.filter_by != 0)
+            .map(|cf| cf.id)
+            .collect();
+        for (fid, vals) in &q.custom_fields {
+            if accessible_cf_ids.contains(fid) {
+                let cleaned: Vec<String> = vals
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && s != "[any]")
+                    .collect();
+                if !cleaned.is_empty() {
+                    filtered_cfs.insert(*fid, cleaned);
+                }
+            }
+        }
+    } else {
+        for (fid, vals) in &q.custom_fields {
+            if *fid > 0 {
+                let cleaned: Vec<String> = vals
+                    .iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && s != "[any]")
+                    .collect();
+                if !cleaned.is_empty() {
+                    filtered_cfs.insert(*fid, cleaned);
+                }
+            }
+        }
+    }
+
+    let statuses = q.effective_statuses();
+    let priorities = q.effective_priorities();
+    let severities = q.effective_severities();
+    let category_ids = q.effective_category_ids();
+    let reporter_ids = q.effective_reporter_ids();
+    let handler_ids = q.effective_handler_ids();
+    let tag_ids = q.effective_tag_ids();
+    let monitored_by_ids = q.effective_monitored_by_ids();
+    let target_versions = q.effective_target_versions();
+    let fixed_in_versions = q.effective_fixed_in_versions();
+
+    BugFilter {
+        project_id: (effective_project_id > 0).then_some(effective_project_id),
+        search: kw,
+        status: (statuses.len() == 1).then(|| statuses[0]),
+        hide_status: q.hide_status.filter(|&v| v > 0),
+        priority: (priorities.len() == 1).then(|| priorities[0]),
+        severity: (severities.len() == 1).then(|| severities[0]),
+        category_id: (category_ids.len() == 1).then(|| category_ids[0]),
+        reporter_id: (reporter_ids.len() == 1).then(|| reporter_ids[0]),
+        handler_id: (handler_ids.len() == 1).then(|| handler_ids[0]),
+        tag_id: (tag_ids.len() == 1).then(|| tag_ids[0]),
+        monitored_by: (monitored_by_ids.len() == 1).then(|| monitored_by_ids[0]),
+        target_version: None,
+        fixed_in_version: None,
+        sort: q
+            .sort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        dir: q
+            .dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        per_page: q
+            .per_page
+            .filter(|&v| v > 0)
+            .map(|pp| clamp_per_page(Some(pp))),
+        match_type: if q.match_type == Some(FILTER_MATCH_ANY) {
+            FILTER_MATCH_ANY
+        } else {
+            0
+        },
+        statuses: if statuses.len() > 1 {
+            statuses
+        } else {
+            Vec::new()
+        },
+        hide_statuses: q.hide_statuses.iter().copied().filter(|&v| v > 0).collect(),
+        priorities: if priorities.len() > 1 {
+            priorities
+        } else {
+            Vec::new()
+        },
+        severities: if severities.len() > 1 {
+            severities
+        } else {
+            Vec::new()
+        },
+        category_ids: if category_ids.len() > 1 {
+            category_ids
+        } else {
+            Vec::new()
+        },
+        reporter_ids: if reporter_ids.len() > 1 {
+            reporter_ids
+        } else {
+            Vec::new()
+        },
+        handler_ids: if handler_ids.len() > 1 {
+            handler_ids
+        } else {
+            Vec::new()
+        },
+        tag_ids: if tag_ids.len() > 1 {
+            tag_ids
+        } else {
+            Vec::new()
+        },
+        monitored_by_ids: if monitored_by_ids.len() > 1 {
+            monitored_by_ids
+        } else {
+            Vec::new()
+        },
+        resolutions: q.resolutions.iter().copied().filter(|&v| v > 0).collect(),
+        reproducibilities: q
+            .reproducibilities
+            .iter()
+            .copied()
+            .filter(|&v| v > 0)
+            .collect(),
+        view_state: q.view_state.filter(|&v| v == 10 || v == 50),
+        sticky: q.sticky.filter(|&v| v == 0 || v == 1),
+        versions: q
+            .versions
+            .iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != "[any]")
+            .collect(),
+        target_versions,
+        fixed_in_versions,
+        date_submitted_from: q
+            .date_submitted_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
+            .map(String::from),
+        date_submitted_to: q
+            .date_submitted_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
+            .map(String::from),
+        last_updated_from: q
+            .last_updated_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
+            .map(String::from),
+        last_updated_to: q
+            .last_updated_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
+            .map(String::from),
+        relationship_type: q.relationship_type.filter(|&rt| (-1..=6).contains(&rt)),
+        relationship_bug_id: q.relationship_bug_id.filter(|&id| id > 0),
+        note_user_ids: q.note_user_ids.iter().copied().filter(|&v| v > 0).collect(),
+        custom_fields: filtered_cfs,
+    }
+}
+
+enum FilterResolveError {
+    Forbidden(&'static str),
+    NotFound(&'static str),
+    Internal(&'static str),
+}
+
+fn resolve_bug_filter_inner(
+    db: &Db,
+    ctx: &AuthContext,
+    q: &ListBugsQuery,
+) -> Result<BugFilter, FilterResolveError> {
+    if let Some(fid) = q.filter_id.filter(|&id| id > 0) {
+        match db.get_filter(fid) {
+            Ok(Some((sf, mut bf))) => {
+                if sf.is_public == 0 && sf.user_id != ctx.user.id {
+                    return Err(FilterResolveError::Forbidden(
+                        "You do not have permission to view this private filter.",
+                    ));
+                }
+                if sf.project_id > 0
+                    && db
+                        .effective_access_level(&ctx.user, sf.project_id)
+                        .unwrap_or(0)
+                        < 10
+                {
+                    return Err(FilterResolveError::Forbidden(
+                        "You do not have access to this filter's project.",
+                    ));
+                }
+
                 if let Some(pid) = q.project_id.filter(|&v| v > 0) {
                     bf.project_id = Some(pid);
                 } else if ctx.active_project_id > 0 {
                     bf.project_id = Some(ctx.active_project_id);
-                }
-                if let Some(ref tv) = q.target_version {
-                    let trimmed = tv.trim();
-                    if !trimmed.is_empty() {
-                        bf.target_version = Some(trimmed.to_string());
+                } else if let Some(bf_pid) = bf.project_id.filter(|&p| p > 0) {
+                    if db.effective_access_level(&ctx.user, bf_pid).unwrap_or(0) < 10 {
+                        return Err(FilterResolveError::Forbidden(
+                            "You do not have access to this project.",
+                        ));
                     }
                 }
-                if let Some(ref fv) = q.fixed_in_version {
-                    let trimmed = fv.trim();
-                    if !trimmed.is_empty() {
-                        bf.fixed_in_version = Some(trimmed.to_string());
-                    }
+                let tv = q.effective_target_versions();
+                if !tv.is_empty() {
+                    bf.target_version = None;
+                    bf.target_versions = tv;
+                }
+                let fv = q.effective_fixed_in_versions();
+                if !fv.is_empty() {
+                    bf.fixed_in_version = None;
+                    bf.fixed_in_versions = fv;
                 }
                 if let Some(ref s) = q.sort {
                     let trimmed = s.trim();
@@ -194,63 +410,47 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
                         bf.per_page = Some(clamp_per_page(Some(pp)));
                     }
                 }
-                return bf;
+                let eff_pid = bf.project_id.unwrap_or(0);
+                let accessible_cf_ids: HashSet<i64> = db
+                    .list_accessible_custom_fields_for_user(&ctx.user, eff_pid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|cf| cf.filter_by != 0)
+                    .map(|cf| cf.id)
+                    .collect();
+                bf.retain_custom_fields(&accessible_cf_ids);
+                return Ok(bf);
             }
+            Ok(None) => return Err(FilterResolveError::NotFound("Saved filter not found.")),
+            Err(_) => return Err(FilterResolveError::Internal("Failed to load saved filter.")),
         }
     }
 
-    let kw =
-        q.q.clone()
-            .or_else(|| q.search.clone())
-            .filter(|s| !s.trim().is_empty());
+    Ok(filter_from_query(
+        db,
+        &ctx.user,
+        ctx.active_project_id,
+        q,
+        false,
+    ))
+}
 
-    BugFilter {
-        project_id: if let Some(pid) = q.project_id.filter(|&v| v > 0) {
-            Some(pid)
-        } else if ctx.active_project_id > 0 {
-            Some(ctx.active_project_id)
-        } else {
-            None
-        },
-        search: kw,
-        status: q.status.filter(|&v| v > 0),
-        hide_status: q.hide_status.filter(|&v| v > 0),
-        priority: q.priority.filter(|&v| v > 0),
-        severity: q.severity.filter(|&v| v > 0),
-        category_id: q.category_id.filter(|&v| v > 0),
-        reporter_id: q.reporter_id.filter(|&v| v > 0),
-        handler_id: q.handler_id.filter(|&v| v != 0),
-        tag_id: q.tag_id.filter(|&v| v > 0),
-        monitored_by: q.monitored_by.filter(|&v| v > 0),
-        target_version: q
-            .target_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
-        fixed_in_version: q
-            .fixed_in_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
-        sort: q
-            .sort
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
-        dir: q
-            .dir
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
-        per_page: q
-            .per_page
-            .filter(|&v| v > 0)
-            .map(|pp| clamp_per_page(Some(pp))),
-    }
+fn resolve_bug_filter(
+    db: &Db,
+    ctx: &AuthContext,
+    q: &ListBugsQuery,
+) -> Result<BugFilter, Box<Response>> {
+    resolve_bug_filter_inner(db, ctx, q).map_err(|err| match err {
+        FilterResolveError::Forbidden(msg) => Box::new(forbidden(ctx, msg)),
+        FilterResolveError::NotFound(msg) => Box::new(not_found(ctx, msg)),
+        FilterResolveError::Internal(msg) => Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::render_error_page(ctx, "Database Error", Some(msg), ""),
+            )
+                .into_response(),
+        ),
+    })
 }
 
 pub fn router() -> Router<Db> {
@@ -439,17 +639,23 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
     .into_response()
 }
 
-fn sanitize_csv_cell(val: &str) -> String {
+pub(crate) fn sanitize_spreadsheet_cell(val: &str) -> String {
     let trimmed = val.trim_start();
-    let needs_prefix = trimmed.starts_with('=')
+    let needs_prefix = val.starts_with('\t')
+        || val.starts_with('\r')
+        || trimmed.starts_with('=')
         || trimmed.starts_with('+')
         || trimmed.starts_with('-')
         || trimmed.starts_with('@');
-    let safe = if needs_prefix {
+    if needs_prefix {
         format!("'{}", val)
     } else {
         val.to_string()
-    };
+    }
+}
+
+fn sanitize_csv_cell(val: &str) -> String {
+    let safe = sanitize_spreadsheet_cell(val);
     if safe.contains(',') || safe.contains('"') || safe.contains('\n') || safe.contains('\r') {
         format!("\"{}\"", safe.replace('"', "\"\""))
     } else {
@@ -482,13 +688,17 @@ fn check_project_filter_access(
 pub async fn csv_export(
     State(db): State<Db>,
     ctx: AuthContext,
-    Query(q): Query<ListBugsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
+    let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
     if let Some(resp) = check_project_filter_access(&db, &ctx, q.project_id) {
         return resp;
     }
 
-    let filter = resolve_bug_filter(&db, &ctx, &q);
+    let filter = match resolve_bug_filter(&db, &ctx, &q) {
+        Ok(f) => f,
+        Err(res) => return *res,
+    };
     if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
         return resp;
     }
@@ -507,57 +717,196 @@ pub async fn csv_export(
         .or(filter.dir.as_deref());
     sort_bugs(&mut bugs, effective_sort, effective_dir);
 
+    let effective_project_id = filter.project_id.unwrap_or(ctx.active_project_id);
+    let accessible_cfs = db
+        .list_accessible_custom_fields_for_user(&ctx.user, effective_project_id)
+        .unwrap_or_default();
+    let accessible_cf_ids: HashSet<i64> = accessible_cfs.iter().map(|c| c.id).collect();
+    let raw_cols = db
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            effective_project_id,
+            ColumnContext::Csv,
+            &accessible_cf_ids,
+        )
+        .unwrap_or_else(|_| {
+            crate::models::default_columns_for_context(ColumnContext::Csv, effective_project_id)
+        });
+    let csv_cols: Vec<String> = raw_cols
+        .into_iter()
+        .filter(|c| c != "selection" && c != "edit")
+        .collect();
+
+    let cf_names: HashMap<i64, String> = accessible_cfs
+        .iter()
+        .map(|cf| (cf.id, cf.name.clone()))
+        .collect();
+    let cf_ids_in_cols: HashSet<i64> = csv_cols
+        .iter()
+        .filter_map(|c| parse_custom_field_column_id(c))
+        .collect();
+
+    let bug_ids: Vec<i64> = bugs.iter().map(|b| b.id).collect();
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
         .unwrap_or_default()
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
+    let projects_map: HashMap<i64, String> = ctx
+        .visible_projects
+        .iter()
+        .map(|(p, _)| (p.id, p.name.clone()))
+        .collect();
+    let categories_map = db.list_all_categories_map().unwrap_or_default();
 
-    let mut out = String::from(
-        "Id,Project,Reporter,Assigned To,Priority,Severity,Reproducibility,Status,Resolution,Category,Summary,Updated\r\n",
-    );
+    let cf_values_map = if !cf_ids_in_cols.is_empty() {
+        db.get_bugs_custom_field_values_map(&ctx.user, &bugs, &cf_ids_in_cols)
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let tags_map = if csv_cols.iter().any(|c| c == "tags") {
+        db.get_bugs_tags_map(&bug_ids).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let texts_map = if csv_cols.iter().any(|c| {
+        matches!(
+            c.as_str(),
+            "description" | "steps_to_reproduce" | "additional_information"
+        )
+    }) {
+        db.get_bugs_texts_map(&bug_ids).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let (note_counts, file_counts) = if csv_cols
+        .iter()
+        .any(|c| c == "bugnotes_count" || c == "attachment_count")
+    {
+        let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+        let mut eff_map = HashMap::with_capacity(bugs.len());
+        for b in &bugs {
+            let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
+                db.effective_access_level(&ctx.user, b.project_id)
+                    .unwrap_or(0)
+            });
+            eff_map.insert(b.id, eff);
+        }
+        db.get_bug_note_and_file_counts(&bug_ids, &eff_map)
+            .unwrap_or_default()
+    } else {
+        (HashMap::new(), HashMap::new())
+    };
+
+    let header_cells: Vec<String> = csv_cols
+        .iter()
+        .map(|col| {
+            let label = if let Some(cf_id) = parse_custom_field_column_id(col) {
+                cf_names.get(&cf_id).cloned().unwrap_or_else(|| col.clone())
+            } else {
+                crate::models::standard_column_label(col)
+                    .unwrap_or(col.as_str())
+                    .to_string()
+            };
+            sanitize_csv_cell(&label)
+        })
+        .collect();
+
+    let mut out = format!("{}\r\n", header_cells.join(","));
 
     for b in &bugs {
-        let proj = db
-            .get_project_by_id(b.project_id)
-            .ok()
-            .flatten()
-            .map(|p| p.name)
-            .unwrap_or_else(|| format!("#{}", b.project_id));
-        let rep = users_map
-            .get(&b.reporter_id)
-            .cloned()
-            .unwrap_or_else(|| format!("user#{}", b.reporter_id));
-        let handler = if b.handler_id > 0 {
-            users_map
-                .get(&b.handler_id)
-                .cloned()
-                .unwrap_or_else(|| format!("user#{}", b.handler_id))
-        } else {
-            String::new()
-        };
-        let cat = db
-            .get_category_by_id(b.category_id)
-            .ok()
-            .flatten()
-            .map(|c| c.name)
-            .unwrap_or_else(|| "General".to_string());
-
-        let row = [
-            format!("{:07}", b.id),
-            sanitize_csv_cell(&proj),
-            sanitize_csv_cell(&rep),
-            sanitize_csv_cell(&handler),
-            sanitize_csv_cell(views::bugs::priority_label(b.priority)),
-            sanitize_csv_cell(views::bugs::severity_label(b.severity)),
-            sanitize_csv_cell(views::bugs::reproducibility_label(b.reproducibility)),
-            sanitize_csv_cell(views::bugs::status_label(b.status)),
-            sanitize_csv_cell(views::bugs::resolution_label(b.resolution)),
-            sanitize_csv_cell(&cat),
-            sanitize_csv_cell(&b.summary),
-            b.last_updated.to_string(),
-        ];
+        let mut row = Vec::with_capacity(csv_cols.len());
+        for col in &csv_cols {
+            let cell = match col.as_str() {
+                "id" => format!("{:07}", b.id),
+                "project_id" => sanitize_csv_cell(
+                    projects_map
+                        .get(&b.project_id)
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                ),
+                "reporter_id" => sanitize_csv_cell(
+                    users_map
+                        .get(&b.reporter_id)
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                ),
+                "handler_id" => {
+                    if b.handler_id > 0 {
+                        sanitize_csv_cell(
+                            users_map
+                                .get(&b.handler_id)
+                                .map(String::as_str)
+                                .unwrap_or(""),
+                        )
+                    } else {
+                        String::new()
+                    }
+                }
+                "priority" => sanitize_csv_cell(views::bugs::priority_label(b.priority)),
+                "severity" => sanitize_csv_cell(views::bugs::severity_label(b.severity)),
+                "reproducibility" => {
+                    sanitize_csv_cell(views::bugs::reproducibility_label(b.reproducibility))
+                }
+                "status" => sanitize_csv_cell(views::bugs::status_label(b.status)),
+                "resolution" => sanitize_csv_cell(views::bugs::resolution_label(b.resolution)),
+                "view_state" => sanitize_csv_cell(if b.view_state == 50 {
+                    "private"
+                } else {
+                    "public"
+                }),
+                "category_id" => sanitize_csv_cell(
+                    categories_map
+                        .get(&b.category_id)
+                        .map(String::as_str)
+                        .unwrap_or("General"),
+                ),
+                "version" => sanitize_csv_cell(&b.version),
+                "target_version" => sanitize_csv_cell(&b.target_version),
+                "fixed_in_version" => sanitize_csv_cell(&b.fixed_in_version),
+                "build" => sanitize_csv_cell(&b.build),
+                "platform" => sanitize_csv_cell(&b.platform),
+                "os" => sanitize_csv_cell(&b.os),
+                "os_build" => sanitize_csv_cell(&b.os_build),
+                "date_submitted" => sanitize_csv_cell(&views::format_timestamp(b.date_submitted)),
+                "last_updated" => b.last_updated.to_string(),
+                "due_date" => sanitize_csv_cell(&views::format_date(b.due_date)),
+                "sticky" => (if b.sticky == 1 { "yes" } else { "no" }).to_string(),
+                "bugnotes_count" => note_counts.get(&b.id).copied().unwrap_or(0).to_string(),
+                "attachment_count" => file_counts.get(&b.id).copied().unwrap_or(0).to_string(),
+                "tags" => {
+                    let joined = tags_map
+                        .get(&b.id)
+                        .map(|v| v.join(", "))
+                        .unwrap_or_default();
+                    sanitize_csv_cell(&joined)
+                }
+                "summary" => sanitize_csv_cell(&b.summary),
+                "description" => {
+                    sanitize_csv_cell(texts_map.get(&b.id).map(|t| t.0.as_str()).unwrap_or(""))
+                }
+                "steps_to_reproduce" => {
+                    sanitize_csv_cell(texts_map.get(&b.id).map(|t| t.1.as_str()).unwrap_or(""))
+                }
+                "additional_information" => {
+                    sanitize_csv_cell(texts_map.get(&b.id).map(|t| t.2.as_str()).unwrap_or(""))
+                }
+                other => {
+                    if let Some(cf_id) = parse_custom_field_column_id(other) {
+                        let val = cf_values_map
+                            .get(&(b.id, cf_id))
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        sanitize_csv_cell(val)
+                    } else {
+                        String::new()
+                    }
+                }
+            };
+            row.push(cell);
+        }
         out.push_str(&row.join(","));
         out.push_str("\r\n");
     }
@@ -579,13 +928,27 @@ pub async fn csv_export(
 pub async fn view_all_bug_page(
     State(db): State<Db>,
     ctx: AuthContext,
-    Query(q): Query<ListBugsQuery>,
+    RawQuery(raw_query): RawQuery,
 ) -> Response {
+    let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
     if let Some(resp) = check_project_filter_access(&db, &ctx, q.project_id) {
         return resp;
     }
 
-    let filter = resolve_bug_filter(&db, &ctx, &q);
+    let filter = match resolve_bug_filter_inner(&db, &ctx, &q) {
+        Ok(f) => f,
+        Err(FilterResolveError::Forbidden(msg)) => return forbidden(&ctx, msg),
+        Err(FilterResolveError::NotFound(_)) => {
+            return Redirect::to("/view_all_bug_page?err=Saved+filter+not+found").into_response();
+        }
+        Err(FilterResolveError::Internal(msg)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                views::render_error_page(&ctx, "Database Error", Some(msg), ""),
+            )
+                .into_response();
+        }
+    };
     if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
         return resp;
     }
@@ -660,7 +1023,7 @@ pub async fn view_all_bug_page(
 
     let all_tags = db.list_tags().unwrap_or_default();
     let saved_filters = db
-        .list_visible_filters(ctx.user.id, ctx.active_project_id)
+        .list_visible_filters_for_user(&ctx.user, ctx.active_project_id)
         .unwrap_or_default();
 
     let mut jira_links = HashMap::new();
@@ -686,10 +1049,125 @@ pub async fn view_all_bug_page(
     let (note_counts, file_counts) = db
         .get_bug_note_and_file_counts(&paged_bug_ids, &bug_access_levels)
         .unwrap_or_default();
+
+    let accessible_cfs = db
+        .list_accessible_custom_fields_for_user(&ctx.user, effective_project_id)
+        .unwrap_or_default();
+    let accessible_cf_ids: HashSet<i64> = accessible_cfs.iter().map(|c| c.id).collect();
+    let view_columns = db
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            effective_project_id,
+            ColumnContext::View,
+            &accessible_cf_ids,
+        )
+        .unwrap_or_else(|_| {
+            crate::models::default_columns_for_context(ColumnContext::View, effective_project_id)
+        });
+    let project_versions_list = if effective_project_id > 0 {
+        db.list_versions(effective_project_id).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut filter_custom_fields = Vec::new();
+    let mut custom_field_labels = HashMap::new();
+    for cf in &accessible_cfs {
+        custom_field_labels.insert(
+            crate::models::custom_field_column_id(cf.id),
+            cf.name.clone(),
+        );
+        if cf.filter_by != 0 {
+            let opts = crate::models::resolve_possible_values(
+                &cf.possible_values,
+                &project_versions_list,
+                &cats,
+            );
+            filter_custom_fields.push((cf.clone(), opts));
+        }
+    }
+
+    let cf_ids_in_cols: HashSet<i64> = view_columns
+        .iter()
+        .filter_map(|c| parse_custom_field_column_id(c))
+        .collect();
+    let custom_field_values = if !cf_ids_in_cols.is_empty() {
+        db.get_bugs_custom_field_values_map(&ctx.user, &paged_bugs, &cf_ids_in_cols)
+            .unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let bug_tags_map = if view_columns.iter().any(|c| c == "tags") {
+        db.get_bugs_tags_map(&paged_bug_ids).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let bug_texts_map = if view_columns.iter().any(|c| {
+        matches!(
+            c.as_str(),
+            "description" | "steps_to_reproduce" | "additional_information"
+        )
+    }) {
+        db.get_bugs_texts_map(&paged_bug_ids).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+
+    let versions = db
+        .list_distinct_bug_versions_for_user(&ctx.user, effective_project_id)
+        .unwrap_or_default();
+
+    let can_save_public = if effective_project_id > 0 {
+        db.effective_access_level(&ctx.user, effective_project_id)
+            .unwrap_or(0)
+            >= 70
+    } else {
+        ctx.user.access_level >= 70
+    };
+    let can_save_filter = if effective_project_id > 0 {
+        db.effective_access_level(&ctx.user, effective_project_id)
+            .unwrap_or(0)
+            >= 25
+    } else if ctx.user.access_level >= 25 {
+        true
+    } else {
+        ctx.visible_projects
+            .iter()
+            .filter(|(p, _)| p.enabled != 0)
+            .any(|(p, _)| db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 25)
+    };
+    let mut deletable_filter_ids = HashSet::new();
+    for sf in &saved_filters {
+        let can_del = if sf.is_public == 0 {
+            sf.user_id == ctx.user.id || ctx.user.access_level >= 90
+        } else if sf.user_id == ctx.user.id {
+            true
+        } else if sf.project_id > 0 {
+            *eff_cache.entry(sf.project_id).or_insert_with(|| {
+                db.effective_access_level(&ctx.user, sf.project_id)
+                    .unwrap_or(0)
+            }) >= 70
+        } else {
+            ctx.user.access_level >= 70
+        };
+        if can_del {
+            deletable_filter_ids.insert(sf.id);
+        }
+    }
+
     let meta = views::bugs::ViewIssuesMeta {
         note_counts,
         file_counts,
         editable_bug_ids,
+        columns: view_columns,
+        versions,
+        filter_custom_fields,
+        custom_field_labels,
+        custom_field_values,
+        bug_tags_map,
+        bug_texts_map,
+        can_save_public: Some(can_save_public),
+        can_save_filter: Some(can_save_filter),
+        deletable_filter_ids: Some(deletable_filter_ids),
     };
 
     views::bugs::render_view_all_bug_page(

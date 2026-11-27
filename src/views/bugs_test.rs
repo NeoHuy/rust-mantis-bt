@@ -2005,3 +2005,115 @@ fn test_view_all_bug_page_counts_and_renders_version_scope_chips() {
     ));
     assert_no_nested_forms(&html_saved);
 }
+
+#[test]
+fn test_render_view_all_bug_page_advanced_filters_and_custom_columns() {
+    let mut ctx = dummy_ctx(1, 70);
+    ctx.active_project_id = 1;
+    let bug = Bug {
+        id: 21,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 2,
+        duplicate_id: 0,
+        priority: 50,
+        severity: 60,
+        reproducibility: 10,
+        status: 50,
+        resolution: 20,
+        os: "macOS".to_string(),
+        os_build: "15.1".to_string(),
+        platform: "arm64".to_string(),
+        version: "v1.0".to_string(),
+        fixed_in_version: "v1.1".to_string(),
+        target_version: "v2.0".to_string(),
+        build: "b42".to_string(),
+        summary: "Custom col test".to_string(),
+        view_state: 10,
+        sticky: 0,
+        category_id: 1,
+        date_submitted: 1700000000,
+        due_date: 0,
+        last_updated: 1700000300,
+    };
+    let cf = CustomField {
+        id: 9,
+        name: "Browser".to_string(),
+        field_type: 3,
+        possible_values: "Chrome|Firefox".to_string(),
+        default_value: String::new(),
+        valid_regexp: String::new(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 0,
+        require_report: 0,
+        require_update: 0,
+        display_report: 1,
+        display_update: 1,
+        require_resolved: 0,
+        display_resolved: 0,
+        display_closed: 0,
+        require_closed: 0,
+        filter_by: 1,
+    };
+    let mut custom_field_labels = HashMap::new();
+    custom_field_labels.insert("custom_field_9".to_string(), "Browser".to_string());
+    let mut custom_field_values = HashMap::new();
+    custom_field_values.insert((21, 9), "Firefox".to_string());
+    let meta = ViewIssuesMeta {
+        columns: vec![
+            "id".to_string(),
+            "resolution".to_string(),
+            "target_version".to_string(),
+            "custom_field_9".to_string(),
+            "summary".to_string(),
+        ],
+        versions: vec!["v1.0".to_string(), "v2.0".to_string()],
+        filter_custom_fields: vec![(cf, vec!["Chrome".to_string(), "Firefox".to_string()])],
+        custom_field_labels,
+        custom_field_values,
+        ..Default::default()
+    };
+
+    let mut filter = BugFilter {
+        match_type: FILTER_MATCH_ANY,
+        resolutions: vec![20],
+        date_submitted_from: Some("2026-01-01".to_string()),
+        ..Default::default()
+    };
+    filter.custom_fields.insert(9, vec!["Firefox".to_string()]);
+    let q = filter.to_list_query();
+
+    let Html(html) = render_view_all_bug_page(
+        &ctx,
+        &[bug],
+        1,
+        1,
+        25,
+        &filter,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q,
+        &meta,
+    );
+
+    assert!(html.contains(r#"href="/account_manage_columns_page""#));
+    assert!(html.contains(r#"href="/manage_filter_page""#));
+    assert!(html.contains("Firefox"));
+    assert!(html.contains("Browser"));
+    assert!(html.contains("v2.0"));
+    assert!(html.contains("name=\"match_type\""));
+    assert!(html.contains("name=\"date_submitted_from\""));
+    assert!(html.contains("name=\"relationship_type\""));
+    assert!(html.contains("name=\"custom_field_9\""));
+    assert_no_nested_forms(&html);
+}

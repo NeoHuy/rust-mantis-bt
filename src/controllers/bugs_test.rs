@@ -121,6 +121,7 @@ fn test_build_view_all_bug_page_url_preserves_all_parameters_and_replaces_page()
         sort: Some("priority".to_string()),
         dir: Some("asc".to_string()),
         per_page: Some(50),
+        ..Default::default()
     };
 
     let url = build_view_all_bug_page_url(&q, 3);
@@ -1236,4 +1237,16 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
         r#"<option value="{}" selected>former_dev</option>"#,
         former_dev_id
     )));
+}
+
+#[test]
+fn test_sanitize_spreadsheet_cell_tabs_returns_and_leading_whitespace() {
+    assert_eq!(sanitize_spreadsheet_cell("\t=1+1"), "'\t=1+1");
+    assert_eq!(sanitize_spreadsheet_cell("\r@SUM(A1)"), "'\r@SUM(A1)");
+    assert_eq!(
+        sanitize_spreadsheet_cell("  +cmd|'calc'!A0"),
+        "'  +cmd|'calc'!A0"
+    );
+    assert_eq!(sanitize_spreadsheet_cell("-1+1"), "'-1+1");
+    assert_eq!(sanitize_spreadsheet_cell("normal text"), "normal text");
 }

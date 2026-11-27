@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod bugs;
+pub mod columns;
 pub mod custom_fields;
 pub mod filters;
 pub mod jira;
@@ -406,6 +407,7 @@ pub fn router() -> Router<Db> {
         .merge(tags::router())
         .merge(custom_fields::router())
         .merge(filters::router())
+        .merge(columns::router())
         .merge(planning::router())
         .merge(api::router())
         .merge(jira::router())

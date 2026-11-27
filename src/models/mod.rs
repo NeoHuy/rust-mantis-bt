@@ -1,5 +1,6 @@
 pub mod api;
 pub mod bug;
+pub mod columns;
 pub mod custom_field;
 pub mod filter;
 pub mod jira;
@@ -11,6 +12,7 @@ pub mod user;
 
 pub use api::*;
 pub use bug::*;
+pub use columns::*;
 pub use custom_field::*;
 pub use filter::*;
 pub use jira::*;

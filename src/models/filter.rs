@@ -54,6 +54,8 @@ pub struct ListBugsQuery {
     pub handler_id: Option<i64>,
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
+    #[serde(default)]
+    pub commented_by: Option<i64>,
     pub target_version: Option<String>,
     pub fixed_in_version: Option<String>,
     pub msg: Option<String>,
@@ -217,6 +219,11 @@ fn append_common_filter_params(q: &ListBugsQuery, params: &mut Vec<String>) {
     if let Some(monitored_by) = q.monitored_by {
         if monitored_by > 0 {
             params.push(format!("monitored_by={}", monitored_by));
+        }
+    }
+    if let Some(commented_by) = q.commented_by {
+        if commented_by > 0 {
+            params.push(format!("commented_by={}", commented_by));
         }
     }
     if let Some(ref tv) = q.target_version {

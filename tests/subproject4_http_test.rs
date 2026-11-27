@@ -631,7 +631,7 @@ async fn test_phase3_m3_extended_summary_and_svg_graphs_with_rbac() {
         )
         .unwrap();
 
-    let app = build_router(db);
+    let app = build_router(db.clone());
     let admin_cookie = login_as_admin(&app).await;
     let rep_cookie = login_with_creds(&app, "sum_rep", "pw123").await;
 
@@ -688,6 +688,8 @@ async fn test_phase3_m3_extended_summary_and_svg_graphs_with_rbac() {
     assert!(rep_html.contains("Overview (Total Issues: 2)"));
     assert!(!rep_html.contains("SummaryPriv"));
     assert!(!rep_html.contains("Hidden Private Proj Issue"));
+    assert!(!rep_html.contains("By Reporter"));
+    assert!(!rep_html.contains("By Developer / Handler"));
     assert!(!rep_html.contains("Developer &times; Resolution Breakdown"));
     assert!(!rep_html.contains("Reporter Effectiveness"));
 
@@ -766,7 +768,141 @@ async fn test_phase3_m3_extended_summary_and_svg_graphs_with_rbac() {
     assert!(rep_priv_html.contains("Overview (Total Issues: 2)"));
     assert!(!rep_priv_html.contains("SummaryPriv"));
     assert!(!rep_priv_html.contains("Hidden Private Proj Issue"));
+    assert!(!rep_priv_html.contains("By Reporter"));
+    assert!(!rep_priv_html.contains("By Developer / Handler"));
     assert!(!rep_priv_html.contains("Developer &times; Resolution Breakdown"));
+
+    // Demoted subproject Manager does NOT see per-user metrics on parent summary
+    let sub_p = db
+        .create_project("DemotedSubSummary", 10, 10, "", true)
+        .unwrap();
+    db.add_subproject(pub_proj, sub_p, true).unwrap();
+    let sub_mgr_id = db
+        .create_user(
+            "demoted_mgr",
+            "Demoted Mgr",
+            "dmgr@test.com",
+            "pw123",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    db.set_project_user(pub_proj, sub_mgr_id, 70).unwrap();
+    db.set_project_user(sub_p, sub_mgr_id, 25).unwrap();
+    let sub_mgr_cookie = format!(
+        "{}; MANTIS_PROJECT_COOKIE={}",
+        login_with_creds(&app, "demoted_mgr", "pw123")
+            .await
+            .split(';')
+            .next()
+            .unwrap(),
+        pub_proj
+    );
+    let res_dmgr = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/summary_page")
+                .header("cookie", &sub_mgr_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_dmgr.status(), StatusCode::OK);
+    let dmgr_html = String::from_utf8(
+        axum::body::to_bytes(res_dmgr.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!dmgr_html.contains("By Reporter"));
+    assert!(!dmgr_html.contains("By Developer / Handler"));
+    assert!(!dmgr_html.contains("Developer &times; Resolution Breakdown"));
+
+    // MyComments box links to commented_by filter and /view_all_bug_page?commented_by= filters issues
+    let rep_user = db.get_user_by_username("sum_rep").unwrap().unwrap();
+    let b_uncommented = db
+        .create_bug(
+            pub_proj,
+            admin.id,
+            1,
+            "Summary Uncommented Issue",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote_with_time(b1, rep_user.id, "Reporter comment", 10, 0)
+        .unwrap();
+    let _ = b_uncommented;
+
+    let res_cfg_mv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/my_view_config_update")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("enabled_my_comments=1&order_my_comments=1"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_cfg_mv.status(), StatusCode::SEE_OTHER);
+
+    let res_mv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/my_view_page")
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mv_html = String::from_utf8(
+        axum::body::to_bytes(res_mv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(mv_html.contains(&format!("/view_all_bug_page?commented_by={}", rep_user.id)));
+
+    let res_cb = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?commented_by={}", rep_user.id))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_cb.status(), StatusCode::OK);
+    let cb_html = String::from_utf8(
+        axum::body::to_bytes(res_cb.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(cb_html.contains("Public Summary Issue"));
+    assert!(!cb_html.contains("Summary Uncommented Issue"));
 }
 
 #[tokio::test]
@@ -853,7 +989,7 @@ async fn test_phase3_m3_billing_upgrade_subproject_rollup_and_exports() {
     db.add_bugnote_with_time(b_priv, admin.id, "Confidential child log", 10, 180)
         .unwrap();
 
-    let app = build_router(db);
+    let app = build_router(db.clone());
     let dev_cookie = set_project_cookie(
         &app,
         &login_with_creds(&app, "bill_dev", "pw123").await,

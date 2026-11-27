@@ -270,6 +270,8 @@ fn test_render_extended_summary_graphs_and_billing_exports() {
 
     let Html(sum_no_user) = render_summary_page_extended(&ctx, &summary, false);
     assert!(sum_no_user.contains("By Project"));
+    assert!(!sum_no_user.contains("By Reporter"));
+    assert!(!sum_no_user.contains("By Developer / Handler"));
     assert!(!sum_no_user.contains("Developer &times; Resolution Breakdown"));
     assert!(!sum_no_user.contains("Reporter Effectiveness"));
 

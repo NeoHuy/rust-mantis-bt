@@ -43,9 +43,32 @@ fn summary_access(db: &Db, ctx: &AuthContext) -> Result<bool, Box<Response>> {
         if eff < 10 {
             return Err(Box::new(forbidden(ctx, "Access denied to this project.")));
         }
-        Ok(eff >= 70)
+        let descendants = db
+            .list_project_descendant_ids(ctx.active_project_id)
+            .unwrap_or_else(|_| vec![ctx.active_project_id]);
+        let mut in_scope = Vec::new();
+        for pid in descendants {
+            let enabled = matches!(db.get_project_by_id(pid), Ok(Some(p)) if p.enabled != 0);
+            if enabled {
+                let peff = db.effective_access_level(&ctx.user, pid).unwrap_or(0);
+                if peff >= 10 {
+                    in_scope.push(peff);
+                }
+            }
+        }
+        if in_scope.is_empty() {
+            Ok(eff >= 70)
+        } else {
+            Ok(in_scope.iter().all(|&lvl| lvl >= 70))
+        }
     } else {
-        Ok(ctx.user.access_level >= 70)
+        let all_mgr = ctx.user.access_level >= 70
+            && ctx
+                .visible_projects
+                .iter()
+                .filter(|(p, _)| p.enabled != 0)
+                .all(|(p, _)| db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 70);
+        Ok(all_mgr)
     }
 }
 
@@ -218,9 +241,20 @@ fn load_extended_summary(db: &Db, ctx: &AuthContext, trend_days: i64) -> Extende
         .map(|(p, _)| (p.id, p.name.clone()))
         .collect();
 
+    let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+    let bug_access_levels: HashMap<i64, i32> = bugs
+        .iter()
+        .map(|b| {
+            let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
+                db.effective_access_level(&ctx.user, b.project_id)
+                    .unwrap_or(0)
+            });
+            (b.id, eff)
+        })
+        .collect();
     let bug_ids: Vec<i64> = bugs.iter().map(|b| b.id).collect();
     let (history_counts, resolved_at_map) = db
-        .get_bug_history_summary_stats(&bug_ids)
+        .get_bug_history_summary_stats(&bug_ids, &bug_access_levels)
         .unwrap_or_default();
     let now_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)

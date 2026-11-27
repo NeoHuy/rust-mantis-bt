@@ -814,13 +814,15 @@ pub fn render_summary_page_extended(
         &render_issues_trend_svg("Issues Trend", &summary.trend_points),
     );
 
-    let (rep_eff_slot, dev_res_slot) = if show_user_metrics {
+    let (rep_eff_slot, rep_slot, hnd_slot, dev_res_slot) = if show_user_metrics {
         (
             rep_eff_widget,
+            rep_widget,
+            hnd_widget,
             format!(r#"<div class="mt-4">{dev_res_widget}</div>"#),
         )
     } else {
-        (String::new(), String::new())
+        (String::new(), String::new(), String::new(), String::new())
     };
 
     let content = format!(
@@ -855,8 +857,8 @@ pub fn render_summary_page_extended(
             {longest_widget}
             {most_active_widget}
             {rep_eff_slot}
-            {rep_widget}
-            {hnd_widget}
+            {rep_slot}
+            {hnd_slot}
         </div>
         {dev_res_slot}"#,
         subnav = render_summary_subnav(false),
@@ -876,8 +878,8 @@ pub fn render_summary_page_extended(
         longest_widget = longest_widget,
         most_active_widget = most_active_widget,
         rep_eff_slot = rep_eff_slot,
-        rep_widget = rep_widget,
-        hnd_widget = hnd_widget,
+        rep_slot = rep_slot,
+        hnd_slot = hnd_slot,
         dev_res_slot = dev_res_slot,
     );
 

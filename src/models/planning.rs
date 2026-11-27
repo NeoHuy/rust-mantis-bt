@@ -178,6 +178,12 @@ pub struct BillingFilterOptions {
     pub hourly_rate: f64,
 }
 
+pub const MAX_TIME_TRACKING_MINUTES: i32 = 100_000;
+
+pub fn clamp_time_tracking_minutes(raw: i64) -> i32 {
+    raw.clamp(0, i64::from(MAX_TIME_TRACKING_MINUTES)) as i32
+}
+
 pub fn compute_billing_cost(minutes: i64, hourly_rate: f64) -> f64 {
     if hourly_rate.is_finite() && hourly_rate > 0.0 && minutes > 0 {
         let capped_rate = hourly_rate.min(1_000_000.0);

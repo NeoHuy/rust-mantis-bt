@@ -372,6 +372,7 @@ fn test_build_csv_export_url() {
         handler_id: Some(8),
         tag_id: Some(3),
         monitored_by: Some(4),
+        commented_by: None,
         target_version: Some("v2.0".to_string()),
         fixed_in_version: Some("v1.5".to_string()),
         msg: Some("flash_msg".to_string()),
@@ -1187,4 +1188,12 @@ fn test_compute_extended_summary_and_trend_math() {
         serde_json::from_str(r#"{"boxes":[{"key":"my_comments"}]}"#).unwrap();
     assert_eq!(partial_cfg.boxes.len(), 1);
     assert!(!partial_cfg.boxes[0].enabled);
+
+    // Time tracking clamping handles negative and u32-overflowing values safely
+    assert_eq!(clamp_time_tracking_minutes(-5), 0);
+    assert_eq!(clamp_time_tracking_minutes(90), 90);
+    assert_eq!(
+        clamp_time_tracking_minutes(4_294_967_356),
+        MAX_TIME_TRACKING_MINUTES
+    );
 }

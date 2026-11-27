@@ -77,4 +77,11 @@ fn test_render_charts_top_n_sorted_with_other_and_full_total() {
     assert!(donut.contains(&format!(">{}</text>", total)));
     assert!(donut.contains("Other"));
     assert!(!donut.contains("Cat09"));
+
+    // Real "Other" category in top items triggers "(combined)" suffix to avoid duplicate labels
+    let mut with_real_other = items.clone();
+    with_real_other[0].0 = "Other".to_string();
+    let collision_bar = render_horizontal_bar_chart("Collision Bar", &with_real_other);
+    assert!(collision_bar.contains(">Other<"));
+    assert!(collision_bar.contains("Other (combined)"));
 }

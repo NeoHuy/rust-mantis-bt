@@ -114,6 +114,7 @@ fn test_build_view_all_bug_page_url_preserves_all_parameters_and_replaces_page()
         handler_id: Some(-1),
         tag_id: Some(9),
         monitored_by: Some(2),
+        commented_by: None,
         target_version: Some("v2.0 beta".to_string()),
         fixed_in_version: Some("v1.9".to_string()),
         msg: Some("Ignored flash".to_string()),

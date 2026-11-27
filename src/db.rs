@@ -7106,10 +7106,12 @@ impl Db {
         )
     }
 
-    /// Returns `(history_counts, resolved_at_map)` in two chunked parameterized queries.
+    /// Returns `(history_counts, resolved_at_map)` in two chunked parameterized queries,
+    /// hiding private-bugnote and time-tracking history events when viewer access `< 55`.
     pub fn get_bug_history_summary_stats(
         &self,
         bug_ids: &[i64],
+        bug_access_levels: &HashMap<i64, i32>,
     ) -> rusqlite::Result<(HashMap<i64, usize>, HashMap<i64, i64>)> {
         let mut history_counts = HashMap::new();
         let mut resolved_at_map = HashMap::new();
@@ -7125,16 +7127,35 @@ impl Db {
                 chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
 
             let count_sql = format!(
-                "SELECT bug_id, COUNT(*) FROM mantis_bug_history_table WHERE bug_id IN ({}) GROUP BY bug_id",
+                "SELECT h.bug_id,
+                        COUNT(*) AS all_cnt,
+                        COALESCE(SUM(CASE
+                            WHEN h.field_name IN ('bugnote_view_state', 'time_tracking') THEN 0
+                            WHEN h.field_name IN ('bugnote_added', 'bugnote_updated')
+                                 AND EXISTS (
+                                     SELECT 1 FROM mantis_bugnote_table n
+                                     WHERE n.id = CAST(h.new_value AS INTEGER) AND n.view_state = 50
+                                 ) THEN 0
+                            ELSE 1
+                        END), 0) AS public_cnt
+                 FROM mantis_bug_history_table h
+                 WHERE h.bug_id IN ({})
+                 GROUP BY h.bug_id",
                 in_clause
             );
             let mut count_stmt = conn.prepare(&count_sql)?;
             let count_rows = count_stmt.query_map(params.as_slice(), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })?;
             for r in count_rows {
-                let (bid, cnt) = r?;
-                history_counts.insert(bid, cnt.max(0) as usize);
+                let (bid, all_cnt, public_cnt) = r?;
+                let eff = bug_access_levels.get(&bid).copied().unwrap_or(0);
+                let visible_cnt = if eff >= 55 { all_cnt } else { public_cnt };
+                history_counts.insert(bid, visible_cnt.max(0) as usize);
             }
 
             let res_sql = format!(
@@ -7180,7 +7201,7 @@ impl Db {
                     bug_summary: row.get(1)?,
                     user_id: row.get(2)?,
                     username: row.get(3)?,
-                    minutes: row.get(4)?,
+                    minutes: row.get::<_, i64>(4)?.clamp(0, i64::from(i32::MAX)) as i32,
                     date_submitted: row.get(5)?,
                     note: row.get(6)?,
                     project_id: row.get(7)?,
@@ -7207,7 +7228,7 @@ impl Db {
                     bug_summary: row.get(1)?,
                     user_id: row.get(2)?,
                     username: row.get(3)?,
-                    minutes: row.get(4)?,
+                    minutes: row.get::<_, i64>(4)?.clamp(0, i64::from(i32::MAX)) as i32,
                     date_submitted: row.get(5)?,
                     note: row.get(6)?,
                     project_id: row.get(7)?,
@@ -7296,7 +7317,7 @@ impl Db {
                     bug_summary: row.get(1)?,
                     user_id: row.get(2)?,
                     username: row.get(3)?,
-                    minutes: row.get(4)?,
+                    minutes: row.get::<_, i64>(4)?.clamp(0, i64::from(i32::MAX)) as i32,
                     date_submitted: row.get(5)?,
                     note: row.get(6)?,
                     project_id: row.get(7)?,

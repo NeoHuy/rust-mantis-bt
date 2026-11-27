@@ -633,7 +633,7 @@ fn my_view_box_link(kind: MyViewBox, user_id: i64) -> String {
         MyViewBox::Monitored => format!("/view_all_bug_page?monitored_by={}", user_id),
         MyViewBox::Feedback => format!("/view_all_bug_page?reporter_id={}&status=20", user_id),
         MyViewBox::Verify => format!("/view_all_bug_page?reporter_id={}&status=80", user_id),
-        MyViewBox::MyComments => "/view_all_bug_page".to_string(),
+        MyViewBox::MyComments => format!("/view_all_bug_page?commented_by={}", user_id),
     }
 }
 
@@ -921,6 +921,9 @@ fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
     if filter.monitored_by.unwrap_or(0) > 0 {
         count += 1;
     }
+    if filter.commented_by.unwrap_or(0) > 0 {
+        count += 1;
+    }
     if filter
         .target_version
         .as_deref()
@@ -963,6 +966,7 @@ fn build_clear_version_url(
             handler_id: filter.handler_id.filter(|&v| v != 0),
             tag_id: filter.tag_id.filter(|&v| v > 0),
             monitored_by: filter.monitored_by.filter(|&v| v > 0),
+            commented_by: filter.commented_by.filter(|&v| v > 0),
             target_version: filter.target_version.clone(),
             fixed_in_version: filter.fixed_in_version.clone(),
             sort: query.sort.clone(),
@@ -1521,6 +1525,12 @@ pub fn render_view_all_bug_page(
     if let Some(v) = filter.monitored_by.filter(|&x| x > 0) {
         quick_hidden_inputs.push_str(&format!(
             r#"<input type="hidden" name="monitored_by" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.commented_by.filter(|&x| x > 0) {
+        quick_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="commented_by" value="{}">"#,
             v
         ));
     }

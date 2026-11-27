@@ -205,6 +205,25 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
             .or_else(|| q.search.clone())
             .filter(|s| !s.trim().is_empty());
 
+    let commented_by = q.commented_by.filter(|&v| v > 0).map(|uid| {
+        let can_query_other = uid == ctx.user.id
+            || ctx.user.access_level >= 55
+            || q.project_id
+                .filter(|&p| p > 0)
+                .or(if ctx.active_project_id > 0 {
+                    Some(ctx.active_project_id)
+                } else {
+                    None
+                })
+                .map(|p| db.effective_access_level(&ctx.user, p).unwrap_or(0) >= 55)
+                .unwrap_or(false);
+        if can_query_other {
+            uid
+        } else {
+            ctx.user.id
+        }
+    });
+
     BugFilter {
         project_id: if let Some(pid) = q.project_id.filter(|&v| v > 0) {
             Some(pid)
@@ -223,7 +242,7 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         handler_id: q.handler_id.filter(|&v| v != 0),
         tag_id: q.tag_id.filter(|&v| v > 0),
         monitored_by: q.monitored_by.filter(|&v| v > 0),
-        commented_by: None,
+        commented_by,
         target_version: q
             .target_version
             .as_deref()
@@ -3047,7 +3066,6 @@ pub struct BugnoteAddForm {
 }
 
 fn parse_time_tracking_minutes(raw: Option<&str>) -> i32 {
-    const MAX_NOTE_MINUTES: i32 = 100_000;
     let s = match raw {
         Some(v) => v.trim(),
         None => return 0,
@@ -3056,13 +3074,11 @@ fn parse_time_tracking_minutes(raw: Option<&str>) -> i32 {
         return 0;
     }
     if let Some((hh, mm)) = s.split_once(':') {
-        let h = hh.trim().parse::<i32>().unwrap_or(0).max(0);
-        let m = mm.trim().parse::<i32>().unwrap_or(0).max(0);
-        h.saturating_mul(60)
-            .saturating_add(m)
-            .clamp(0, MAX_NOTE_MINUTES)
+        let h = hh.trim().parse::<i64>().unwrap_or(0).max(0);
+        let m = mm.trim().parse::<i64>().unwrap_or(0).max(0);
+        crate::models::clamp_time_tracking_minutes(h.saturating_mul(60).saturating_add(m))
     } else {
-        s.parse::<i32>().unwrap_or(0).clamp(0, MAX_NOTE_MINUTES)
+        crate::models::clamp_time_tracking_minutes(s.parse::<i64>().unwrap_or(0))
     }
 }
 

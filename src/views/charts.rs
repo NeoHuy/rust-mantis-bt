@@ -35,7 +35,12 @@ fn aggregate_chart_items<'a>(
         let other_sum: usize = sorted[keep..].iter().map(|(_, cnt, _)| *cnt).sum();
         sorted.truncate(keep);
         if other_sum > 0 {
-            sorted.push(("Other".to_string(), other_sum, "#9ca3af"));
+            let other_label = if sorted.iter().any(|(lbl, _, _)| lbl == "Other") {
+                "Other (combined)".to_string()
+            } else {
+                "Other".to_string()
+            };
+            sorted.push((other_label, other_sum, "#9ca3af"));
         }
     }
     (sorted, total)

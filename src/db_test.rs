@@ -4845,10 +4845,44 @@ fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
     assert!(!commented_ids.contains(&b_priv_child));
 
     let (hist_counts, resolved_at) = db
-        .get_bug_history_summary_stats(&[b_parent, b_pub_child])
+        .get_bug_history_summary_stats(&[b_parent, b_pub_child], &HashMap::new())
         .unwrap();
     assert!(hist_counts.get(&b_parent).copied().unwrap_or(0) >= 1);
     assert!(resolved_at.get(&b_parent).copied().unwrap_or(0) > 0);
+
+    // Private note history is excluded for viewers < 55 and visible for >= 55
+    let hist_priv_bug = db
+        .create_bug(
+            pub_child,
+            admin.id,
+            1,
+            "Priv note activity bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote_with_time(hist_priv_bug, admin.id, "Hidden note", 50, 45)
+        .unwrap();
+    let mut low_map = HashMap::new();
+    low_map.insert(hist_priv_bug, 25);
+    let (low_hist, _) = db
+        .get_bug_history_summary_stats(&[hist_priv_bug], &low_map)
+        .unwrap();
+    let mut dev_map = HashMap::new();
+    dev_map.insert(hist_priv_bug, 55);
+    let (dev_hist, _) = db
+        .get_bug_history_summary_stats(&[hist_priv_bug], &dev_map)
+        .unwrap();
+    assert!(dev_hist[&hist_priv_bug] > low_hist[&hist_priv_bug]);
 
     // 3. Billing filtered: dev with include_subprojects=true sees parent + pub_child, NOT priv_child
     let dev_rollup = db
@@ -4916,4 +4950,19 @@ fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
         .unwrap();
     assert_eq!(dev_scoped.len(), 1);
     assert_eq!(dev_scoped[0].id, b_pub_child);
+
+    // Oversized legacy time_tracking value (> i32::MAX) does not error out list_time_tracking_filtered
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+             VALUES (?1, ?2, 0, 10, 1700000000, 1700000000, 0, '', 3000000000)",
+            params![b_parent, dev_id],
+        )
+        .unwrap();
+    }
+    let big_entries = db
+        .list_time_tracking_filtered(&dev, parent_p, false, None, None)
+        .unwrap();
+    assert!(big_entries.iter().any(|e| e.minutes == i32::MAX));
 }

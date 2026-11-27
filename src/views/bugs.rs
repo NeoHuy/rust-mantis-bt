@@ -1,15 +1,19 @@
 use crate::auth::AuthContext;
 use crate::models::{
-    build_csv_export_url, build_view_all_bug_page_url, clamp_per_page, Bug, BugFile, BugFilter,
-    BugFull, BugHistory, BugPriority, BugRelationship, BugReproducibility, BugResolution,
-    BugRevision, BugSeverity, BugStatus, BugTag, Bugnote, Category, CustomField, CustomFieldValue,
-    JiraLink, ListBugsQuery, MyViewBox, MyViewConfig, ProjectVersion, RelationshipType,
-    SavedFilter, Tag, TimelineEvent, User, ViewState,
+    build_csv_export_url, build_excel_export_url, build_filter_permalink_url,
+    build_issues_rss_url_for, build_print_all_bug_page_url, build_view_all_bug_page_url,
+    build_word_export_url, clamp_per_page, default_columns_for_context,
+    parse_custom_field_column_id, sanitize_spreadsheet_cell, standard_column_label, Bug, BugFile,
+    BugFilter, BugFull, BugHistory, BugPriority, BugRelationship, BugReproducibility,
+    BugResolution, BugRevision, BugSeverity, BugStatus, BugTag, Bugnote, Category, ColumnContext,
+    CustomField, CustomFieldType, CustomFieldValue, JiraLink, ListBugsQuery, MyViewBox,
+    MyViewConfig, ProjectVersion, RelationshipType, SavedFilter, Tag, TimelineEvent, User,
+    ViewState, FILTER_MATCH_ANY,
 };
-use crate::views::html_escape;
 use crate::views::layout::render_layout;
 use crate::views::{
-    format_date, format_timestamp, render_status_badge, render_status_legend, status_color,
+    format_date, format_timestamp, html_escape, render_status_badge, render_status_legend,
+    status_color, xml_escape,
 };
 use axum::response::Html;
 use std::collections::{HashMap, HashSet};
@@ -254,6 +258,16 @@ pub struct ViewIssuesMeta {
     pub note_counts: HashMap<i64, usize>,
     pub file_counts: HashMap<i64, usize>,
     pub editable_bug_ids: HashSet<i64>,
+    pub columns: Vec<String>,
+    pub versions: Vec<String>,
+    pub filter_custom_fields: Vec<(CustomField, Vec<String>)>,
+    pub custom_field_labels: HashMap<String, String>,
+    pub custom_field_values: HashMap<(i64, i64), String>,
+    pub bug_tags_map: HashMap<i64, Vec<String>>,
+    pub bug_texts_map: HashMap<i64, (String, String, String)>,
+    pub can_save_public: Option<bool>,
+    pub can_save_filter: Option<bool>,
+    pub deletable_filter_ids: Option<HashSet<i64>>,
 }
 
 pub fn render_priority_icon(priority: i32) -> String {
@@ -884,7 +898,11 @@ fn render_sortable_th(q: &ListBugsQuery, sort_key: &str, label: &str) -> String 
     render_sortable_th_with_title(q, sort_key, label, None)
 }
 
-fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
+fn count_active_filters(
+    filter: &BugFilter,
+    query: &ListBugsQuery,
+    allowed_cf_ids: &HashSet<i64>,
+) -> usize {
     let mut count = 0;
     if filter
         .search
@@ -894,51 +912,97 @@ fn count_active_filters(filter: &BugFilter, query: &ListBugsQuery) -> usize {
     {
         count += 1;
     }
-    if filter.status.unwrap_or(0) > 0 {
+    if !filter.effective_statuses().is_empty() {
         count += 1;
     }
-    if filter.hide_status.unwrap_or(0) > 0 {
+    if filter.hide_status.unwrap_or(0) > 0 || !filter.effective_hide_statuses().is_empty() {
         count += 1;
     }
-    if filter.priority.unwrap_or(0) > 0 {
+    if !filter.effective_priorities().is_empty() {
         count += 1;
     }
-    if filter.severity.unwrap_or(0) > 0 {
+    if !filter.effective_severities().is_empty() {
         count += 1;
     }
-    if filter.category_id.unwrap_or(0) > 0 {
+    if !filter.effective_category_ids().is_empty() {
         count += 1;
     }
-    if filter.reporter_id.unwrap_or(0) > 0 {
+    if !filter.effective_reporter_ids().is_empty() {
         count += 1;
     }
-    if filter.handler_id.unwrap_or(0) != 0 {
+    if !filter.effective_handler_ids().is_empty() {
         count += 1;
     }
-    if filter.tag_id.unwrap_or(0) > 0 {
+    if !filter.effective_tag_ids().is_empty() {
         count += 1;
     }
-    if filter.monitored_by.unwrap_or(0) > 0 {
+    if !filter.effective_monitored_by_ids().is_empty() {
         count += 1;
     }
     if filter.commented_by.unwrap_or(0) > 0 {
         count += 1;
     }
+    if !filter.effective_resolutions().is_empty() {
+        count += 1;
+    }
+    if !filter.effective_reproducibilities().is_empty() {
+        count += 1;
+    }
+    if filter.view_state.filter(|&v| v == 10 || v == 50).is_some() {
+        count += 1;
+    }
+    if filter.sticky.filter(|&v| v == 0 || v == 1).is_some() {
+        count += 1;
+    }
+    if !filter.effective_versions().is_empty() {
+        count += 1;
+    }
+    if !filter.effective_target_versions().is_empty() {
+        count += 1;
+    }
+    if !filter.effective_fixed_in_versions().is_empty() {
+        count += 1;
+    }
     if filter
-        .target_version
+        .date_submitted_from
         .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+        .map(str::trim)
+        .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
+        .is_some()
+        || filter
+            .date_submitted_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
+            .is_some()
     {
         count += 1;
     }
     if filter
-        .fixed_in_version
+        .last_updated_from
         .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false)
+        .map(str::trim)
+        .filter(|s| crate::models::parse_date_filter_bound(s, false).is_some())
+        .is_some()
+        || filter
+            .last_updated_to
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| crate::models::parse_date_filter_bound(s, true).is_some())
+            .is_some()
     {
         count += 1;
+    }
+    if filter.relationship_type.is_some() || filter.relationship_bug_id.is_some() {
+        count += 1;
+    }
+    if !filter.effective_note_user_ids().is_empty() {
+        count += 1;
+    }
+    for (fid, vals) in &filter.custom_fields {
+        if allowed_cf_ids.contains(fid) && vals.iter().any(|s| !s.trim().is_empty()) {
+            count += 1;
+        }
     }
     if query.filter_id.unwrap_or(0) > 0 {
         count += 1;
@@ -954,61 +1018,46 @@ fn build_clear_version_url(
     let mut clear_q = if query.filter_id.unwrap_or(0) > 0 {
         // Materialize from the resolved effective filter (ignoring stale URL params and dropping
         // filter_id so clearing a version override or saved-filter version never snaps back).
-        ListBugsQuery {
-            project_id: filter.project_id.filter(|&v| v > 0),
-            search: filter.search.clone(),
-            status: filter.status.filter(|&v| v > 0),
-            hide_status: filter.hide_status.filter(|&v| v > 0),
-            priority: filter.priority.filter(|&v| v > 0),
-            severity: filter.severity.filter(|&v| v > 0),
-            category_id: filter.category_id.filter(|&v| v > 0),
-            reporter_id: filter.reporter_id.filter(|&v| v > 0),
-            handler_id: filter.handler_id.filter(|&v| v != 0),
-            tag_id: filter.tag_id.filter(|&v| v > 0),
-            monitored_by: filter.monitored_by.filter(|&v| v > 0),
-            commented_by: filter.commented_by.filter(|&v| v > 0),
-            target_version: filter.target_version.clone(),
-            fixed_in_version: filter.fixed_in_version.clone(),
-            sort: query.sort.clone(),
-            dir: query.dir.clone(),
-            per_page: query.per_page,
-            ..Default::default()
-        }
+        let mut materialized = filter.to_list_query();
+        materialized.sort = query.sort.clone();
+        materialized.dir = query.dir.clone();
+        materialized.per_page = query.per_page;
+        materialized
     } else {
         query.clone()
     };
 
     if clear_target {
         clear_q.target_version = None;
+        clear_q.target_versions.clear();
     } else {
         clear_q.fixed_in_version = None;
+        clear_q.fixed_in_versions.clear();
     }
     build_view_all_bug_page_url(&clear_q, 1)
 }
 
 fn render_version_scope_bar(filter: &BugFilter, query: &ListBugsQuery) -> String {
     let mut chips = String::new();
-    if let Some(ref tv) = filter.target_version {
-        let trimmed = tv.trim();
-        if !trimmed.is_empty() {
-            let clear_url = build_clear_version_url(query, filter, true);
-            chips.push_str(&format!(
-                r#" <a class="btn btn-white btn-round btn-sm" href="{}" title="Clear Target Version filter">Target Version: {} <i class="fa fa-times" aria-hidden="true"></i></a>"#,
-                html_escape(&clear_url),
-                html_escape(trimmed)
-            ));
-        }
+    let tvs = filter.effective_target_versions();
+    if !tvs.is_empty() {
+        let clear_url = build_clear_version_url(query, filter, true);
+        let label = tvs.join(", ");
+        chips.push_str(&format!(
+            r#" <a class="btn btn-white btn-round btn-sm" href="{}" title="Clear Target Version filter">Target Version: {} <i class="fa fa-times" aria-hidden="true"></i></a>"#,
+            html_escape(&clear_url),
+            html_escape(&label)
+        ));
     }
-    if let Some(ref fv) = filter.fixed_in_version {
-        let trimmed = fv.trim();
-        if !trimmed.is_empty() {
-            let clear_url = build_clear_version_url(query, filter, false);
-            chips.push_str(&format!(
-                r#" <a class="btn btn-white btn-round btn-sm" href="{}" title="Clear Fixed in Version filter">Fixed in Version: {} <i class="fa fa-times" aria-hidden="true"></i></a>"#,
-                html_escape(&clear_url),
-                html_escape(trimmed)
-            ));
-        }
+    let fvs = filter.effective_fixed_in_versions();
+    if !fvs.is_empty() {
+        let clear_url = build_clear_version_url(query, filter, false);
+        let label = fvs.join(", ");
+        chips.push_str(&format!(
+            r#" <a class="btn btn-white btn-round btn-sm" href="{}" title="Clear Fixed in Version filter">Fixed in Version: {} <i class="fa fa-times" aria-hidden="true"></i></a>"#,
+            html_escape(&clear_url),
+            html_escape(&label)
+        ));
     }
     if chips.is_empty() {
         String::new()
@@ -1018,6 +1067,645 @@ fn render_version_scope_bar(filter: &BugFilter, query: &ListBugsQuery) -> String
             chips
         )
     }
+}
+
+fn render_buglist_header_cell(
+    col: &str,
+    query: &ListBugsQuery,
+    cf_labels: &HashMap<String, String>,
+) -> String {
+    match col {
+        "selection" => {
+            r#"<th class="w-7 text-center"><input type="checkbox" id="select_all_bugs" title="Select All"></th>"#.to_string()
+        }
+        "edit" => r#"<th class="w-7 text-center" title="Edit">&nbsp;</th>"#.to_string(),
+        "priority" => render_sortable_th_with_title(query, "priority", "P", Some("Priority")),
+        "id" => render_sortable_th(query, "id", "ID"),
+        "bugnotes_count" => {
+            r#"<th class="w-8 text-center" title="Notes"><i class="fa fa-comment-o" aria-hidden="true"></i></th>"#.to_string()
+        }
+        "attachment_count" => {
+            r#"<th class="w-8 text-center" title="Attachments"><i class="fa fa-paperclip" aria-hidden="true"></i></th>"#.to_string()
+        }
+        "severity" => render_sortable_th(query, "severity", "Severity"),
+        "status" => render_sortable_th(query, "status", "Status"),
+        "last_updated" => render_sortable_th(query, "last_updated", "Updated"),
+        "summary" => render_sortable_th(query, "summary", "Summary"),
+        "resolution" | "reproducibility" | "view_state" | "date_submitted" | "due_date" => {
+            let label = standard_column_label(col).unwrap_or(col);
+            render_sortable_th(query, col, label)
+        }
+        other => {
+            let label = if parse_custom_field_column_id(other).is_some() {
+                cf_labels
+                    .get(other)
+                    .map(String::as_str)
+                    .unwrap_or(other)
+            } else {
+                standard_column_label(other).unwrap_or(other)
+            };
+            format!(r#"<th class="whitespace-nowrap">{}</th>"#, html_escape(label))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_buglist_data_cell(
+    col: &str,
+    b: &Bug,
+    show_handler_in_status: bool,
+    projects_map: &HashMap<i64, String>,
+    categories_map: &HashMap<i64, String>,
+    users_map: &HashMap<i64, String>,
+    jira_links: &HashMap<i64, JiraLink>,
+    meta: &ViewIssuesMeta,
+) -> String {
+    let resolved_cls = if b.status >= 80 {
+        " issue-link-resolved"
+    } else {
+        ""
+    };
+    let handler_name = if b.handler_id > 0 {
+        users_map
+            .get(&b.handler_id)
+            .cloned()
+            .unwrap_or_else(|| format!("user#{}", b.handler_id))
+    } else {
+        String::new()
+    };
+
+    match col {
+        "selection" => format!(
+            r#"<td class="text-center"><input type="checkbox" name="bug_arr" value="{}"></td>"#,
+            b.id
+        ),
+        "edit" => {
+            if meta.editable_bug_ids.contains(&b.id) {
+                format!(
+                    r#"<td class="text-center"><a href="/update_bug_page/{}" class="text-gray-600 hover:text-blue-600" title="Edit"><i class="fa fa-pencil" aria-hidden="true"></i></a></td>"#,
+                    b.id
+                )
+            } else {
+                r#"<td class="text-center">&nbsp;</td>"#.to_string()
+            }
+        }
+        "priority" => format!(
+            r#"<td class="text-center">{}</td>"#,
+            render_priority_icon(b.priority)
+        ),
+        "id" => {
+            let sticky_pin = if b.sticky == 1 {
+                r#" <i class="fa fa-thumb-tack text-amber-600" title="Sticky" aria-hidden="true"></i>"#
+            } else {
+                ""
+            };
+            format!(
+                r#"<td class="whitespace-nowrap"><a href="/view_bug_page/{}" class="font-bold{}">{:07}</a>{}</td>"#,
+                b.id, resolved_cls, b.id, sticky_pin
+            )
+        }
+        "bugnotes_count" => {
+            let note_cnt = meta.note_counts.get(&b.id).copied().unwrap_or(0);
+            if note_cnt > 0 {
+                format!(
+                    r#"<td class="text-center"><a href="/view_bug_page/{}#bugnotes" class="font-semibold text-blue-700 hover:underline" title="{} note(s)">{}</a></td>"#,
+                    b.id, note_cnt, note_cnt
+                )
+            } else {
+                r#"<td class="text-center">&nbsp;</td>"#.to_string()
+            }
+        }
+        "attachment_count" => {
+            let file_cnt = meta.file_counts.get(&b.id).copied().unwrap_or(0);
+            if file_cnt > 0 {
+                format!(
+                    r#"<td class="text-center"><a href="/view_bug_page/{}#attachments" class="inline-flex items-center gap-0.5 text-blue-700 hover:underline" title="{} attachment(s)"><i class="fa fa-paperclip text-gray-500" aria-hidden="true"></i>{}</a></td>"#,
+                    b.id, file_cnt, file_cnt
+                )
+            } else {
+                r#"<td class="text-center">&nbsp;</td>"#.to_string()
+            }
+        }
+        "project_id" => {
+            let proj_name = projects_map
+                .get(&b.project_id)
+                .cloned()
+                .unwrap_or_else(|| format!("#{}", b.project_id));
+            format!(
+                r#"<td class="whitespace-nowrap">{}</td>"#,
+                html_escape(&proj_name)
+            )
+        }
+        "reporter_id" => {
+            let rep_name = users_map
+                .get(&b.reporter_id)
+                .cloned()
+                .unwrap_or_else(|| format!("user#{}", b.reporter_id));
+            format!(
+                r#"<td class="whitespace-nowrap">{}</td>"#,
+                html_escape(&rep_name)
+            )
+        }
+        "handler_id" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&handler_name)
+        ),
+        "category_id" => {
+            let cat_name = categories_map
+                .get(&b.category_id)
+                .cloned()
+                .unwrap_or_else(|| "General".to_string());
+            format!(
+                r#"<td class="whitespace-nowrap">{}</td>"#,
+                html_escape(&cat_name)
+            )
+        }
+        "severity" => {
+            let sev_str = html_escape(severity_label(b.severity));
+            let cell = if b.severity >= 60 {
+                format!(r#"<span class="font-bold text-red-700">{}</span>"#, sev_str)
+            } else {
+                sev_str
+            };
+            format!(r#"<td class="whitespace-nowrap">{}</td>"#, cell)
+        }
+        "status" => {
+            let status_square = render_status_square(b.status);
+            let handler_suffix = if show_handler_in_status && !handler_name.is_empty() {
+                format!(" ({})", html_escape(&handler_name))
+            } else {
+                String::new()
+            };
+            format!(
+                r#"<td class="whitespace-nowrap"><span class="inline-flex items-center gap-1.5">{}<span>{}{}</span></span></td>"#,
+                status_square,
+                html_escape(status_label(b.status)),
+                handler_suffix
+            )
+        }
+        "resolution" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(resolution_label(b.resolution))
+        ),
+        "reproducibility" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(reproducibility_label(b.reproducibility))
+        ),
+        "view_state" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            if b.view_state == 50 {
+                "private"
+            } else {
+                "public"
+            }
+        ),
+        "version" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&b.version)
+        ),
+        "target_version" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&b.target_version)
+        ),
+        "fixed_in_version" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&b.fixed_in_version)
+        ),
+        "build" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&b.build)
+        ),
+        "platform" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&b.platform)
+        ),
+        "os" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&b.os)
+        ),
+        "os_build" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            html_escape(&b.os_build)
+        ),
+        "date_submitted" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            format_timestamp(b.date_submitted)
+        ),
+        "last_updated" => format!(
+            r#"<td class="whitespace-nowrap">{}</td>"#,
+            format_timestamp(b.last_updated)
+        ),
+        "due_date" => {
+            let d = format_date(b.due_date);
+            format!(
+                r#"<td class="whitespace-nowrap">{}</td>"#,
+                if d.is_empty() {
+                    "-".to_string()
+                } else {
+                    html_escape(&d)
+                }
+            )
+        }
+        "sticky" => format!(
+            r#"<td class="text-center whitespace-nowrap">{}</td>"#,
+            if b.sticky == 1 { "yes" } else { "no" }
+        ),
+        "tags" => {
+            let tags_html = meta
+                .bug_tags_map
+                .get(&b.id)
+                .map(|tags| {
+                    tags.iter()
+                        .map(|t| {
+                            format!(
+                                r#"<span class="badge badge-info mr-1">{}</span>"#,
+                                html_escape(t)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            format!(r#"<td>{}</td>"#, tags_html)
+        }
+        "summary" => {
+            let priv_badge = if b.view_state == 50 {
+                r#" <span class="badge badge-warning">private</span>"#
+            } else {
+                ""
+            };
+            let sticky_badge = if b.sticky == 1 {
+                r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:10px; font-weight:bold; padding:2px 4px; border-radius:3px;">[Sticky]</span>"#
+            } else {
+                ""
+            };
+            let jira_badge = if let Some(jl) = jira_links.get(&b.id) {
+                format!(
+                    r#" <a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; font-size:10px; text-decoration:none;">Jira: {}</a>"#,
+                    html_escape(&jl.jira_url),
+                    html_escape(&jl.jira_key)
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                r#"<td class="min-w-[200px]"><a href="/view_bug_page/{}" class="font-medium hover:underline{}">{}</a>{}{}{}</td>"#,
+                b.id,
+                resolved_cls,
+                html_escape(&b.summary),
+                priv_badge,
+                sticky_badge,
+                jira_badge
+            )
+        }
+        "description" => {
+            let txt = meta
+                .bug_texts_map
+                .get(&b.id)
+                .map(|t| t.0.as_str())
+                .unwrap_or("");
+            format!(r#"<td class="text-xs">{}</td>"#, html_escape(txt))
+        }
+        "steps_to_reproduce" => {
+            let txt = meta
+                .bug_texts_map
+                .get(&b.id)
+                .map(|t| t.1.as_str())
+                .unwrap_or("");
+            format!(r#"<td class="text-xs">{}</td>"#, html_escape(txt))
+        }
+        "additional_information" => {
+            let txt = meta
+                .bug_texts_map
+                .get(&b.id)
+                .map(|t| t.2.as_str())
+                .unwrap_or("");
+            format!(r#"<td class="text-xs">{}</td>"#, html_escape(txt))
+        }
+        other => {
+            if let Some(cf_id) = parse_custom_field_column_id(other) {
+                let val = meta
+                    .custom_field_values
+                    .get(&(b.id, cf_id))
+                    .map(String::as_str)
+                    .unwrap_or("");
+                format!(r#"<td class="whitespace-nowrap">{}</td>"#, html_escape(val))
+            } else {
+                "<td></td>".to_string()
+            }
+        }
+    }
+}
+
+fn render_filter_hidden_inputs(
+    filter: &BugFilter,
+    cur_sort: &str,
+    cur_dir: &str,
+    cur_per_page_str: &str,
+    include_search: bool,
+    allowed_cf_ids: &HashSet<i64>,
+) -> String {
+    let mut out = String::new();
+    if include_search {
+        if let Some(ref s) = filter.search {
+            if !s.trim().is_empty() {
+                out.push_str(&format!(
+                    r#"<input type="hidden" name="search" value="{}">"#,
+                    html_escape(s)
+                ));
+            }
+        }
+    }
+    if filter.match_type == FILTER_MATCH_ANY {
+        out.push_str(r#"<input type="hidden" name="match_type" value="1">"#);
+    }
+    if !cur_sort.is_empty() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="sort" value="{}">"#,
+            html_escape(cur_sort)
+        ));
+    }
+    if !cur_dir.is_empty() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="dir" value="{}">"#,
+            html_escape(cur_dir)
+        ));
+    }
+    out.push_str(&format!(
+        r#"<input type="hidden" name="per_page" value="{}">"#,
+        cur_per_page_str
+    ));
+    for v in filter.effective_statuses() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="status" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.hide_status.filter(|&x| x > 0) {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="hide_status" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_hide_statuses() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="hide_statuses" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_priorities() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="priority" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_severities() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="severity" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_category_ids() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="category_id" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_reporter_ids() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="reporter_id" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_handler_ids() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="handler_id" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_tag_ids() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="tag_id" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_monitored_by_ids() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="monitored_by" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.commented_by.filter(|&x| x > 0) {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="commented_by" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_resolutions() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="resolution" value="{}">"#,
+            v
+        ));
+    }
+    for v in filter.effective_reproducibilities() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="reproducibility" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(vs) = filter.view_state.filter(|&v| v == 10 || v == 50) {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="view_state" value="{}">"#,
+            vs
+        ));
+    }
+    if let Some(st) = filter.sticky.filter(|&v| v == 0 || v == 1) {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="sticky" value="{}">"#,
+            st
+        ));
+    }
+    for v in filter.effective_versions() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="version" value="{}">"#,
+            html_escape(&v)
+        ));
+    }
+    for v in filter.effective_target_versions() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="target_version" value="{}">"#,
+            html_escape(&v)
+        ));
+    }
+    for v in filter.effective_fixed_in_versions() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="fixed_in_version" value="{}">"#,
+            html_escape(&v)
+        ));
+    }
+    if let Some(ref d) = filter.date_submitted_from {
+        if !d.trim().is_empty() {
+            out.push_str(&format!(
+                r#"<input type="hidden" name="date_submitted_from" value="{}">"#,
+                html_escape(d)
+            ));
+        }
+    }
+    if let Some(ref d) = filter.date_submitted_to {
+        if !d.trim().is_empty() {
+            out.push_str(&format!(
+                r#"<input type="hidden" name="date_submitted_to" value="{}">"#,
+                html_escape(d)
+            ));
+        }
+    }
+    if let Some(ref d) = filter.last_updated_from {
+        if !d.trim().is_empty() {
+            out.push_str(&format!(
+                r#"<input type="hidden" name="last_updated_from" value="{}">"#,
+                html_escape(d)
+            ));
+        }
+    }
+    if let Some(ref d) = filter.last_updated_to {
+        if !d.trim().is_empty() {
+            out.push_str(&format!(
+                r#"<input type="hidden" name="last_updated_to" value="{}">"#,
+                html_escape(d)
+            ));
+        }
+    }
+    if let Some(rt) = filter.relationship_type {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="relationship_type" value="{}">"#,
+            rt
+        ));
+    }
+    if let Some(rbid) = filter.relationship_bug_id.filter(|&id| id > 0) {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="relationship_bug_id" value="{}">"#,
+            rbid
+        ));
+    }
+    for v in filter.effective_note_user_ids() {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="note_user_id" value="{}">"#,
+            v
+        ));
+    }
+    for (fid, vals) in &filter.custom_fields {
+        if !allowed_cf_ids.contains(fid) {
+            continue;
+        }
+        for v in vals {
+            if !v.trim().is_empty() {
+                out.push_str(&format!(
+                    r#"<input type="hidden" name="custom_field_{}" value="{}">"#,
+                    fid,
+                    html_escape(v)
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn render_custom_field_filter_cell(
+    cf: &CustomField,
+    resolved_opts: &[String],
+    selected_vals: &[String],
+) -> String {
+    let input_html = match CustomFieldType::from_i32(cf.field_type) {
+        Some(CustomFieldType::Enum)
+        | Some(CustomFieldType::List)
+        | Some(CustomFieldType::Multilist)
+        | Some(CustomFieldType::Radio) => {
+            let mut opts_html = String::from(r#"<option value="">[any]</option>"#);
+            for opt in resolved_opts {
+                let sel = if selected_vals.iter().any(|v| v.eq_ignore_ascii_case(opt)) {
+                    "selected"
+                } else {
+                    ""
+                };
+                opts_html.push_str(&format!(
+                    r#"<option value="{}" {}>{}</option>"#,
+                    html_escape(opt),
+                    sel,
+                    html_escape(opt)
+                ));
+            }
+            format!(
+                r#"<select name="custom_field_{}" multiple size="3" class="text-xs">{}</select>"#,
+                cf.id, opts_html
+            )
+        }
+        Some(CustomFieldType::Checkbox) => {
+            let mut opts_html = String::from(r#"<option value="">[any]</option>"#);
+            if resolved_opts.is_empty() {
+                let sel_yes = if selected_vals
+                    .iter()
+                    .any(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                {
+                    "selected"
+                } else {
+                    ""
+                };
+                let sel_no = if selected_vals
+                    .iter()
+                    .any(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+                {
+                    "selected"
+                } else {
+                    ""
+                };
+                opts_html.push_str(&format!(
+                    r#"<option value="1" {}>yes</option><option value="0" {}>no</option>"#,
+                    sel_yes, sel_no
+                ));
+            } else {
+                for opt in resolved_opts {
+                    let sel = if selected_vals.iter().any(|v| v.eq_ignore_ascii_case(opt)) {
+                        "selected"
+                    } else {
+                        ""
+                    };
+                    opts_html.push_str(&format!(
+                        r#"<option value="{}" {}>{}</option>"#,
+                        html_escape(opt),
+                        sel,
+                        html_escape(opt)
+                    ));
+                }
+            }
+            format!(
+                r#"<select name="custom_field_{}" multiple size="3" class="text-xs">{}</select>"#,
+                cf.id, opts_html
+            )
+        }
+        Some(CustomFieldType::Date) => {
+            let val = selected_vals.first().map(String::as_str).unwrap_or("");
+            format!(
+                r#"<input type="date" name="custom_field_{}" value="{}" class="text-xs">"#,
+                cf.id,
+                html_escape(val)
+            )
+        }
+        _ => {
+            let val = selected_vals.first().map(String::as_str).unwrap_or("");
+            format!(
+                r#"<input type="text" name="custom_field_{}" value="{}" placeholder="Filter {}..." class="text-xs">"#,
+                cf.id,
+                html_escape(val),
+                html_escape(&cf.name)
+            )
+        }
+    };
+
+    format!(
+        r#"<div class="filter-cell"><span class="filter-label">{}</span>{}</div>"#,
+        html_escape(&cf.name),
+        input_html
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1042,8 +1730,13 @@ pub fn render_view_all_bug_page(
     meta: &ViewIssuesMeta,
 ) -> Html<String> {
     let offset = (page - 1) * per_page;
-    let show_project_col = ctx.active_project_id == 0;
-    let col_count = if show_project_col { 12 } else { 11 };
+    let active_columns = if meta.columns.is_empty() {
+        default_columns_for_context(ColumnContext::View, ctx.active_project_id)
+    } else {
+        meta.columns.clone()
+    };
+    let show_handler_in_status = !active_columns.iter().any(|c| c == "handler_id");
+    let col_count = active_columns.len().max(1);
 
     let mut rows_html = String::new();
     if bugs.is_empty() {
@@ -1054,146 +1747,20 @@ pub fn render_view_all_bug_page(
     } else {
         for (idx, b) in bugs.iter().enumerate() {
             let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
-            let proj_name = projects_map
-                .get(&b.project_id)
-                .cloned()
-                .unwrap_or_else(|| format!("#{}", b.project_id));
-            let cat_name = categories_map
-                .get(&b.category_id)
-                .cloned()
-                .unwrap_or_else(|| "General".to_string());
-            let handler_name = if b.handler_id > 0 {
-                users_map
-                    .get(&b.handler_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("user#{}", b.handler_id))
-            } else {
-                String::new()
-            };
-
-            let edit_cell = if meta.editable_bug_ids.contains(&b.id) {
-                format!(
-                    r#"<a href="/update_bug_page/{}" class="text-gray-600 hover:text-blue-600" title="Edit"><i class="fa fa-pencil" aria-hidden="true"></i></a>"#,
-                    b.id
-                )
-            } else {
-                "&nbsp;".to_string()
-            };
-
-            let priority_icon = render_priority_icon(b.priority);
-            let resolved_cls = if b.status >= 80 {
-                " issue-link-resolved"
-            } else {
-                ""
-            };
-            let sticky_pin = if b.sticky == 1 {
-                r#" <i class="fa fa-thumb-tack text-amber-600" title="Sticky" aria-hidden="true"></i>"#
-            } else {
-                ""
-            };
-
-            let note_cnt = meta.note_counts.get(&b.id).copied().unwrap_or(0);
-            let note_cell = if note_cnt > 0 {
-                format!(
-                    r#"<a href="/view_bug_page/{}#bugnotes" class="font-semibold text-blue-700 hover:underline" title="{} note(s)">{}</a>"#,
-                    b.id, note_cnt, note_cnt
-                )
-            } else {
-                "&nbsp;".to_string()
-            };
-
-            let file_cnt = meta.file_counts.get(&b.id).copied().unwrap_or(0);
-            let file_cell = if file_cnt > 0 {
-                format!(
-                    r#"<a href="/view_bug_page/{}#attachments" class="inline-flex items-center gap-0.5 text-blue-700 hover:underline" title="{} attachment(s)"><i class="fa fa-paperclip text-gray-500" aria-hidden="true"></i>{}</a>"#,
-                    b.id, file_cnt, file_cnt
-                )
-            } else {
-                "&nbsp;".to_string()
-            };
-
-            let proj_cell = if show_project_col {
-                format!(
-                    r#"<td class="whitespace-nowrap">{}</td>"#,
-                    html_escape(&proj_name)
-                )
-            } else {
-                String::new()
-            };
-
-            let sev_str = html_escape(severity_label(b.severity));
-            let severity_cell = if b.severity >= 60 {
-                format!(r#"<span class="font-bold text-red-700">{}</span>"#, sev_str)
-            } else {
-                sev_str
-            };
-
-            let status_square = render_status_square(b.status);
-            let handler_suffix = if !handler_name.is_empty() {
-                format!(" ({})", html_escape(&handler_name))
-            } else {
-                String::new()
-            };
-
-            let priv_badge = if b.view_state == 50 {
-                r#" <span class="badge badge-warning">private</span>"#
-            } else {
-                ""
-            };
-            let sticky_badge = if b.sticky == 1 {
-                r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:10px; font-weight:bold; padding:2px 4px; border-radius:3px;">[Sticky]</span>"#
-            } else {
-                ""
-            };
-            let jira_badge = if let Some(jl) = jira_links.get(&b.id) {
-                format!(
-                    r#" <a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; font-size:10px; text-decoration:none;">Jira: {}</a>"#,
-                    html_escape(&jl.jira_url),
-                    html_escape(&jl.jira_key)
-                )
-            } else {
-                String::new()
-            };
-
-            rows_html.push_str(&format!(
-                r#"<tr class="{}">
-                    <td class="text-center"><input type="checkbox" name="bug_arr" value="{}"></td>
-                    <td class="text-center">{}</td>
-                    <td class="text-center">{}</td>
-                    <td class="whitespace-nowrap"><a href="/view_bug_page/{}" class="font-bold{}">{:07}</a>{}</td>
-                    <td class="text-center">{}</td>
-                    <td class="text-center">{}</td>
-                    {}
-                    <td class="whitespace-nowrap">{}</td>
-                    <td class="whitespace-nowrap">{}</td>
-                    <td class="whitespace-nowrap"><span class="inline-flex items-center gap-1.5">{}<span>{}{}</span></span></td>
-                    <td class="whitespace-nowrap">{}</td>
-                    <td class="min-w-[200px]"><a href="/view_bug_page/{}" class="font-medium hover:underline{}">{}</a>{}{}{}</td>
-                </tr>"#,
-                row_class,
-                b.id,
-                edit_cell,
-                priority_icon,
-                b.id,
-                resolved_cls,
-                b.id,
-                sticky_pin,
-                note_cell,
-                file_cell,
-                proj_cell,
-                html_escape(&cat_name),
-                severity_cell,
-                status_square,
-                html_escape(status_label(b.status)),
-                handler_suffix,
-                format_timestamp(b.last_updated),
-                b.id,
-                resolved_cls,
-                html_escape(&b.summary),
-                priv_badge,
-                sticky_badge,
-                jira_badge
-            ));
+            let mut cells_html = String::new();
+            for col in &active_columns {
+                cells_html.push_str(&render_buglist_data_cell(
+                    col,
+                    b,
+                    show_handler_in_status,
+                    projects_map,
+                    categories_map,
+                    users_map,
+                    jira_links,
+                    meta,
+                ));
+            }
+            rows_html.push_str(&format!(r#"<tr class="{}">{}</tr>"#, row_class, cells_html));
         }
     }
 
@@ -1218,18 +1785,34 @@ pub fn render_view_all_bug_page(
         String::new()
     };
 
+    let sel_reporters = filter.effective_reporter_ids();
+    let sel_handlers = filter.effective_handler_ids();
+    let sel_monitors = filter.effective_monitored_by_ids();
+    let sel_note_users = filter.effective_note_user_ids();
+    let sel_categories = filter.effective_category_ids();
+    let sel_statuses = filter.effective_statuses();
+    let sel_priorities = filter.effective_priorities();
+    let sel_severities = filter.effective_severities();
+    let sel_tags = filter.effective_tag_ids();
+    let sel_resolutions = filter.effective_resolutions();
+    let sel_reproducibilities = filter.effective_reproducibilities();
+    let sel_versions = filter.effective_versions();
+    let sel_target_versions = filter.effective_target_versions();
+    let sel_fixed_versions = filter.effective_fixed_in_versions();
+
     let mut reporter_opts = String::from(r#"<option value="0">[any]</option>"#);
     let mut handler_opts = format!(
         r#"<option value="0">[any]</option><option value="-1" {}>[none]</option>"#,
-        if filter.handler_id == Some(-1) {
+        if sel_handlers.contains(&-1) {
             "selected"
         } else {
             ""
         }
     );
     let mut monitored_opts = String::from(r#"<option value="0">[any]</option>"#);
+    let mut note_user_opts = String::from(r#"<option value="0">[any]</option>"#);
     for u in all_users {
-        let rep_sel = if filter.reporter_id == Some(u.id) {
+        let rep_sel = if sel_reporters.contains(&u.id) {
             "selected"
         } else {
             ""
@@ -1240,7 +1823,7 @@ pub fn render_view_all_bug_page(
             rep_sel,
             html_escape(&u.username)
         ));
-        let h_sel = if filter.handler_id == Some(u.id) {
+        let h_sel = if sel_handlers.contains(&u.id) {
             "selected"
         } else {
             ""
@@ -1251,7 +1834,7 @@ pub fn render_view_all_bug_page(
             h_sel,
             html_escape(&u.username)
         ));
-        let m_sel = if filter.monitored_by == Some(u.id) {
+        let m_sel = if sel_monitors.contains(&u.id) {
             "selected"
         } else {
             ""
@@ -1262,11 +1845,22 @@ pub fn render_view_all_bug_page(
             m_sel,
             html_escape(&u.username)
         ));
+        let n_sel = if sel_note_users.contains(&u.id) {
+            "selected"
+        } else {
+            ""
+        };
+        note_user_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            u.id,
+            n_sel,
+            html_escape(&u.username)
+        ));
     }
 
     let mut cat_opts = String::from(r#"<option value="0">[any]</option>"#);
     for (cid, cname) in all_categories {
-        let sel = if filter.category_id == Some(*cid) {
+        let sel = if sel_categories.contains(cid) {
             "selected"
         } else {
             ""
@@ -1290,7 +1884,7 @@ pub fn render_view_all_bug_page(
         (80, "resolved"),
         (90, "closed"),
     ] {
-        let s_sel = if filter.status == Some(code) {
+        let s_sel = if sel_statuses.contains(&code) {
             "selected"
         } else {
             ""
@@ -1319,7 +1913,7 @@ pub fn render_view_all_bug_page(
         (50, "urgent"),
         (60, "immediate"),
     ] {
-        let sel = if filter.priority == Some(code) {
+        let sel = if sel_priorities.contains(&code) {
             "selected"
         } else {
             ""
@@ -1341,7 +1935,7 @@ pub fn render_view_all_bug_page(
         (70, "crash"),
         (80, "block"),
     ] {
-        let sel = if filter.severity == Some(code) {
+        let sel = if sel_severities.contains(&code) {
             "selected"
         } else {
             ""
@@ -1352,9 +1946,39 @@ pub fn render_view_all_bug_page(
         ));
     }
 
+    let mut resolution_opts = String::from(r#"<option value="0">[any]</option>"#);
+    for code in [10, 20, 30, 40, 50, 60, 70, 80, 90] {
+        let sel = if sel_resolutions.contains(&code) {
+            "selected"
+        } else {
+            ""
+        };
+        resolution_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code,
+            sel,
+            html_escape(resolution_label(code))
+        ));
+    }
+
+    let mut repro_opts = String::from(r#"<option value="0">[any]</option>"#);
+    for code in [10, 30, 50, 70, 90, 100] {
+        let sel = if sel_reproducibilities.contains(&code) {
+            "selected"
+        } else {
+            ""
+        };
+        repro_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code,
+            sel,
+            html_escape(reproducibility_label(code))
+        ));
+    }
+
     let mut tag_opts = String::from(r#"<option value="0">[any]</option>"#);
     for t in all_tags {
-        let sel = if filter.tag_id == Some(t.id) {
+        let sel = if sel_tags.contains(&t.id) {
             "selected"
         } else {
             ""
@@ -1365,6 +1989,117 @@ pub fn render_view_all_bug_page(
             sel,
             html_escape(&t.name)
         ));
+    }
+
+    let build_version_opts = |selected_list: &[String]| -> String {
+        let mut opts = format!(
+            r#"<option value="">[any]</option><option value="[none]" {}>[none]</option>"#,
+            if selected_list.iter().any(|v| v == "[none]") {
+                "selected"
+            } else {
+                ""
+            }
+        );
+        for v in &meta.versions {
+            let sel = if selected_list.contains(v) {
+                "selected"
+            } else {
+                ""
+            };
+            opts.push_str(&format!(
+                r#"<option value="{}" {}>{}</option>"#,
+                html_escape(v),
+                sel,
+                html_escape(v)
+            ));
+        }
+        for v in selected_list {
+            if v != "[none]" && !meta.versions.contains(v) {
+                opts.push_str(&format!(
+                    r#"<option value="{}" selected>{}</option>"#,
+                    html_escape(v),
+                    html_escape(v)
+                ));
+            }
+        }
+        opts
+    };
+    let version_opts = build_version_opts(&sel_versions);
+    let target_version_opts = build_version_opts(&sel_target_versions);
+    let fixed_version_opts = build_version_opts(&sel_fixed_versions);
+
+    let view_state_opts = format!(
+        r#"<option value="0" {}>[any]</option><option value="10" {}>public</option><option value="50" {}>private</option>"#,
+        if filter.view_state.is_none() {
+            "selected"
+        } else {
+            ""
+        },
+        if filter.view_state == Some(10) {
+            "selected"
+        } else {
+            ""
+        },
+        if filter.view_state == Some(50) {
+            "selected"
+        } else {
+            ""
+        }
+    );
+    let sticky_opts = format!(
+        r#"<option value="-1" {}>[any]</option><option value="1" {}>yes</option><option value="0" {}>no</option>"#,
+        if filter.sticky.is_none() {
+            "selected"
+        } else {
+            ""
+        },
+        if filter.sticky == Some(1) {
+            "selected"
+        } else {
+            ""
+        },
+        if filter.sticky == Some(0) {
+            "selected"
+        } else {
+            ""
+        }
+    );
+
+    let mut rel_type_opts = format!(
+        r#"<option value="" {}>[none]</option><option value="-1" {}>[any relationship]</option>"#,
+        if filter.relationship_type.is_none() {
+            "selected"
+        } else {
+            ""
+        },
+        if filter.relationship_type == Some(-1) {
+            "selected"
+        } else {
+            ""
+        }
+    );
+    for code in [0, 1, 2, 3, 4, 5, 6] {
+        let sel = if filter.relationship_type == Some(code) {
+            "selected"
+        } else {
+            ""
+        };
+        rel_type_opts.push_str(&format!(
+            r#"<option value="{}" {}>{}</option>"#,
+            code,
+            sel,
+            html_escape(relationship_label(code))
+        ));
+    }
+
+    let mut custom_field_cells = String::new();
+    for (cf, opts) in &meta.filter_custom_fields {
+        let selected_vals = filter
+            .custom_fields
+            .get(&cf.id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        custom_field_cells.push_str(&render_custom_field_filter_cell(cf, opts, selected_vals));
     }
 
     let mut saved_filters_html = String::new();
@@ -1382,7 +2117,14 @@ pub fn render_view_all_bug_page(
             sf_sel,
             html_escape(&sf.name)
         ));
-        let delete_btn = if sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
+        let can_del = meta
+            .deletable_filter_ids
+            .as_ref()
+            .map(|ids| ids.contains(&sf.id))
+            .unwrap_or_else(|| {
+                sf.user_id == ctx.user.id || (sf.is_public != 0 && ctx.user.access_level >= 70)
+            });
+        let delete_btn = if can_del {
             format!(
                 r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" data-confirm="Delete filter?" title="Delete filter">Delete</button></form>"#,
                 sf.id
@@ -1397,16 +2139,24 @@ pub fn render_view_all_bug_page(
             delete_btn
         ));
     }
-    let saved_filters_section = if saved_filters.is_empty() {
+    let can_save_filter = meta.can_save_filter.unwrap_or(ctx.user.access_level >= 25);
+    let can_save_public = meta.can_save_public.unwrap_or(ctx.user.access_level >= 70);
+    let manage_filters_btn = if can_save_filter {
+        r#"<a href="/manage_filter_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-sliders" aria-hidden="true"></i> Manage Filters</a>"#
+    } else {
+        ""
+    };
+    let saved_filters_section = if saved_filters.is_empty() && !can_save_filter {
         String::new()
     } else {
         format!(
             r#"<div class="flex flex-wrap items-center gap-2 mb-2">
                 <label class="text-xs font-semibold text-gray-700" for="saved_filter_select">Saved Filters:</label>
                 <select id="saved_filter_select" class="!w-auto text-xs">{}</select>
+                {}
                 <div class="flex flex-wrap items-center">{}</div>
             </div>"#,
-            saved_filter_select_opts, saved_filters_html
+            saved_filter_select_opts, manage_filters_btn, saved_filters_html
         )
     };
 
@@ -1469,21 +2219,22 @@ pub fn render_view_all_bug_page(
         .map(|(_, qs)| qs)
         .unwrap_or("");
 
-    let th_priority = render_sortable_th_with_title(query, "priority", "P", Some("Priority"));
-    let th_id = render_sortable_th(query, "id", "ID");
-    let th_project = if show_project_col {
-        r#"<th class="whitespace-nowrap">Project</th>"#
-    } else {
-        ""
-    };
-    let th_category = r#"<th class="whitespace-nowrap">Category</th>"#;
-    let th_severity = render_sortable_th(query, "severity", "Severity");
-    let th_status = render_sortable_th(query, "status", "Status");
-    let th_updated = render_sortable_th(query, "last_updated", "Updated");
-    let th_summary = render_sortable_th(query, "summary", "Summary");
+    let mut thead_cells = String::new();
+    for col in &active_columns {
+        thead_cells.push_str(&render_buglist_header_cell(
+            col,
+            query,
+            &meta.custom_field_labels,
+        ));
+    }
 
+    let allowed_cf_ids: HashSet<i64> = meta
+        .filter_custom_fields
+        .iter()
+        .map(|(cf, _)| cf.id)
+        .collect();
     let search_val = filter.search.as_deref().unwrap_or("");
-    let active_filter_count = count_active_filters(filter, query);
+    let active_filter_count = count_active_filters(filter, query, &allowed_cf_ids);
     let active_filter_badge = if active_filter_count > 0 {
         format!(
             r#"<span class="badge" style="background:#f89406; color:#ffffff;">Active ({})</span>"#,
@@ -1493,148 +2244,90 @@ pub fn render_view_all_bug_page(
         String::new()
     };
 
-    let mut quick_hidden_inputs = String::new();
-    if !cur_sort.is_empty() {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="sort" value="{}">"#,
-            html_escape(cur_sort)
-        ));
-    }
-    if !cur_dir.is_empty() {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="dir" value="{}">"#,
-            html_escape(cur_dir)
-        ));
-    }
-    quick_hidden_inputs.push_str(&format!(
-        r#"<input type="hidden" name="per_page" value="{}">"#,
-        cur_per_page_str
-    ));
-    if let Some(v) = filter.reporter_id.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="reporter_id" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.handler_id.filter(|&x| x != 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="handler_id" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.monitored_by.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="monitored_by" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.commented_by.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="commented_by" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.category_id.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="category_id" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.severity.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="severity" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.priority.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="priority" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.status.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="status" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.hide_status.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="hide_status" value="{}">"#,
-            v
-        ));
-    }
-    if let Some(v) = filter.tag_id.filter(|&x| x > 0) {
-        quick_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="tag_id" value="{}">"#,
-            v
-        ));
-    }
-
-    let mut version_scope_hidden_inputs = String::new();
-    if let Some(pid) = query.project_id.filter(|&x| x > 0) {
-        version_scope_hidden_inputs.push_str(&format!(
-            r#"<input type="hidden" name="project_id" value="{}">"#,
-            pid
-        ));
-    }
-    if let Some(ref tv) = filter.target_version {
-        let trimmed = tv.trim();
-        if !trimmed.is_empty() {
-            version_scope_hidden_inputs.push_str(&format!(
-                r#"<input type="hidden" name="target_version" value="{}">"#,
-                html_escape(trimmed)
-            ));
-        }
-    }
-    if let Some(ref fv) = filter.fixed_in_version {
-        let trimmed = fv.trim();
-        if !trimmed.is_empty() {
-            version_scope_hidden_inputs.push_str(&format!(
-                r#"<input type="hidden" name="fixed_in_version" value="{}">"#,
-                html_escape(trimmed)
-            ));
-        }
-    }
+    let version_scope_hidden_inputs = if let Some(pid) = query.project_id.filter(|&x| x > 0) {
+        format!(r#"<input type="hidden" name="project_id" value="{}">"#, pid)
+    } else {
+        String::new()
+    };
+    let mut quick_hidden_inputs = render_filter_hidden_inputs(
+        filter,
+        cur_sort,
+        cur_dir,
+        &cur_per_page_str,
+        false,
+        &allowed_cf_ids,
+    );
     quick_hidden_inputs.push_str(&version_scope_hidden_inputs);
+    let mut save_hidden_inputs = render_filter_hidden_inputs(
+        filter,
+        cur_sort,
+        cur_dir,
+        &cur_per_page_str,
+        true,
+        &allowed_cf_ids,
+    );
+    let save_project_hidden_inputs = if let Some(pid) = filter
+        .project_id
+        .filter(|&x| x > 0)
+        .or_else(|| query.project_id.filter(|&x| x > 0))
+    {
+        format!(r#"<input type="hidden" name="project_id" value="{}">"#, pid)
+    } else {
+        String::new()
+    };
+    save_hidden_inputs.push_str(&save_project_hidden_inputs);
 
-    let save_filter_form = if ctx.user.access_level >= 25 {
+    let mut adv_form_hidden_inputs = version_scope_hidden_inputs.clone();
+    for v in filter.effective_hide_statuses() {
+        adv_form_hidden_inputs.push_str(&format!(
+            r#"<input type="hidden" name="hide_statuses" value="{}">"#,
+            v
+        ));
+    }
+
+    let public_checkbox = if can_save_public {
+        r#"<label class="text-xs inline-flex items-center gap-1"><input type="checkbox" name="is_public" value="1"> Public</label>"#
+    } else {
+        ""
+    };
+    let save_filter_form = if can_save_filter {
         format!(
             r#"<form method="POST" action="/filter_save" class="flex flex-wrap gap-2 items-center mt-2">
-                <input type="hidden" name="search" value="{}">
-                <input type="hidden" name="status" value="{}">
-                <input type="hidden" name="hide_status" value="{}">
-                <input type="hidden" name="priority" value="{}">
-                <input type="hidden" name="severity" value="{}">
-                <input type="hidden" name="category_id" value="{}">
-                <input type="hidden" name="reporter_id" value="{}">
-                <input type="hidden" name="handler_id" value="{}">
-                <input type="hidden" name="tag_id" value="{}">
-                <input type="hidden" name="sort" value="{}">
-                <input type="hidden" name="dir" value="{}">
-                <input type="hidden" name="per_page" value="{}">
                 {}
                 <input type="text" name="name" placeholder="Saved filter name" class="!max-w-[180px]" required>
-                <label class="text-xs inline-flex items-center gap-1"><input type="checkbox" name="is_public" value="1"> Public</label>
+                {}
                 <button type="submit" class="btn btn-primary btn-sm">Save Current Filter</button>
             </form>"#,
-            html_escape(search_val),
-            filter.status.unwrap_or(0),
-            filter.hide_status.unwrap_or(0),
-            filter.priority.unwrap_or(0),
-            filter.severity.unwrap_or(0),
-            filter.category_id.unwrap_or(0),
-            filter.reporter_id.unwrap_or(0),
-            filter.handler_id.unwrap_or(0),
-            filter.tag_id.unwrap_or(0),
-            html_escape(cur_sort),
-            html_escape(cur_dir),
-            cur_per_page_str,
-            version_scope_hidden_inputs
+            save_hidden_inputs, public_checkbox
         )
     } else {
         String::new()
     };
+
+    let mut permalink_filter = filter.clone();
+    permalink_filter.retain_custom_fields(&allowed_cf_ids);
+    let permalink_url = build_filter_permalink_url(&permalink_filter, query.filter_id);
+    let permalink_bar = format!(
+        r#"<div class="flex flex-wrap items-center gap-2 mt-2">
+            <label for="filter_permalink_input" class="text-xs font-semibold text-gray-700"><i class="fa fa-link" aria-hidden="true"></i> Permalink:</label>
+            <input type="text" id="filter_permalink_input" value="{}" readonly class="!w-72 text-xs bg-gray-50">
+            <button type="button" class="btn btn-white btn-round btn-sm" data-copy-target="filter_permalink_input">Copy Link</button>
+        </div>"#,
+        html_escape(&permalink_url)
+    );
+
+    let match_all_sel = if filter.match_type != FILTER_MATCH_ANY {
+        "selected"
+    } else {
+        ""
+    };
+    let match_any_sel = if filter.match_type == FILTER_MATCH_ANY {
+        "selected"
+    } else {
+        ""
+    };
+
+    let rss_export_url = build_issues_rss_url_for(query, ctx.active_project_id);
 
     let range_badge = if bugs.is_empty() {
         format!("0 / {}", total)
@@ -1678,42 +2371,101 @@ pub fn render_view_all_bug_page(
                     <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3 pb-3 border-b border-gray-200">
                         <div class="filter-cell">
                             <span class="filter-label">Reporter</span>
-                            <select name="reporter_id">{}</select>
+                            <select name="reporter_id" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Assigned To</span>
-                            <select name="handler_id">{}</select>
+                            <select name="handler_id" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Monitored By</span>
-                            <select name="monitored_by">{}</select>
+                            <select name="monitored_by" multiple size="4" class="text-xs">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Note Author</span>
+                            <select name="note_user_id" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Category</span>
-                            <select name="category_id">{}</select>
+                            <select name="category_id" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Severity</span>
-                            <select name="severity">{}</select>
+                            <select name="severity" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Priority</span>
-                            <select name="priority">{}</select>
+                            <select name="priority" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Status</span>
-                            <select name="status">{}</select>
+                            <select name="status" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Hide Status</span>
-                            <select name="hide_status">{}</select>
+                            <select name="hide_status" class="text-xs">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Resolution</span>
+                            <select name="resolution" multiple size="4" class="text-xs">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Reproducibility</span>
+                            <select name="reproducibility" multiple size="4" class="text-xs">{}</select>
                         </div>
                         <div class="filter-cell">
                             <span class="filter-label">Tag</span>
-                            <select name="tag_id">{}</select>
+                            <select name="tag_id" multiple size="4" class="text-xs">{}</select>
                         </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Product Version</span>
+                            <select name="version" multiple size="3" class="text-xs">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Target Version</span>
+                            <select name="target_version" multiple size="3" class="text-xs">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Fixed in Version</span>
+                            <select name="fixed_in_version" multiple size="3" class="text-xs">{}</select>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">View Status / Sticky</span>
+                            <div class="flex flex-col gap-1">
+                                <select name="view_state" class="text-xs" aria-label="View Status">{}</select>
+                                <select name="sticky" class="text-xs" aria-label="Sticky">{}</select>
+                            </div>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Date Submitted (From / To)</span>
+                            <div class="flex flex-col gap-1">
+                                <input type="date" name="date_submitted_from" value="{}" class="text-xs" aria-label="Date submitted from">
+                                <input type="date" name="date_submitted_to" value="{}" class="text-xs" aria-label="Date submitted to">
+                            </div>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Last Updated (From / To)</span>
+                            <div class="flex flex-col gap-1">
+                                <input type="date" name="last_updated_from" value="{}" class="text-xs" aria-label="Last updated from">
+                                <input type="date" name="last_updated_to" value="{}" class="text-xs" aria-label="Last updated to">
+                            </div>
+                        </div>
+                        <div class="filter-cell">
+                            <span class="filter-label">Relationship</span>
+                            <div class="flex flex-col gap-1">
+                                <select name="relationship_type" class="text-xs" aria-label="Relationship type">{}</select>
+                                <input type="number" min="1" name="relationship_bug_id" value="{}" placeholder="Target Issue ID" class="text-xs">
+                            </div>
+                        </div>
+                        {}
                     </div>
                     <div class="flex flex-wrap gap-2 items-center">
+                        <label class="inline-flex items-center gap-1.5 font-semibold text-xs text-gray-700">Match Type:
+                            <select name="match_type" class="!w-auto text-xs">
+                                <option value="0" {}>All Criteria (AND)</option>
+                                <option value="1" {}>Any Criterion (OR)</option>
+                            </select>
+                        </label>
                         <label class="inline-flex items-center gap-1.5 font-semibold text-xs text-gray-700">Search:
                             <input type="text" name="q" value="{}" placeholder="Search summary, description, id..." class="!w-60">
                         </label>
@@ -1722,6 +2474,7 @@ pub fn render_view_all_bug_page(
                     </div>
                 </form>
                 <div class="mt-3 pt-2 border-t border-gray-200">
+                    {}
                     {}
                     {}
                 </div>
@@ -1735,8 +2488,13 @@ pub fn render_view_all_bug_page(
                     Viewing Issues ({})
                     <span class="badge" style="background:rgba(0,0,0,0.22); color:#ffffff;">{}</span>
                 </h4>
-                <div class="widget-toolbar">
+                <div class="widget-toolbar flex-wrap">
+                    <a class="btn btn-white btn-round btn-sm" href="/account_manage_columns_page"><i class="fa fa-columns" aria-hidden="true"></i> Columns</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-print" aria-hidden="true"></i> Print Reports</a>
                     <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-download" aria-hidden="true"></i> CSV Export</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-file-excel-o" aria-hidden="true"></i> Excel Export</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-file-word-o" aria-hidden="true"></i> Word Export</a>
+                    <a class="btn btn-white btn-round btn-sm" href="{}"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> RSS</a>
                     <a class="btn btn-success btn-sm" href="/bug_report_page"><i class="fa fa-edit" aria-hidden="true"></i> Report Issue</a>
                 </div>
             </div>
@@ -1756,17 +2514,6 @@ pub fn render_view_all_bug_page(
                             <table id="buglist" class="data-table !mb-0 !border-0">
                                 <thead>
                                     <tr>
-                                        <th class="w-7 text-center"><input type="checkbox" id="select_all_bugs" title="Select All"></th>
-                                        <th class="w-7 text-center" title="Edit">&nbsp;</th>
-                                        {}
-                                        {}
-                                        <th class="w-8 text-center" title="Notes"><i class="fa fa-comment-o" aria-hidden="true"></i></th>
-                                        <th class="w-8 text-center" title="Attachments"><i class="fa fa-paperclip" aria-hidden="true"></i></th>
-                                        {}
-                                        {}
-                                        {}
-                                        {}
-                                        {}
                                         {}
                                     </tr>
                                 </thead>
@@ -1912,34 +2659,52 @@ pub fn render_view_all_bug_page(
         html_escape(cur_sort),
         html_escape(cur_dir),
         cur_per_page_str,
-        version_scope_hidden_inputs,
+        adv_form_hidden_inputs,
         reporter_opts,
         handler_opts,
         monitored_opts,
+        note_user_opts,
         cat_opts,
         severity_opts,
         priority_opts,
         status_opts,
         hide_status_opts,
+        resolution_opts,
+        repro_opts,
         tag_opts,
+        version_opts,
+        target_version_opts,
+        fixed_version_opts,
+        view_state_opts,
+        sticky_opts,
+        html_escape(filter.date_submitted_from.as_deref().unwrap_or("")),
+        html_escape(filter.date_submitted_to.as_deref().unwrap_or("")),
+        html_escape(filter.last_updated_from.as_deref().unwrap_or("")),
+        html_escape(filter.last_updated_to.as_deref().unwrap_or("")),
+        rel_type_opts,
+        filter
+            .relationship_bug_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        custom_field_cells,
+        match_all_sel,
+        match_any_sel,
         html_escape(search_val),
         saved_filters_section,
         save_filter_form,
+        permalink_bar,
         total,
         range_badge,
-        build_csv_export_url(query),
+        html_escape(&build_print_all_bug_page_url(query)),
+        html_escape(&build_csv_export_url(query)),
+        html_escape(&build_excel_export_url(query)),
+        html_escape(&build_word_export_url(query)),
+        html_escape(&rss_export_url),
         html_escape(return_query),
         per_page_html,
         prev_link,
         next_link,
-        th_priority,
-        th_id,
-        th_project,
-        th_category,
-        th_severity,
-        th_status,
-        th_updated,
-        th_summary,
+        thead_cells,
         rows_html,
         bulk_proj_opts,
         bulk_handler_opts,
@@ -4151,6 +4916,422 @@ pub fn render_bug_move_page(
         ctx,
         flash_msg,
         &content,
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct WordBugnoteEntry {
+    pub id: i64,
+    pub reporter_name: String,
+    pub date_submitted: i64,
+    pub view_state: i32,
+    pub note: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WordIssueEntry {
+    pub bug: Bug,
+    pub project_name: String,
+    pub category_name: String,
+    pub reporter_name: String,
+    pub handler_name: String,
+    pub description: String,
+    pub steps_to_reproduce: String,
+    pub additional_information: String,
+    pub tags: Vec<String>,
+    pub custom_fields: Vec<(String, String)>,
+    pub notes: Vec<WordBugnoteEntry>,
+}
+
+fn sanitize_excel_worksheet_name(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|c| {
+            if matches!(c, ':' | '\\' | '/' | '?' | '*' | '[' | ']') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        "Issues".to_string()
+    } else {
+        trimmed.chars().take(31).collect()
+    }
+}
+
+pub fn render_excel_xml(
+    project_title: &str,
+    headers: &[String],
+    col_keys: &[String],
+    rows: &[Vec<String>],
+    truncated_from: Option<usize>,
+) -> String {
+    let sheet_name = sanitize_excel_worksheet_name(project_title);
+    let mut out = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <?mso-application progid=\"Excel.Sheet\"?>\n\
+         <Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\"\n\
+          xmlns:o=\"urn:schemas-microsoft-com:office:office\"\n\
+          xmlns:x=\"urn:schemas-microsoft-com:office:excel\"\n\
+          xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\">\n",
+    );
+    out.push_str(&format!(
+        "  <Worksheet ss:Name=\"{}\">\n    <Table>\n      <Row>\n",
+        xml_escape(&sheet_name)
+    ));
+
+    for h in headers {
+        let safe = sanitize_spreadsheet_cell(h);
+        out.push_str(&format!(
+            "        <Cell><Data ss:Type=\"String\">{}</Data></Cell>\n",
+            xml_escape(&safe)
+        ));
+    }
+    out.push_str("      </Row>\n");
+
+    for row in rows {
+        out.push_str("      <Row>\n");
+        for (idx, cell) in row.iter().enumerate() {
+            let col_key = col_keys.get(idx).map(String::as_str).unwrap_or("");
+            let is_numeric_col = matches!(col_key, "bugnotes_count" | "attachment_count");
+            if is_numeric_col && cell.trim().parse::<i64>().is_ok() {
+                out.push_str(&format!(
+                    "        <Cell><Data ss:Type=\"Number\">{}</Data></Cell>\n",
+                    cell.trim()
+                ));
+            } else {
+                let safe = sanitize_spreadsheet_cell(cell);
+                let escaped = xml_escape(&safe).replace('\n', "&#10;");
+                out.push_str(&format!(
+                    "        <Cell><Data ss:Type=\"String\">{}</Data></Cell>\n",
+                    escaped
+                ));
+            }
+        }
+        out.push_str("      </Row>\n");
+    }
+
+    out.push_str("    </Table>\n  </Worksheet>\n");
+    if let Some(total) = truncated_from {
+        let msg = format!(
+            "Export capped at {} of {} matching issues (MANTIS_EXPORT_MAX_ROWS).",
+            rows.len(),
+            total
+        );
+        out.push_str(&format!(
+            "  <Worksheet ss:Name=\"Notice\">\n    <Table>\n      <Row>\n        <Cell><Data ss:Type=\"String\">{}</Data></Cell>\n      </Row>\n    </Table>\n  </Worksheet>\n",
+            xml_escape(&sanitize_spreadsheet_cell(&msg))
+        ));
+    }
+    out.push_str("</Workbook>\n");
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_print_all_bug_page(
+    ctx: &AuthContext,
+    project_title: &str,
+    query: &ListBugsQuery,
+    headers: &[String],
+    col_keys: &[String],
+    bugs: &[Bug],
+    rows: &[Vec<String>],
+    truncated_from: Option<usize>,
+) -> Html<String> {
+    let asset_ver = env!("CARGO_PKG_VERSION");
+    let rss_url = build_issues_rss_url_for(query, ctx.active_project_id);
+    let truncated_notice = truncated_from
+        .map(|total| {
+            format!(
+                r#"<div class="flash-error mb-3"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> Export capped at {} of {} matching issues (<code>MANTIS_EXPORT_MAX_ROWS</code>).</div>"#,
+                rows.len(),
+                total
+            )
+        })
+        .unwrap_or_default();
+
+    let mut th_html = String::new();
+    for h in headers {
+        th_html.push_str(&format!(
+            r#"<th class="whitespace-nowrap">{}</th>"#,
+            html_escape(h)
+        ));
+    }
+
+    let mut tbody_html = String::new();
+    if rows.is_empty() {
+        let colspan = headers.len().max(1);
+        tbody_html.push_str(&format!(
+            r#"<tr><td colspan="{}" class="text-center py-6 text-gray-500">No matching issues to print.</td></tr>"#,
+            colspan
+        ));
+    } else {
+        for (idx, row) in rows.iter().enumerate() {
+            let bug_opt = bugs.get(idx);
+            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let mut tds = String::new();
+            for (cidx, val) in row.iter().enumerate() {
+                let col_key = col_keys.get(cidx).map(String::as_str).unwrap_or("");
+                let cell_html = if col_key == "id" {
+                    if let Some(b) = bug_opt {
+                        format!(
+                            r#"<td class="whitespace-nowrap font-bold"><a href="/view_bug_page/{}">{}</a></td>"#,
+                            b.id,
+                            html_escape(val)
+                        )
+                    } else {
+                        format!(r#"<td class="whitespace-nowrap">{}</td>"#, html_escape(val))
+                    }
+                } else if col_key == "status" {
+                    if let Some(b) = bug_opt {
+                        format!(
+                            r#"<td class="whitespace-nowrap"><span class="inline-flex items-center gap-1.5">{}<span>{}</span></span></td>"#,
+                            render_status_square(b.status),
+                            html_escape(val)
+                        )
+                    } else {
+                        format!(r#"<td class="whitespace-nowrap">{}</td>"#, html_escape(val))
+                    }
+                } else if matches!(
+                    col_key,
+                    "description" | "steps_to_reproduce" | "additional_information"
+                ) {
+                    let formatted = html_escape(val).replace('\n', "<br>");
+                    format!(r#"<td class="text-xs">{}</td>"#, formatted)
+                } else {
+                    format!(r#"<td>{}</td>"#, html_escape(val))
+                };
+                tds.push_str(&cell_html);
+            }
+            tbody_html.push_str(&format!(r#"<tr class="{}">{}</tr>"#, row_cls, tds));
+        }
+    }
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Print Reports ({project_title}) - MantisBT</title>
+    <link rel="icon" type="image/png" href="/images/mantis_logo.png">
+    <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
+    <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
+    <script src="/assets/mantis.js?v={asset_ver}" defer></script>
+</head>
+<body class="bg-white text-gray-900 p-4">
+    <div class="no-print flex flex-wrap items-center justify-between gap-2 mb-4 pb-3 border-b border-gray-300">
+        <div class="flex flex-wrap items-center gap-2">
+            <button type="button" class="btn btn-primary btn-sm" data-action="print">
+                <i class="fa fa-print" aria-hidden="true"></i> Print
+            </button>
+            <a class="btn btn-white btn-round btn-sm" href="{csv_url}"><i class="fa fa-download" aria-hidden="true"></i> CSV</a>
+            <a class="btn btn-white btn-round btn-sm" href="{excel_url}"><i class="fa fa-file-excel-o" aria-hidden="true"></i> Excel</a>
+            <a class="btn btn-white btn-round btn-sm" href="{word_url}"><i class="fa fa-file-word-o" aria-hidden="true"></i> Word</a>
+            <a class="btn btn-white btn-round btn-sm" href="{rss_url}"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> RSS</a>
+        </div>
+        <a class="btn btn-white btn-round btn-sm" href="{back_url}">
+            <i class="fa fa-arrow-left" aria-hidden="true"></i> Back to View Issues
+        </a>
+    </div>
+    <div class="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+        <h1 class="text-lg font-bold m-0">MantisBT Issue Report — {project_title}</h1>
+        <span class="text-xs text-gray-600">User: {username} | Total Issues: {count}</span>
+    </div>
+    {truncated_notice}
+    <div class="table-responsive">
+        <table id="print-buglist" class="data-table w-full text-xs">
+            <thead>
+                <tr>{th_html}</tr>
+            </thead>
+            <tbody>
+                {tbody_html}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>"#,
+        project_title = html_escape(project_title),
+        asset_ver = asset_ver,
+        csv_url = html_escape(&build_csv_export_url(query)),
+        excel_url = html_escape(&build_excel_export_url(query)),
+        word_url = html_escape(&build_word_export_url(query)),
+        rss_url = html_escape(&rss_url),
+        back_url = html_escape(&build_view_all_bug_page_url(query, 1)),
+        username = html_escape(&ctx.user.username),
+        count = rows.len(),
+        th_html = th_html,
+        tbody_html = tbody_html,
+        truncated_notice = truncated_notice,
+    );
+
+    Html(html)
+}
+
+fn format_multiline_html(s: &str) -> String {
+    if s.trim().is_empty() {
+        return "-".to_string();
+    }
+    html_escape(s).replace('\n', "<br>\n")
+}
+
+pub fn render_word_export_doc(
+    project_title: &str,
+    entries: &[WordIssueEntry],
+    truncated_from: Option<usize>,
+) -> String {
+    let mut blocks = String::new();
+    if let Some(total) = truncated_from {
+        blocks.push_str(&format!(
+            r#"<p><strong>Notice:</strong> Word export truncated to {} of {} matching issues (MANTIS_EXPORT_MAX_ROWS limit).</p>"#,
+            entries.len(),
+            total
+        ));
+    }
+    if entries.is_empty() {
+        blocks.push_str("<p>No matching issues found.</p>");
+    } else {
+        for (idx, entry) in entries.iter().enumerate() {
+            let b = &entry.bug;
+            let handler_display = if entry.handler_name.is_empty() {
+                "-".to_string()
+            } else {
+                html_escape(&entry.handler_name)
+            };
+            let tags_display = if entry.tags.is_empty() {
+                "-".to_string()
+            } else {
+                entry
+                    .tags
+                    .iter()
+                    .map(|t| html_escape(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let view_state_label = if b.view_state == 50 {
+                "private"
+            } else {
+                "public"
+            };
+
+            let mut cf_rows = String::new();
+            for (cf_name, cf_val) in &entry.custom_fields {
+                cf_rows.push_str(&format!(
+                    "<tr><th class=\"lbl\">{}</th><td colspan=\"3\">{}</td></tr>\n",
+                    html_escape(cf_name),
+                    html_escape(cf_val)
+                ));
+            }
+
+            let mut notes_rows = String::new();
+            for n in &entry.notes {
+                let priv_tag = if n.view_state == 50 { " [private]" } else { "" };
+                notes_rows.push_str(&format!(
+                    "<div class=\"note-block\"><div class=\"note-meta\">(#{:07}) {} — {}{}</div><div>{}</div></div>\n",
+                    n.id,
+                    html_escape(&n.reporter_name),
+                    html_escape(&format_timestamp(n.date_submitted)),
+                    priv_tag,
+                    format_multiline_html(&n.note)
+                ));
+            }
+            let notes_section = if notes_rows.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<tr><th class=\"lbl\">Notes ({})</th><td colspan=\"3\">{}</td></tr>\n",
+                    entry.notes.len(),
+                    notes_rows
+                )
+            };
+
+            let page_break = if idx > 0 {
+                r#" style="page-break-before: always;""#
+            } else {
+                ""
+            };
+            blocks.push_str(&format!(
+                r#"<div class="issue-block"{page_break}>
+<h2>#{bug_id:07}: {summary}</h2>
+<table class="meta-table">
+<tr><th class="lbl">Project</th><td>{project}</td><th class="lbl">Category</th><td>{category}</td></tr>
+<tr><th class="lbl">Reporter</th><td>{reporter}</td><th class="lbl">Assigned To</th><td>{handler}</td></tr>
+<tr><th class="lbl">Status</th><td>{status}</td><th class="lbl">Resolution</th><td>{resolution}</td></tr>
+<tr><th class="lbl">Priority</th><td>{priority}</td><th class="lbl">Severity</th><td>{severity}</td></tr>
+<tr><th class="lbl">Reproducibility</th><td>{reproducibility}</td><th class="lbl">View Status</th><td>{view_state}</td></tr>
+<tr><th class="lbl">Product Version</th><td>{version}</td><th class="lbl">Target Version</th><td>{target_version}</td></tr>
+<tr><th class="lbl">Fixed in Version</th><td>{fixed_in_version}</td><th class="lbl">Build</th><td>{build}</td></tr>
+<tr><th class="lbl">Platform / OS</th><td>{platform} / {os} {os_build}</td><th class="lbl">Date Submitted / Updated</th><td>{submitted} / {updated}</td></tr>
+<tr><th class="lbl">Tags</th><td colspan="3">{tags}</td></tr>
+<tr><th class="lbl">Description</th><td colspan="3">{description}</td></tr>
+<tr><th class="lbl">Steps To Reproduce</th><td colspan="3">{steps}</td></tr>
+<tr><th class="lbl">Additional Info</th><td colspan="3">{additional}</td></tr>
+{cf_rows}{notes_section}</table>
+</div>
+"#,
+                page_break = page_break,
+                bug_id = b.id,
+                summary = html_escape(&b.summary),
+                project = html_escape(&entry.project_name),
+                category = html_escape(&entry.category_name),
+                reporter = html_escape(&entry.reporter_name),
+                handler = handler_display,
+                status = html_escape(status_label(b.status)),
+                resolution = html_escape(resolution_label(b.resolution)),
+                priority = html_escape(priority_label(b.priority)),
+                severity = html_escape(severity_label(b.severity)),
+                reproducibility = html_escape(reproducibility_label(b.reproducibility)),
+                view_state = view_state_label,
+                version = html_escape(&b.version),
+                target_version = html_escape(&b.target_version),
+                fixed_in_version = html_escape(&b.fixed_in_version),
+                build = html_escape(&b.build),
+                platform = html_escape(&b.platform),
+                os = html_escape(&b.os),
+                os_build = html_escape(&b.os_build),
+                submitted = html_escape(&format_timestamp(b.date_submitted)),
+                updated = html_escape(&format_timestamp(b.last_updated)),
+                tags = tags_display,
+                description = format_multiline_html(&entry.description),
+                steps = format_multiline_html(&entry.steps_to_reproduce),
+                additional = format_multiline_html(&entry.additional_information),
+                cf_rows = cf_rows,
+                notes_section = notes_section,
+            ));
+        }
+    }
+
+    format!(
+        r#"<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:w="urn:schemas-microsoft-com:office:word"
+      xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<title>MantisBT Word Export - {title}</title>
+<style>
+body {{ font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #222; }}
+h1 {{ font-size: 15pt; border-bottom: 2px solid #307ecc; padding-bottom: 4px; }}
+h2 {{ font-size: 12pt; color: #1d4ed8; margin-top: 16px; margin-bottom: 6px; }}
+table.meta-table {{ width: 100%; border-collapse: collapse; margin-bottom: 14px; }}
+table.meta-table th, table.meta-table td {{ border: 1px solid #999; padding: 4px 6px; text-align: left; vertical-align: top; }}
+table.meta-table th.lbl {{ background: #edf3f4; font-weight: bold; width: 16%; }}
+.note-block {{ border-top: 1px dashed #ccc; padding-top: 4px; margin-top: 4px; }}
+.note-meta {{ font-weight: bold; font-size: 9pt; color: #444; margin-bottom: 2px; }}
+</style>
+</head>
+<body>
+<h1>MantisBT Issues Report — {title} ({count} issue(s))</h1>
+{blocks}
+</body>
+</html>
+"#,
+        title = html_escape(project_title),
+        count = entries.len(),
+        blocks = blocks,
     )
 }
 

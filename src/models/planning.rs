@@ -193,23 +193,6 @@ pub fn compute_billing_cost(minutes: i64, hourly_rate: f64) -> f64 {
     }
 }
 
-/// Neutralizes spreadsheet formula-injection prefixes (`=`, `+`, `-`, `@`, `\t`, `\r`)
-/// by prepending a single quote `'`.
-pub fn sanitize_spreadsheet_cell(val: &str) -> String {
-    let trimmed = val.trim_start();
-    let needs_prefix = val.starts_with('\t')
-        || val.starts_with('\r')
-        || trimmed.starts_with('=')
-        || trimmed.starts_with('+')
-        || trimmed.starts_with('-')
-        || trimmed.starts_with('@');
-    if needs_prefix {
-        format!("'{}", val)
-    } else {
-        val.to_string()
-    }
-}
-
 pub const MY_VIEW_CONFIG_ID: &str = "my_view_boxes";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

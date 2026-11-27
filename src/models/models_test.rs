@@ -380,6 +380,7 @@ fn test_build_csv_export_url() {
         sort: Some("summary".to_string()),
         dir: Some("asc".to_string()),
         per_page: Some(50),
+        ..Default::default()
     };
 
     let url = build_csv_export_url(&q);
@@ -969,6 +970,160 @@ fn test_mentions_and_refs_domain_helpers() {
 
     let chars: Vec<char> = "cc @bob.".chars().collect();
     assert_eq!(parse_mention_at(&chars, 3), Some(("bob".to_string(), 7)));
+}
+
+#[test]
+fn test_advanced_bug_filter_parsing_urls_and_columns() {
+    use std::collections::HashSet;
+
+    let raw = "status=10&status=50&priority=40&priority=60&match_type=1&resolution=20&reproducibility=10&view_state=50&sticky=1&version=v1.0&target_version=v2.0&fixed_in_version=v1.0&date_submitted_from=2026-01-01&date_submitted_to=2026-12-31&last_updated_from=2026-02-01&last_updated_to=2026-02-28&relationship_type=3&relationship_bug_id=42&note_user_id=7&custom_field_5=Chrome&custom_field_5=Firefox&per_page=abc";
+    let q = ListBugsQuery::from_raw_query(Some(raw));
+    assert_eq!(q.effective_statuses(), vec![10, 50]);
+    assert_eq!(q.effective_priorities(), vec![40, 60]);
+    assert_eq!(q.match_type, Some(FILTER_MATCH_ANY));
+    assert_eq!(q.resolutions, vec![20]);
+    assert_eq!(q.reproducibilities, vec![10]);
+    assert_eq!(q.view_state, Some(50));
+    assert_eq!(q.sticky, Some(1));
+    assert_eq!(q.versions, vec!["v1.0".to_string()]);
+    assert_eq!(q.target_versions, vec!["v2.0".to_string()]);
+    assert_eq!(q.fixed_in_versions, vec!["v1.0".to_string()]);
+    assert_eq!(q.date_submitted_from.as_deref(), Some("2026-01-01"));
+    assert_eq!(q.date_submitted_to.as_deref(), Some("2026-12-31"));
+    assert_eq!(q.last_updated_from.as_deref(), Some("2026-02-01"));
+    assert_eq!(q.last_updated_to.as_deref(), Some("2026-02-28"));
+    assert_eq!(q.relationship_type, Some(3));
+    assert_eq!(q.relationship_bug_id, Some(42));
+    assert_eq!(q.note_user_ids, vec![7]);
+    assert_eq!(
+        q.custom_fields.get(&5),
+        Some(&vec!["Chrome".to_string(), "Firefox".to_string()])
+    );
+    assert_eq!(q.per_page, None);
+
+    let url = build_view_all_bug_page_url(&q, 2);
+    assert!(url.contains("status=10"));
+    assert!(url.contains("status=50"));
+    assert!(url.contains("match_type=1"));
+    assert!(url.contains("custom_field_5=Chrome"));
+    assert!(url.contains("custom_field_5=Firefox"));
+    assert!(url.contains("relationship_type=3"));
+    assert!(url.contains("relationship_bug_id=42"));
+
+    let csv_url = build_csv_export_url(&q);
+    assert!(csv_url.contains("status=10"));
+    assert!(csv_url.contains("custom_field_5=Chrome"));
+    assert!(!csv_url.contains("page="));
+
+    let start_ts = parse_date_filter_bound("2026-11-26", false).unwrap();
+    let end_ts = parse_date_filter_bound("2026-11-26", true).unwrap();
+    assert_eq!(end_ts - start_ts, 86_399);
+
+    let parsed_cols = parse_columns_input("id, priority, custom_field_5, id, summary");
+    assert_eq!(
+        parsed_cols,
+        vec!["id", "priority", "custom_field_5", "summary"]
+    );
+    let cf = CustomField {
+        id: 5,
+        name: "Browser".to_string(),
+        field_type: 0,
+        possible_values: String::new(),
+        default_value: String::new(),
+        valid_regexp: String::new(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 0,
+        require_report: 0,
+        require_update: 0,
+        display_report: 1,
+        display_update: 1,
+        require_resolved: 0,
+        display_resolved: 0,
+        display_closed: 0,
+        require_closed: 0,
+        filter_by: 1,
+    };
+    let validated = validate_columns_list(
+        &[
+            "id".to_string(),
+            "custom_browser".to_string(),
+            "summary".to_string(),
+        ],
+        &[cf],
+    )
+    .unwrap();
+    assert_eq!(validated, vec!["id", "custom_field_5", "summary"]);
+    assert!(validate_columns_list(&["unknown_col".to_string()], &[]).is_err());
+
+    let mut allowed_cf = HashSet::new();
+    allowed_cf.insert(5);
+    let filtered = filter_authorized_columns(
+        &[
+            "id".to_string(),
+            "custom_field_5".to_string(),
+            "custom_field_99".to_string(),
+        ],
+        &allowed_cf,
+    );
+    assert_eq!(filtered, vec!["id", "custom_field_5"]);
+
+    assert_eq!(
+        RelationshipType::Blocks.complement(),
+        RelationshipType::BlockedBy
+    );
+    assert_eq!(
+        RelationshipType::BlockedBy.complement(),
+        RelationshipType::Blocks
+    );
+    assert_eq!(
+        RelationshipType::ParentOf.complement(),
+        RelationshipType::ChildOf
+    );
+    assert_eq!(
+        RelationshipType::DuplicateOf.complement(),
+        RelationshipType::HasDuplicate
+    );
+    assert_eq!(
+        RelationshipType::RelatedTo.complement(),
+        RelationshipType::RelatedTo
+    );
+
+    let mut bf = BugFilter::default();
+    bf.custom_fields.insert(5, vec!["Chrome".to_string()]);
+    bf.custom_fields.insert(99, vec!["Secret".to_string()]);
+    bf.retain_custom_fields(&allowed_cf);
+    assert!(bf.custom_fields.contains_key(&5));
+    assert!(!bf.custom_fields.contains_key(&99));
+
+    // Malformed percent decoding preserves valid subsequent % escapes and rejects %+X
+    let pairs = parse_query_pairs("q=%ZZ%20ok%2B&a=%2&b=%+5%20ok");
+    assert_eq!(
+        pairs,
+        vec![
+            ("q".to_string(), "%ZZ ok+".to_string()),
+            ("a".to_string(), "%2".to_string()),
+            ("b".to_string(), "% 5 ok".to_string()),
+        ]
+    );
+
+    // Multi-value filter parsing caps values per field and distinct custom fields
+    let mut excess_pairs = Vec::new();
+    for i in 1..=(MAX_FILTER_VALUES_PER_FIELD + 25) {
+        excess_pairs.push(("status".to_string(), i.to_string()));
+        excess_pairs.push(("custom_field_1".to_string(), format!("v{}", i)));
+    }
+    for cf_id in 2..=(MAX_FILTER_CUSTOM_FIELDS + 10) {
+        excess_pairs.push((format!("custom_field_{}", cf_id), "x".to_string()));
+    }
+    let parsed_excess = ListBugsQuery::from_urlencoded_pairs(&excess_pairs);
+    assert_eq!(parsed_excess.statuses.len(), MAX_FILTER_VALUES_PER_FIELD);
+    assert_eq!(parsed_excess.custom_fields.len(), MAX_FILTER_CUSTOM_FIELDS);
+    assert_eq!(
+        parsed_excess.custom_fields.get(&1).unwrap().len(),
+        MAX_FILTER_VALUES_PER_FIELD
+    );
 }
 
 #[test]

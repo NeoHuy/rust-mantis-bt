@@ -115,6 +115,7 @@ docs/                           # Design specifications and implementation plans
   - `MANTIS_UPLOAD_DIR`: Optional directory path for attachment disk storage (default: empty; attachments stored directly in database).
   - `MANTIS_ALLOWED_FILES`: Optional comma-separated whitelist of allowed file extensions (when non-empty, only extensions in this list may be attached).
   - `MANTIS_DISALLOWED_FILES`: Optional comma-separated blacklist of disallowed file extensions (overriding the default dangerous extension guard).
+  - `MANTIS_EXPORT_MAX_ROWS`: Maximum issue rows included in Print, Excel XML, and Word exports (default: `1000`).
 - **Security, Auth & Sessions:**
   - `MANTIS_COOKIE_SECURE`: When set to `1` or `true`, marks cookies as `Secure` and enables `Strict-Transport-Security` (HSTS: `max-age=31536000; includeSubDomains`).
   - `MANTIS_PUBLIC_ORIGIN`: Whitelisted public origin URL for CSRF validation behind reverse proxies / SSL termination (e.g. `https://mantis.example.com`).
@@ -126,7 +127,7 @@ docs/                           # Design specifications and implementation plans
 - **Integrations (Jira, SendGrid, MCP):**
   - `MANTIS_JIRA_API_TOKEN`: Optional server-side environment override for Jira API token (takes precedence over token stored in database).
   - `MANTIS_ALLOW_LOCAL_JIRA`: Opt-in flag (`1` or `true`) to allow Jira integration to connect to local/private IP addresses (SSRF guard, default: false).
-  - `MANTIS_ALLOW_QUERY_TOKEN`: Set to `1` or `true` to allow `?token=` query auth on `/mcp/sse` for local dev/testing (disabled by default; prefer `Authorization: Bearer <token>`).
+  - `MANTIS_ALLOW_QUERY_TOKEN`: Set to `1` or `true` to allow `?token=` query auth on `/mcp/sse` and full-access API tokens in RSS query strings (`?token=` / `?key=`) for local dev/testing (disabled by default; prefer `Authorization: Bearer <token>` or a read-only `rss` token for feeds).
   - `SENDGRID_API_KEY`: Enables the background email queue worker when set.
   - `SENDGRID_FROM_EMAIL`, `SENDGRID_FROM_NAME`, `SENDGRID_ENDPOINT`: Optional sender identity and API endpoint overrides.
 

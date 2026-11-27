@@ -4726,6 +4726,564 @@ fn test_ui_m4_db_helpers_prefix_ancestors_and_overview_stats() {
 }
 
 #[test]
+fn test_phase3_advanced_filtering_and_columns_config() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let rep_id = db
+        .create_user("adv_rep", "Rep", "ar@x.com", "pw", 25, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev_id = db
+        .create_user("adv_dev", "Dev", "ad@x.com", "pw", 55, true, false)
+        .unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    let proj_id = db
+        .create_project("AdvFilterProj", 10, 10, "", true)
+        .unwrap();
+    let cf_pub = db
+        .create_custom_field_full(
+            "Browser",
+            3,
+            "Chrome|Firefox",
+            "",
+            "",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    let cf_secret = db
+        .create_custom_field_full(
+            "InternalCode",
+            0,
+            "",
+            "",
+            "",
+            70,
+            70,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_pub, proj_id, 1).unwrap();
+    db.link_custom_field_to_project(cf_secret, proj_id, 2)
+        .unwrap();
+
+    let b1 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            rep_id,
+            1,
+            "Issue One Chrome",
+            "d1",
+            "",
+            "",
+            40,
+            60,
+            10,
+            "v1.0",
+            "Linux",
+            "6.1",
+            "x86_64",
+            10,
+            &[],
+            crate::db::BugCreateExtras {
+                target_version: "v2.0",
+                build: "b1",
+                due_date: 0,
+                handler_id: Some(dev_id),
+            },
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            dev_id,
+            1,
+            "Issue Two Firefox",
+            "d2",
+            "",
+            "",
+            20,
+            20,
+            30,
+            "v1.1",
+            "macOS",
+            "15",
+            "arm64",
+            50, // private bug!
+            &[],
+            crate::db::BugCreateExtras {
+                target_version: "v2.1",
+                build: "b2",
+                due_date: 0,
+                handler_id: None,
+            },
+        )
+        .unwrap();
+    let b3 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            rep_id,
+            1,
+            "Issue Three Fixed",
+            "d3",
+            "",
+            "",
+            50,
+            50,
+            10,
+            "v1.0",
+            "Windows",
+            "11",
+            "x64",
+            10,
+            &[],
+            crate::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+
+    db.change_bug_status(b3, dev_id, 80, 20, None).unwrap();
+    db.update_bug_fields(
+        b3,
+        dev_id,
+        crate::models::BugUpdate {
+            fixed_in_version: Some("v1.0.1".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_custom_field_value(cf_pub, b1, admin.id, "Chrome")
+        .unwrap();
+    db.set_custom_field_value(cf_pub, b3, admin.id, "Firefox")
+        .unwrap();
+    db.set_custom_field_value(cf_secret, b1, admin.id, "TOPSECRET")
+        .unwrap();
+    db.add_bugnote(b1, dev_id, "Public dev note", 10).unwrap();
+    db.add_bugnote(b3, dev_id, "Secret dev note", 50).unwrap();
+    db.add_bug_relationship(b1, b3, 3).unwrap(); // b1 blocks b3
+    db.add_bug_relationship(b1, b2, 0).unwrap(); // b1 related to private b2
+
+    // 1. Multi-select priority + MATCH ANY
+    let mut f_any = BugFilter {
+        project_id: Some(proj_id),
+        match_type: crate::models::FILTER_MATCH_ANY,
+        priorities: vec![40, 50],
+        ..Default::default()
+    };
+    let res_any = db.filter_bugs(&f_any, &rep).unwrap();
+    assert_eq!(res_any.len(), 2);
+
+    // 2. Version, Target Version, Fixed in Version, Resolution, Reproducibility, ViewState
+    let f_ver = BugFilter {
+        project_id: Some(proj_id),
+        versions: vec!["v1.0".to_string()],
+        resolutions: vec![20],
+        fixed_in_versions: vec!["v1.0.1".to_string()],
+        ..Default::default()
+    };
+    let res_ver = db.filter_bugs(&f_ver, &rep).unwrap();
+    assert_eq!(res_ver.iter().map(|b| b.id).collect::<Vec<_>>(), vec![b3]);
+
+    // 3. Date range filtering (update timestamps explicitly)
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_bug_table SET date_submitted = 1704067200, last_updated = 1704067200 WHERE id = ?1",
+            rusqlite::params![b1],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE mantis_bug_table SET date_submitted = 1735689600, last_updated = 1735689600 WHERE id = ?1",
+            rusqlite::params![b3],
+        )
+        .unwrap();
+    }
+    let f_date = BugFilter {
+        project_id: Some(proj_id),
+        date_submitted_from: Some("2024-01-01".to_string()),
+        date_submitted_to: Some("2024-01-02".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_date, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+
+    // 4. Note author RBAC: rep cannot match b3 via dev_id's private note, only b1 (public note)
+    let f_note = BugFilter {
+        project_id: Some(proj_id),
+        note_user_ids: vec![dev_id],
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_note, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+    assert_eq!(db.filter_bugs(&f_note, &dev).unwrap().len(), 2);
+
+    // 5. Relationship filter RBAC: rep querying relationship with private b2 gets 0 results
+    let f_rel_priv = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(-1),
+        relationship_bug_id: Some(b2),
+        ..Default::default()
+    };
+    assert!(db.filter_bugs(&f_rel_priv, &rep).unwrap().is_empty());
+    assert_eq!(db.filter_bugs(&f_rel_priv, &dev).unwrap().len(), 1);
+
+    // 6. Custom field filter + access_level_r oracle guard
+    f_any.match_type = 0;
+    f_any.priorities.clear();
+    f_any
+        .custom_fields
+        .insert(cf_pub, vec!["Chrome".to_string()]);
+    assert_eq!(
+        db.filter_bugs(&f_any, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+
+    let mut f_secret = BugFilter {
+        project_id: Some(proj_id),
+        ..Default::default()
+    };
+    f_secret
+        .custom_fields
+        .insert(cf_secret, vec!["TOPSECRET".to_string()]);
+    assert!(db.filter_bugs(&f_secret, &rep).unwrap().is_empty());
+    assert_eq!(db.filter_bugs(&f_secret, &admin).unwrap().len(), 1);
+
+    // 7. Per-context column config & custom field permission filtering
+    db.set_user_columns(
+        &admin,
+        proj_id,
+        crate::models::ColumnContext::View,
+        &[
+            "id".to_string(),
+            format!("custom_field_{}", cf_pub),
+            format!("custom_field_{}", cf_secret),
+            "summary".to_string(),
+        ],
+    )
+    .unwrap();
+    let admin_cols = db
+        .get_user_columns(&admin, proj_id, crate::models::ColumnContext::View)
+        .unwrap();
+    assert_eq!(admin_cols.len(), 4);
+    assert!(db
+        .set_user_columns(
+            &rep,
+            proj_id,
+            crate::models::ColumnContext::View,
+            &["id".to_string(), format!("custom_field_{}", cf_secret)],
+        )
+        .is_err());
+
+    // 8. M3: Bidirectional relationship filtering (Blocks/BlockedBy & -1)
+    let f_blocks_b3 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(3), // Blocks
+        relationship_bug_id: Some(b3),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_blocks_b3, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+    let f_blocked_by_b1 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(4), // BlockedBy
+        relationship_bug_id: Some(b1),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_blocked_by_b1, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b3]
+    );
+    let f_any_rel_b1 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(-1),
+        relationship_bug_id: Some(b1),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_any_rel_b1, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b3]
+    );
+
+    // 9. C1: Per-bug access_level_r check in get_bugs_custom_field_values_map across projects
+    let proj_elev = db.create_project("ElevatedProj", 10, 10, "", true).unwrap();
+    db.set_project_user(proj_elev, rep_id, 70).unwrap();
+    db.link_custom_field_to_project(cf_secret, proj_elev, 1)
+        .unwrap();
+    let cat_elev = db.list_effective_categories(proj_elev).unwrap()[0].id;
+    let b_elev = db
+        .create_bug_full_with_mentions(
+            proj_elev,
+            rep_id,
+            cat_elev,
+            "Elev bug",
+            "Desc",
+            "",
+            "",
+            40,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+            &[],
+            crate::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_secret, b_elev, admin.id, "ELEVATED_SECRET")
+        .unwrap();
+    let mut requested_cf = HashSet::new();
+    requested_cf.insert(cf_secret);
+    let bug_b1_rec = db.get_bug(b1).unwrap().unwrap();
+    let bug_elev_rec = db.get_bug(b_elev).unwrap().unwrap();
+    let rep_cf_vals = db
+        .get_bugs_custom_field_values_map(&rep, &[bug_b1_rec, bug_elev_rec], &requested_cf)
+        .unwrap();
+    assert_eq!(
+        rep_cf_vals.get(&(b_elev, cf_secret)).map(String::as_str),
+        Some("ELEVATED_SECRET")
+    );
+    assert!(!rep_cf_vals.contains_key(&(b1, cf_secret)));
+
+    // 10. M2 + Minor #3: Manager cannot list other users' private filters; columns fall back to project 0
+    let rep_priv_fid = db
+        .save_filter(
+            rep_id,
+            proj_id,
+            false,
+            "Only Rep Private",
+            &BugFilter::default(),
+        )
+        .unwrap();
+    let mgr_manageable = db.list_manageable_filters(&dev, proj_id).unwrap();
+    assert!(!mgr_manageable.iter().any(|sf| sf.id == rep_priv_fid));
+    assert!(db
+        .save_filter(
+            rep_id,
+            proj_id,
+            false,
+            &"x".repeat(65),
+            &BugFilter::default()
+        )
+        .is_err());
+
+    db.set_user_columns(
+        &rep,
+        0,
+        crate::models::ColumnContext::View,
+        &["id".to_string(), "summary".to_string()],
+    )
+    .unwrap();
+    let fallback_cols = db
+        .get_user_columns(&rep, proj_id, crate::models::ColumnContext::View)
+        .unwrap();
+    assert_eq!(fallback_cols, vec!["id", "summary"]);
+}
+
+#[test]
+fn test_list_accessible_news_rbac_isolation() {
+    let db = Db::open_in_memory().unwrap();
+    let pub_proj = db.create_project("NewsPubProj", 10, 10, "", true).unwrap();
+    let priv_proj = db.create_project("NewsPrivProj", 10, 50, "", true).unwrap();
+    let disabled_proj = db
+        .create_project("NewsDisabledProj", 10, 10, "", true)
+        .unwrap();
+    db.update_project(disabled_proj, "NewsDisabledProj", 10, false, 10, "", true)
+        .unwrap();
+
+    let rep_id = db
+        .create_user("news_rep", "News Rep", "nr@x.com", "pass", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("news_dev", "News Dev", "nd@x.com", "pass", 55, true, false)
+        .unwrap();
+    let dis_rep_id = db
+        .create_user(
+            "news_dis",
+            "Disabled",
+            "ndis@x.com",
+            "pass",
+            25,
+            false,
+            false,
+        )
+        .unwrap();
+
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+    let dis_rep = db.get_user_by_id(dis_rep_id).unwrap().unwrap();
+    let admin = db.get_user_by_id(1).unwrap().unwrap();
+
+    // Give dev project-specific Viewer override (10) on priv_proj so dev can enter priv_proj
+    // as Viewer only (should NOT see view_state=50 private news there!)
+    db.set_project_user(priv_proj, dev_id, 10).unwrap();
+
+    db.create_news(0, 1, "Global Public News", "global body", true, 10)
+        .unwrap();
+    db.create_news(0, 1, "Global Private News", "dev global body", false, 50)
+        .unwrap();
+    db.create_news(pub_proj, 1, "Public Project News", "pub body", false, 10)
+        .unwrap();
+    db.create_news(
+        priv_proj,
+        1,
+        "Private Project Public News",
+        "priv pub",
+        false,
+        10,
+    )
+    .unwrap();
+    db.create_news(
+        priv_proj,
+        1,
+        "Private Project Secret News",
+        "priv sec",
+        false,
+        50,
+    )
+    .unwrap();
+    db.create_news(
+        disabled_proj,
+        1,
+        "Disabled Project News",
+        "dis body",
+        false,
+        10,
+    )
+    .unwrap();
+
+    // Disabled user sees nothing
+    assert!(db.list_accessible_news(&dis_rep, 0).unwrap().is_empty());
+
+    // Reporter sees only Global Public + Public Project News
+    let rep_headlines: Vec<String> = db
+        .list_accessible_news(&rep, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(rep_headlines.contains(&"Global Public News".to_string()));
+    assert!(rep_headlines.contains(&"Public Project News".to_string()));
+    assert!(!rep_headlines.contains(&"Global Private News".to_string()));
+    assert!(!rep_headlines.contains(&"Private Project Public News".to_string()));
+    assert!(!rep_headlines.contains(&"Private Project Secret News".to_string()));
+    assert!(!rep_headlines.contains(&"Disabled Project News".to_string()));
+
+    // Dev sees Global Private News and Private Project Public News, NOT Private Project Secret News
+    let dev_headlines: Vec<String> = db
+        .list_accessible_news(&dev, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(dev_headlines.contains(&"Global Private News".to_string()));
+    assert!(dev_headlines.contains(&"Private Project Public News".to_string()));
+    assert!(!dev_headlines.contains(&"Private Project Secret News".to_string()));
+
+    // Admin sees Private Project Secret News, still not disabled project
+    let admin_headlines: Vec<String> = db
+        .list_accessible_news(&admin, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(admin_headlines.contains(&"Private Project Secret News".to_string()));
+    assert!(!admin_headlines.contains(&"Disabled Project News".to_string()));
+    assert!(db
+        .list_accessible_news(&admin, disabled_proj)
+        .unwrap()
+        .is_empty());
+
+    // RSS-scoped token rejected by authenticate_api_token_full (REST/MCP), accepted by authenticate_api_token_with_scope
+    let (_, rss_tok) = db
+        .create_api_token_with_scope(rep_id, "rss-only", "rss")
+        .unwrap();
+    assert!(db.authenticate_api_token_full(&rss_tok).unwrap().is_none());
+    let (_, authed_user, scope) = db
+        .authenticate_api_token_with_scope(&rss_tok)
+        .unwrap()
+        .unwrap();
+    assert_eq!(authed_user.id, rep_id);
+    assert_eq!(scope, "rss");
+    assert!(db
+        .create_api_token_with_scope(rep_id, "bad-scope", "admin")
+        .is_err());
+
+    // Batched get_bugs_bugnotes_map enforces per-bug access level on private notes
+    let b1 = db
+        .create_bug(
+            pub_proj, rep_id, 0, "N1", "d", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug(
+            priv_proj, dev_id, 0, "N2", "d", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    db.add_bugnote(b1, rep_id, "Public note", 10).unwrap();
+    db.add_bugnote(b1, dev_id, "Private note b1", 50).unwrap();
+    db.add_bugnote(b2, dev_id, "Private note b2", 50).unwrap();
+    let mut eff_map = HashMap::new();
+    eff_map.insert(b1, 25); // reporter: sees public only
+    eff_map.insert(b2, 55); // developer: sees private
+    let notes_map = db.get_bugs_bugnotes_map(&[b1, b2], &eff_map).unwrap();
+    assert_eq!(notes_map[&b1].len(), 1);
+    assert_eq!(notes_map[&b1][0].note, "Public note");
+    assert_eq!(notes_map[&b2].len(), 1);
+    assert_eq!(notes_map[&b2][0].note, "Private note b2");
+}
+
+#[test]
 fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
     let db = Db::open_in_memory().unwrap();
     let admin = db.get_user_by_username("administrator").unwrap().unwrap();

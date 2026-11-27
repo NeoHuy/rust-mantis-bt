@@ -2007,6 +2007,254 @@ fn test_view_all_bug_page_counts_and_renders_version_scope_chips() {
 }
 
 #[test]
+fn test_render_view_all_bug_page_advanced_filters_and_custom_columns() {
+    let mut ctx = dummy_ctx(1, 70);
+    ctx.active_project_id = 1;
+    let bug = Bug {
+        id: 21,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 2,
+        duplicate_id: 0,
+        priority: 50,
+        severity: 60,
+        reproducibility: 10,
+        status: 50,
+        resolution: 20,
+        os: "macOS".to_string(),
+        os_build: "15.1".to_string(),
+        platform: "arm64".to_string(),
+        version: "v1.0".to_string(),
+        fixed_in_version: "v1.1".to_string(),
+        target_version: "v2.0".to_string(),
+        build: "b42".to_string(),
+        summary: "Custom col test".to_string(),
+        view_state: 10,
+        sticky: 0,
+        category_id: 1,
+        date_submitted: 1700000000,
+        due_date: 0,
+        last_updated: 1700000300,
+    };
+    let cf = CustomField {
+        id: 9,
+        name: "Browser".to_string(),
+        field_type: 3,
+        possible_values: "Chrome|Firefox".to_string(),
+        default_value: String::new(),
+        valid_regexp: String::new(),
+        access_level_r: 10,
+        access_level_rw: 25,
+        length_min: 0,
+        length_max: 0,
+        require_report: 0,
+        require_update: 0,
+        display_report: 1,
+        display_update: 1,
+        require_resolved: 0,
+        display_resolved: 0,
+        display_closed: 0,
+        require_closed: 0,
+        filter_by: 1,
+    };
+    let mut custom_field_labels = HashMap::new();
+    custom_field_labels.insert("custom_field_9".to_string(), "Browser".to_string());
+    let mut custom_field_values = HashMap::new();
+    custom_field_values.insert((21, 9), "Firefox".to_string());
+    let meta = ViewIssuesMeta {
+        columns: vec![
+            "id".to_string(),
+            "resolution".to_string(),
+            "target_version".to_string(),
+            "custom_field_9".to_string(),
+            "summary".to_string(),
+        ],
+        versions: vec!["v1.0".to_string(), "v2.0".to_string()],
+        filter_custom_fields: vec![(cf, vec!["Chrome".to_string(), "Firefox".to_string()])],
+        custom_field_labels,
+        custom_field_values,
+        ..Default::default()
+    };
+
+    let mut filter = BugFilter {
+        match_type: FILTER_MATCH_ANY,
+        resolutions: vec![20],
+        date_submitted_from: Some("2026-01-01".to_string()),
+        ..Default::default()
+    };
+    filter.custom_fields.insert(9, vec!["Firefox".to_string()]);
+    let q = filter.to_list_query();
+
+    let Html(html) = render_view_all_bug_page(
+        &ctx,
+        &[bug],
+        1,
+        1,
+        25,
+        &filter,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q,
+        &meta,
+    );
+
+    assert!(html.contains(r#"href="/account_manage_columns_page""#));
+    assert!(html.contains(r#"href="/manage_filter_page""#));
+    assert!(html.contains("Print Reports"));
+    assert!(html.contains("Excel Export"));
+    assert!(html.contains("Word Export"));
+    assert!(html.contains(r#"/issues_rss"#));
+    assert!(html.contains("Firefox"));
+    assert!(html.contains("Browser"));
+    assert!(html.contains("v2.0"));
+    assert!(html.contains("name=\"match_type\""));
+    assert!(html.contains("name=\"date_submitted_from\""));
+    assert!(html.contains("name=\"relationship_type\""));
+    assert!(html.contains("name=\"custom_field_9\""));
+    assert_no_nested_forms(&html);
+}
+
+#[test]
+fn test_render_excel_xml_escapes_and_sanitizes_formulas() {
+    let headers = vec![
+        "Id".to_string(),
+        "Notes".to_string(),
+        "Summary".to_string(),
+        "Custom <Field>".to_string(),
+    ];
+    let col_keys = vec![
+        "id".to_string(),
+        "bugnotes_count".to_string(),
+        "summary".to_string(),
+        "custom_field_1".to_string(),
+    ];
+    let rows = vec![vec![
+        "0000012".to_string(),
+        "3".to_string(),
+        "=CMD|'calc'!A0 & <script>alert(1)</script>".to_string(),
+        "\t@SUM(1,2)".to_string(),
+    ]];
+
+    let xml = render_excel_xml("Proj: Alpha/1?", &headers, &col_keys, &rows, None);
+    assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    assert!(xml.contains("<Worksheet ss:Name=\"Proj  Alpha 1\">"));
+    assert!(!xml.contains("<Worksheet ss:Name=\"Notice\">"));
+    assert!(xml.contains("<Cell><Data ss:Type=\"Number\">3</Data></Cell>"));
+    assert!(xml.contains(
+        "<Cell><Data ss:Type=\"String\">&apos;=CMD|&apos;calc&apos;!A0 &amp; &lt;script&gt;alert(1)&lt;/script&gt;</Data></Cell>"
+    ));
+    assert!(xml.contains("<Cell><Data ss:Type=\"String\">&apos;\t@SUM(1,2)</Data></Cell>"));
+    assert!(!xml.contains("<script>"));
+
+    let trunc_xml = render_excel_xml("Proj", &headers, &col_keys, &rows, Some(5));
+    assert!(trunc_xml.contains("<Worksheet ss:Name=\"Notice\">"));
+    assert!(trunc_xml.contains("Export capped at 1 of 5 matching issues (MANTIS_EXPORT_MAX_ROWS)."));
+}
+
+#[test]
+fn test_render_print_and_word_exports_escape_html_and_no_nested_forms() {
+    let ctx = dummy_ctx(1, 90);
+    let bug = Bug {
+        id: 15,
+        project_id: 1,
+        reporter_id: 1,
+        handler_id: 1,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 50,
+        resolution: 10,
+        os: "Linux".to_string(),
+        os_build: "6.8".to_string(),
+        platform: "x86_64".to_string(),
+        version: "1.0".to_string(),
+        fixed_in_version: "".to_string(),
+        target_version: "1.1".to_string(),
+        build: "b1".to_string(),
+        summary: "=evil <img src=x onerror=alert(1)>".to_string(),
+        view_state: 10,
+        sticky: 0,
+        category_id: 1,
+        date_submitted: 1_700_000_000,
+        due_date: 0,
+        last_updated: 1_700_000_000,
+    };
+    let headers = vec![
+        "Id".to_string(),
+        "Status".to_string(),
+        "Summary".to_string(),
+    ];
+    let col_keys = vec![
+        "id".to_string(),
+        "status".to_string(),
+        "summary".to_string(),
+    ];
+    let rows = vec![vec![
+        "0000015".to_string(),
+        "assigned".to_string(),
+        bug.summary.clone(),
+    ]];
+
+    let print_html = render_print_all_bug_page(
+        &ctx,
+        "Print<Proj>",
+        &ListBugsQuery::default(),
+        &headers,
+        &col_keys,
+        std::slice::from_ref(&bug),
+        &rows,
+        None,
+    )
+    .0;
+    assert!(print_html.contains("data-action=\"print\""));
+    assert!(print_html.contains("/excel_all_bug_page"));
+    assert!(print_html.contains("/word_all_bug_page"));
+    assert!(print_html.contains("&lt;img src=x onerror=alert(1)&gt;"));
+    assert!(!print_html.contains("<img src=x"));
+    assert_no_nested_forms(&print_html);
+
+    let word_doc = render_word_export_doc(
+        "Print<Proj>",
+        &[WordIssueEntry {
+            bug,
+            project_name: "Print<Proj>".to_string(),
+            category_name: "Core".to_string(),
+            reporter_name: "rep".to_string(),
+            handler_name: "dev".to_string(),
+            description: "Desc <b>bold</b>\nLine2".to_string(),
+            steps_to_reproduce: "Step 1".to_string(),
+            additional_information: "".to_string(),
+            tags: vec!["rss<tag>".to_string()],
+            custom_fields: vec![("Env<Prod>".to_string(), "Staging & QA".to_string())],
+            notes: vec![WordBugnoteEntry {
+                id: 9,
+                reporter_name: "dev".to_string(),
+                date_submitted: 1_700_000_000,
+                view_state: 50,
+                note: "Internal note <script>".to_string(),
+            }],
+        }],
+        Some(5),
+    );
+    assert!(word_doc.contains("xmlns:w=\"urn:schemas-microsoft-com:office:word\""));
+    assert!(word_doc.contains("Word export truncated to 1 of 5"));
+    assert!(word_doc.contains("Env&lt;Prod&gt;"));
+    assert!(word_doc.contains("Staging &amp; QA"));
+    assert!(word_doc.contains("Internal note &lt;script&gt;"));
+    assert!(word_doc.contains("[private]"));
+    assert!(!word_doc.contains("<script>"));
+}
+
+#[test]
 fn test_render_my_view_config_and_custom_9box_order() {
     let ctx = dummy_ctx(1, 55);
     let cfg = MyViewConfig {

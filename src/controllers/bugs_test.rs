@@ -122,6 +122,7 @@ fn test_build_view_all_bug_page_url_preserves_all_parameters_and_replaces_page()
         sort: Some("priority".to_string()),
         dir: Some("asc".to_string()),
         per_page: Some(50),
+        ..Default::default()
     };
 
     let url = build_view_all_bug_page_url(&q, 3);
@@ -1237,6 +1238,94 @@ async fn test_http_view_and_update_bug_ui_m3_parity() {
         r#"<option value="{}" selected>former_dev</option>"#,
         former_dev_id
     )));
+}
+
+#[test]
+fn test_sanitize_spreadsheet_cell_tabs_returns_and_leading_whitespace() {
+    assert_eq!(sanitize_spreadsheet_cell("\t=1+1"), "'\t=1+1");
+    assert_eq!(sanitize_spreadsheet_cell("\r@SUM(A1)"), "'\r@SUM(A1)");
+    assert_eq!(
+        sanitize_spreadsheet_cell("  +cmd|'calc'!A0"),
+        "'  +cmd|'calc'!A0"
+    );
+    assert_eq!(sanitize_spreadsheet_cell("-1+1"), "'-1+1");
+    assert_eq!(sanitize_spreadsheet_cell("normal text"), "normal text");
+}
+
+#[tokio::test]
+async fn test_phase3_m2_export_routes_return_expected_content_types() {
+    use crate::controllers::build_router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_id = db
+        .create_project("ExportRouteProj", 10, 10, "", true)
+        .unwrap();
+    db.create_bug(
+        proj_id,
+        1,
+        0,
+        "+Export Bug",
+        "Line1\nLine2",
+        "",
+        "",
+        30,
+        50,
+        10,
+        "",
+        "",
+        "",
+        "",
+        10,
+    )
+    .unwrap();
+    let proj_cookie = test_http_login(&app, "administrator", "root", proj_id).await;
+
+    for (uri, expected_ct_substr, expected_body_substr) in [
+        ("/print_all_bug_page", "text/html", "+Export Bug"),
+        (
+            "/excel_all_bug_page",
+            "application/vnd.ms-excel",
+            "&apos;+Export Bug",
+        ),
+        ("/word_all_bug_page", "application/msword", "+Export Bug"),
+        ("/bug_export_word", "application/msword", "+Export Bug"),
+    ] {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &proj_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {} failed", uri);
+        let ct = res
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains(expected_ct_substr), "{} ct={}", uri, ct);
+        let body = String::from_utf8(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            body.contains(expected_body_substr),
+            "{} missing expected body '{}'",
+            uri,
+            expected_body_substr
+        );
+    }
 }
 
 #[tokio::test]

@@ -1062,9 +1062,10 @@ pub async fn excel_all_bug_page(
         &dataset.headers,
         &dataset.col_keys,
         &dataset.rows,
+        dataset.truncated_from,
     );
 
-    (
+    let mut resp = (
         StatusCode::OK,
         [
             (
@@ -1079,7 +1080,18 @@ pub async fn excel_all_bug_page(
         ],
         xml,
     )
-        .into_response()
+        .into_response();
+    if let Some(total) = dataset.truncated_from {
+        if let Ok(hv) =
+            axum::http::HeaderValue::from_str(&format!("{}/{}", dataset.rows.len(), total))
+        {
+            resp.headers_mut().insert(
+                axum::http::header::HeaderName::from_static("x-mantis-export-truncated"),
+                hv,
+            );
+        }
+    }
+    resp
 }
 
 pub async fn word_all_bug_page(

@@ -1,4 +1,4 @@
-use crate::auth::{extract_bearer_token, is_session_expired, parse_cookies};
+use crate::auth::{is_session_expired, parse_cookies};
 use crate::controllers::bugs::{resolve_bug_filter_for_user, FilterResolveError};
 use crate::db::Db;
 use crate::models::{
@@ -102,14 +102,17 @@ fn rss_unauthorized(msg: &str) -> Response {
 }
 
 fn allow_full_query_token() -> bool {
-    std::env::var("MANTIS_ALLOW_QUERY_TOKEN")
-        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
-        .unwrap_or(false)
+    crate::models::env_flag_enabled("MANTIS_ALLOW_QUERY_TOKEN")
 }
 
-fn has_bearer_scheme(auth_hdr: &str) -> bool {
-    let mut parts = auth_hdr.split_whitespace();
-    matches!(parts.next(), Some(scheme) if scheme.eq_ignore_ascii_case("bearer"))
+fn extract_bearer_token_ci(auth_hdr: &str) -> Option<&str> {
+    let trimmed = auth_hdr.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let scheme = parts.next()?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    Some(parts.next().map(str::trim).unwrap_or(""))
 }
 
 fn authenticate_rss_request(
@@ -117,13 +120,11 @@ fn authenticate_rss_request(
     headers: &HeaderMap,
     extra: &RssExtraParams,
 ) -> Result<RssAuthContext, Box<Response>> {
-    if let Some(auth_hdr) = headers
+    if let Some(raw) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && has_bearer_scheme(s))
+        .and_then(extract_bearer_token_ci)
     {
-        let raw = extract_bearer_token(auth_hdr);
         if raw.is_empty() {
             return Err(Box::new(rss_unauthorized("API token required")));
         }

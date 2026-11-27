@@ -1320,8 +1320,11 @@ async fn test_http_advanced_filters_manage_filters_and_column_customization() {
     assert!(scoped_html.contains(r#"name="is_public""#));
 }
 
+static EXPORT_MAX_ROWS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn test_phase3_m2_print_excel_word_exports_and_rbac_sanitization() {
+    let _export_lock = EXPORT_MAX_ROWS_LOCK.lock().await;
     let db = Db::open_in_memory().unwrap();
     let app = build_router(db.clone());
 
@@ -1596,6 +1599,7 @@ async fn test_phase3_m2_print_excel_word_exports_and_rbac_sanitization() {
 
 #[tokio::test]
 async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
+    let _export_lock = EXPORT_MAX_ROWS_LOCK.lock().await;
     let db = Db::open_in_memory().unwrap();
     let app = build_router(db.clone());
 
@@ -1962,6 +1966,7 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
 
 #[tokio::test]
 async fn test_phase3_m2_cross_project_cf_access_in_csv_and_excel_exports() {
+    let _export_lock = EXPORT_MAX_ROWS_LOCK.lock().await;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use rust_mantis_bt::models::ColumnContext;
@@ -2100,4 +2105,133 @@ async fn test_phase3_m2_cross_project_cf_access_in_csv_and_excel_exports() {
         assert!(body.contains("CF_PROJ_A_ALLOWED"), "{} missing A", uri);
         assert!(!body.contains("CF_PROJ_B_FORBIDDEN"), "{} leaked B CF", uri);
     }
+}
+
+#[tokio::test]
+async fn test_phase3_m2_export_max_rows_cap_and_notices() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let _export_lock = EXPORT_MAX_ROWS_LOCK.lock().await;
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+    let proj_id = db.create_project("CapExpProj", 10, 10, "", true).unwrap();
+    db.create_bug(
+        proj_id,
+        1,
+        0,
+        "Cap Issue First",
+        "D1",
+        "",
+        "",
+        30,
+        50,
+        10,
+        "",
+        "",
+        "",
+        "",
+        10,
+    )
+    .unwrap();
+    db.create_bug(
+        proj_id,
+        1,
+        0,
+        "Cap Issue Second",
+        "D2",
+        "",
+        "",
+        30,
+        50,
+        10,
+        "",
+        "",
+        "",
+        "",
+        10,
+    )
+    .unwrap();
+    let cookie = set_project_cookie(
+        &app,
+        &login_user(&app, "administrator", "root").await,
+        proj_id,
+    )
+    .await;
+
+    std::env::set_var("MANTIS_EXPORT_MAX_ROWS", "1");
+    let res_print = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/print_all_bug_page")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let res_excel = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/excel_all_bug_page")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let res_word = app
+        .oneshot(
+            Request::builder()
+                .uri("/word_all_bug_page")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    std::env::remove_var("MANTIS_EXPORT_MAX_ROWS");
+
+    let res_print = res_print.unwrap();
+    assert_eq!(res_print.status(), StatusCode::OK);
+    let print_body = String::from_utf8(
+        axum::body::to_bytes(res_print.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(print_body.contains("Export capped at 1 of 2 matching issues"));
+
+    let res_excel = res_excel.unwrap();
+    assert_eq!(res_excel.status(), StatusCode::OK);
+    assert_eq!(
+        res_excel
+            .headers()
+            .get("x-mantis-export-truncated")
+            .and_then(|v| v.to_str().ok()),
+        Some("1/2")
+    );
+    let excel_body = String::from_utf8(
+        axum::body::to_bytes(res_excel.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(excel_body.contains("<Worksheet ss:Name=\"Notice\">"));
+    assert!(
+        excel_body.contains("Export capped at 1 of 2 matching issues (MANTIS_EXPORT_MAX_ROWS).")
+    );
+
+    let res_word = res_word.unwrap();
+    assert_eq!(res_word.status(), StatusCode::OK);
+    let word_body = String::from_utf8(
+        axum::body::to_bytes(res_word.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(word_body.contains("1 of 2"));
 }

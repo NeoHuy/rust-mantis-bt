@@ -2143,15 +2143,20 @@ fn test_render_excel_xml_escapes_and_sanitizes_formulas() {
         "\t@SUM(1,2)".to_string(),
     ]];
 
-    let xml = render_excel_xml("Proj: Alpha/1?", &headers, &col_keys, &rows);
+    let xml = render_excel_xml("Proj: Alpha/1?", &headers, &col_keys, &rows, None);
     assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
     assert!(xml.contains("<Worksheet ss:Name=\"Proj  Alpha 1\">"));
+    assert!(!xml.contains("<Worksheet ss:Name=\"Notice\">"));
     assert!(xml.contains("<Cell><Data ss:Type=\"Number\">3</Data></Cell>"));
     assert!(xml.contains(
         "<Cell><Data ss:Type=\"String\">&apos;=CMD|&apos;calc&apos;!A0 &amp; &lt;script&gt;alert(1)&lt;/script&gt;</Data></Cell>"
     ));
     assert!(xml.contains("<Cell><Data ss:Type=\"String\">&apos;\t@SUM(1,2)</Data></Cell>"));
     assert!(!xml.contains("<script>"));
+
+    let trunc_xml = render_excel_xml("Proj", &headers, &col_keys, &rows, Some(5));
+    assert!(trunc_xml.contains("<Worksheet ss:Name=\"Notice\">"));
+    assert!(trunc_xml.contains("Export capped at 1 of 5 matching issues (MANTIS_EXPORT_MAX_ROWS)."));
 }
 
 #[test]

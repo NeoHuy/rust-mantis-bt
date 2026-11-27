@@ -4832,6 +4832,7 @@ pub fn render_excel_xml(
     headers: &[String],
     col_keys: &[String],
     rows: &[Vec<String>],
+    truncated_from: Option<usize>,
 ) -> String {
     let sheet_name = sanitize_excel_worksheet_name(project_title);
     let mut out = String::from(
@@ -4878,7 +4879,19 @@ pub fn render_excel_xml(
         out.push_str("      </Row>\n");
     }
 
-    out.push_str("    </Table>\n  </Worksheet>\n</Workbook>\n");
+    out.push_str("    </Table>\n  </Worksheet>\n");
+    if let Some(total) = truncated_from {
+        let msg = format!(
+            "Export capped at {} of {} matching issues (MANTIS_EXPORT_MAX_ROWS).",
+            rows.len(),
+            total
+        );
+        out.push_str(&format!(
+            "  <Worksheet ss:Name=\"Notice\">\n    <Table>\n      <Row>\n        <Cell><Data ss:Type=\"String\">{}</Data></Cell>\n      </Row>\n    </Table>\n  </Worksheet>\n",
+            xml_escape(&sanitize_spreadsheet_cell(&msg))
+        ));
+    }
+    out.push_str("</Workbook>\n");
     out
 }
 

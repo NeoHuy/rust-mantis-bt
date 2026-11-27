@@ -217,4 +217,17 @@ async fn test_rss_requires_auth_and_supports_pat_bearer_and_query_token() {
         .find(|t| t.name == "upper_rss_tok")
         .expect("RSS token should be created");
     assert_eq!(created_rss.scope, "rss");
+
+    // 8. Uppercase BEARER scheme is accepted on /issues_rss
+    let res_upper_bearer = build_router(db)
+        .oneshot(
+            Request::builder()
+                .uri("/issues_rss")
+                .header("authorization", format!("BEARER {}", api_pat))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_upper_bearer.status(), StatusCode::OK);
 }

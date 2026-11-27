@@ -29,6 +29,8 @@ pub struct BugFilter {
     #[serde(default)]
     pub fixed_in_version: Option<String>,
     #[serde(default)]
+    pub commented_by: Option<i64>,
+    #[serde(default)]
     pub sort: Option<String>,
     #[serde(default)]
     pub dir: Option<String>,

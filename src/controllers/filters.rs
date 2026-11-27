@@ -80,6 +80,7 @@ pub async fn filter_save(
         handler_id: form.handler_id.filter(|&v| v != 0),
         tag_id: form.tag_id.filter(|&v| v > 0),
         monitored_by: None,
+        commented_by: None,
         target_version: form
             .target_version
             .as_deref()

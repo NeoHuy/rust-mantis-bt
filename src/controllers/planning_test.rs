@@ -76,7 +76,7 @@ async fn test_phase3_m3_summary_graph_and_billing_exports() {
         .unwrap();
     db.add_bugnote_with_time(bug_id, 1, "@SUM(1,2) note", 10, 90)
         .unwrap();
-    let app = build_router(db);
+    let app = build_router(db.clone());
 
     let login_res = app
         .clone()
@@ -145,4 +145,174 @@ async fn test_phase3_m3_summary_graph_and_billing_exports() {
     assert!(csv.contains("'=CMD|'calc'!A0 Bug"));
     assert!(csv.contains("'@SUM(1,2) note"));
     assert!(csv.contains("180.00"));
+
+    // Invalid summary days string falls back cleanly to 30 days (200 OK)
+    let res_bad_days = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/summary_page?days=abc")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_bad_days.status(), StatusCode::OK);
+    let bad_days_html = String::from_utf8(
+        axum::body::to_bytes(res_bad_days.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(bad_days_html.contains("Last 30 Days"));
+
+    // Billing extreme rate clamps cleanly & reversed/invalid dates surface warnings without crashing
+    let res_rev = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/billing_page?from=2026-12-01&to=2026-01-01&cost=1e308")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rev.status(), StatusCode::OK);
+    let rev_html = String::from_utf8(
+        axum::body::to_bytes(res_rev.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(rev_html.contains("Start date is after end date"));
+    assert!(rev_html.contains("No time tracking entries recorded."));
+
+    let res_bad_date = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/billing_page?from=not-a-date")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_bad_date.status(), StatusCode::OK);
+    let bad_date_html = String::from_utf8(
+        axum::body::to_bytes(res_bad_date.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(bad_date_html.contains("Invalid date filter ignored"));
+    assert!(!bad_date_html.contains(r#"value="not-a-date""#));
+
+    // Global Reporter with project-level Developer override accesses /billing_page under All Projects
+    let rep_id = db
+        .create_user(
+            "projdev",
+            "dev@example.com",
+            "Proj Dev",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    db.set_project_user(proj_id, rep_id, 55).unwrap();
+    let rep_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=projdev&password=password"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let rep_cookie = rep_login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let res_projdev_bill = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/billing_page")
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_projdev_bill.status(), StatusCode::OK);
+
+    // Reporter (global 25) is denied per-developer/reporter charts on /summary_graph_page
+    let _global_rep_id = db
+        .create_user(
+            "rep_only",
+            "rep@example.com",
+            "Rep Only",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let global_rep_login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/login")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("username=rep_only&password=password"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let global_rep_cookie = global_rep_login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let res_rep_graph = app
+        .oneshot(
+            Request::builder()
+                .uri("/summary_graph_page")
+                .header("cookie", &global_rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rep_graph.status(), StatusCode::OK);
+    let rep_graph_html = String::from_utf8(
+        axum::body::to_bytes(res_rep_graph.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!rep_graph_html.contains("By Developer"));
+    assert!(!rep_graph_html.contains("By Reporter"));
 }

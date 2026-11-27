@@ -1170,4 +1170,21 @@ fn test_compute_extended_summary_and_trend_math() {
     assert_eq!(summary.trend_days, 30);
     assert_eq!(summary.trend_points.len(), 10);
     assert_eq!(summary.trend_points.last().unwrap().cumulative_open, 1);
+
+    // Billing cost: supports i64 minutes without overflow and caps extreme hourly rates
+    let large_mins = i64::from(i32::MAX) * 2;
+    let large_cost = compute_billing_cost(large_mins, 60.0);
+    assert!((large_cost - large_mins as f64).abs() < 1.0);
+    let extreme_rate_cost = compute_billing_cost(60, 1e308);
+    assert!(extreme_rate_cost.is_finite());
+    assert!((extreme_rate_cost - 1_000_000.0).abs() < 1e-6);
+
+    // MyViewConfig lenient JSON deserialization (empty / partial config)
+    let empty_cfg: MyViewConfig = serde_json::from_str("{}").unwrap();
+    assert!(empty_cfg.show_timeline);
+    assert_eq!(empty_cfg.normalize().boxes.len(), 9);
+    let partial_cfg: MyViewConfig =
+        serde_json::from_str(r#"{"boxes":[{"key":"my_comments"}]}"#).unwrap();
+    assert_eq!(partial_cfg.boxes.len(), 1);
+    assert!(!partial_cfg.boxes[0].enabled);
 }

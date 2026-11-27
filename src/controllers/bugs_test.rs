@@ -1321,3 +1321,12 @@ async fn test_phase3_m3_my_view_config_routes_save_and_reset() {
     let cfg = db.get_my_view_config(1);
     assert!(cfg.show_timeline);
 }
+
+#[test]
+fn test_parse_time_tracking_minutes_clamping() {
+    assert_eq!(parse_time_tracking_minutes(Some("1:30")), 90);
+    assert_eq!(parse_time_tracking_minutes(Some("999999:00")), 100_000);
+    assert_eq!(parse_time_tracking_minutes(Some("999999999")), 100_000);
+    assert_eq!(parse_time_tracking_minutes(Some("-15")), 0);
+    assert_eq!(parse_time_tracking_minutes(None), 0);
+}

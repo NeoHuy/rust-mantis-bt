@@ -6069,7 +6069,60 @@ impl Db {
         rows.collect()
     }
 
+    fn list_bugs_commented_candidates(
+        &self,
+        project_id: i64,
+        commenter_id: i64,
+    ) -> rusqlite::Result<Vec<Bug>> {
+        let conn = self.conn();
+        if project_id > 0 {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, b.project_id, b.reporter_id, b.handler_id, b.duplicate_id,
+                        b.priority, b.severity, b.reproducibility, b.status, b.resolution,
+                        b.category_id, b.date_submitted, b.last_updated, b.os, b.os_build,
+                        b.platform, b.version, b.fixed_in_version, b.target_version, b.build,
+                        b.summary, b.view_state, b.sticky, b.due_date
+                 FROM mantis_bug_table b
+                 WHERE b.project_id = ?1
+                   AND EXISTS (
+                       SELECT 1 FROM mantis_bugnote_table n
+                       WHERE n.bug_id = b.id AND n.reporter_id = ?2
+                   )
+                 ORDER BY b.sticky DESC, b.last_updated DESC, b.id DESC
+                 LIMIT 50000",
+            )?;
+            let rows = stmt.query_map(params![project_id, commenter_id], Self::map_bug_row)?;
+            rows.collect()
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, b.project_id, b.reporter_id, b.handler_id, b.duplicate_id,
+                        b.priority, b.severity, b.reproducibility, b.status, b.resolution,
+                        b.category_id, b.date_submitted, b.last_updated, b.os, b.os_build,
+                        b.platform, b.version, b.fixed_in_version, b.target_version, b.build,
+                        b.summary, b.view_state, b.sticky, b.due_date
+                 FROM mantis_bug_table b
+                 WHERE EXISTS (
+                     SELECT 1 FROM mantis_bugnote_table n
+                     WHERE n.bug_id = b.id AND n.reporter_id = ?1
+                 )
+                 ORDER BY b.sticky DESC, b.last_updated DESC, b.id DESC
+                 LIMIT 50000",
+            )?;
+            let rows = stmt.query_map(params![commenter_id], Self::map_bug_row)?;
+            rows.collect()
+        }
+    }
+
     pub fn filter_bugs(&self, filter: &BugFilter, user: &User) -> rusqlite::Result<Vec<Bug>> {
+        let commenter_filter = filter.commented_by.filter(|&v| v > 0);
+        let load_candidates_for_project = |sub_pid: i64| -> rusqlite::Result<Vec<Bug>> {
+            if let Some(commenter_id) = commenter_filter {
+                self.list_bugs_commented_candidates(sub_pid, commenter_id)
+            } else {
+                self.list_bugs(sub_pid, 0, 50_000)
+            }
+        };
+
         let all_candidates = if let Some(pid) = filter.project_id {
             if pid > 0 {
                 let eff = self.effective_access_level(user, pid)?;
@@ -6079,7 +6132,7 @@ impl Db {
                 let pids = self.list_project_descendant_ids(pid)?;
                 let mut candidates = Vec::new();
                 for sub_pid in pids {
-                    candidates.extend(self.list_bugs(sub_pid, 0, 50_000)?);
+                    candidates.extend(load_candidates_for_project(sub_pid)?);
                 }
                 candidates.sort_by(|a, b| {
                     b.sticky
@@ -6089,10 +6142,10 @@ impl Db {
                 });
                 candidates
             } else {
-                self.list_bugs(0, 0, 50_000)?
+                load_candidates_for_project(0)?
             }
         } else {
-            self.list_bugs(0, 0, 50_000)?
+            load_candidates_for_project(0)?
         };
 
         let search_kw = filter
@@ -6106,6 +6159,17 @@ impl Db {
             let eff = self.effective_access_level(user, b.project_id)?;
             if !Self::can_view_bug(user.id, eff, &b) {
                 continue;
+            }
+            if let Some(commenter_id) = commenter_filter {
+                if commenter_id != user.id
+                    && eff < 55
+                    && !self
+                        .list_bugnotes(b.id, eff)?
+                        .iter()
+                        .any(|n| n.reporter_id == commenter_id)
+                {
+                    continue;
+                }
             }
             if let Some(st) = filter.status {
                 if st > 0 && b.status != st {
@@ -7032,32 +7096,14 @@ impl Db {
         user: &User,
         project_id: Option<i64>,
     ) -> rusqlite::Result<Vec<Bug>> {
-        let commented_ids: HashSet<i64> = {
-            let conn = self.conn();
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT bug_id FROM mantis_bugnote_table WHERE reporter_id = ?1",
-            )?;
-            let rows = stmt.query_map(params![user.id], |row| row.get::<_, i64>(0))?;
-            let mut set = HashSet::new();
-            for r in rows {
-                set.insert(r?);
-            }
-            set
-        };
-        if commented_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let accessible = self.filter_bugs(
+        self.filter_bugs(
             &BugFilter {
                 project_id,
+                commented_by: Some(user.id),
                 ..Default::default()
             },
             user,
-        )?;
-        Ok(accessible
-            .into_iter()
-            .filter(|b| commented_ids.contains(&b.id))
-            .collect())
+        )
     }
 
     /// Returns `(history_counts, resolved_at_map)` in two chunked parameterized queries.

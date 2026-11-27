@@ -18,17 +18,35 @@ fn truncate_label(label: &str, max_chars: usize) -> String {
     }
 }
 
-/// Renders a responsive inline SVG horizontal bar chart (no external scripts/CDN).
-pub fn render_horizontal_bar_chart(title: &str, items: &[(String, usize, &str)]) -> String {
-    let non_zero: Vec<&(String, usize, &str)> = items
+fn aggregate_chart_items<'a>(
+    items: &'a [(String, usize, &'a str)],
+    cap: usize,
+) -> (Vec<(String, usize, &'a str)>, usize) {
+    let mut sorted: Vec<(String, usize, &'a str)> = items
         .iter()
         .filter(|(_, cnt, _)| *cnt > 0)
-        .take(12)
+        .map(|(lbl, cnt, col)| (lbl.clone(), *cnt, *col))
         .collect();
-    let max_val = non_zero.iter().map(|(_, cnt, _)| *cnt).max().unwrap_or(0);
-    let total: usize = non_zero.iter().map(|(_, cnt, _)| *cnt).sum();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    if non_zero.is_empty() || max_val == 0 {
+    let total: usize = sorted.iter().map(|(_, cnt, _)| *cnt).sum();
+    if sorted.len() > cap && cap > 1 {
+        let keep = cap - 1;
+        let other_sum: usize = sorted[keep..].iter().map(|(_, cnt, _)| *cnt).sum();
+        sorted.truncate(keep);
+        if other_sum > 0 {
+            sorted.push(("Other".to_string(), other_sum, "#9ca3af"));
+        }
+    }
+    (sorted, total)
+}
+
+/// Renders a responsive inline SVG horizontal bar chart (no external scripts/CDN).
+pub fn render_horizontal_bar_chart(title: &str, items: &[(String, usize, &str)]) -> String {
+    let (non_zero, total) = aggregate_chart_items(items, 12);
+    let max_val = non_zero.iter().map(|(_, cnt, _)| *cnt).max().unwrap_or(0);
+
+    if non_zero.is_empty() || max_val == 0 || total == 0 {
         return format!(
             r#"<div class="text-xs text-gray-500 text-center py-8" role="region" aria-label="{}">No chart data available.</div>"#,
             html_escape(title)
@@ -87,12 +105,7 @@ pub fn render_horizontal_bar_chart(title: &str, items: &[(String, usize, &str)])
 
 /// Renders an inline SVG donut chart + legend using circumference stroke dashes.
 pub fn render_donut_chart(title: &str, items: &[(String, usize, &str)]) -> String {
-    let non_zero: Vec<&(String, usize, &str)> = items
-        .iter()
-        .filter(|(_, cnt, _)| *cnt > 0)
-        .take(10)
-        .collect();
-    let total: usize = non_zero.iter().map(|(_, cnt, _)| *cnt).sum();
+    let (non_zero, total) = aggregate_chart_items(items, 10);
 
     if non_zero.is_empty() || total == 0 {
         return format!(

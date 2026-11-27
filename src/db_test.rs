@@ -4871,4 +4871,49 @@ fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
         .list_time_tracking_filtered(&admin, parent_p, true, Some(4_000_000_000), None)
         .unwrap();
     assert!(empty_future.is_empty());
+
+    // Private note is not visible to lower-privilege user filtering commented_by another user,
+    // while project-scoped list_bugs_commented_by_user respects project_id & subprojects.
+    let priv_note_bug = db
+        .create_bug(
+            pub_child,
+            admin.id,
+            1,
+            "Bug with admin private note",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote_with_time(priv_note_bug, admin.id, "Secret admin note", 50, 0)
+        .unwrap();
+    let rep_id = db
+        .create_user("sub4_rep", "rep@ex.com", "Rep", "pw", 25, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let rep_filtering_admin = db
+        .filter_bugs(
+            &BugFilter {
+                commented_by: Some(admin.id),
+                ..Default::default()
+            },
+            &rep,
+        )
+        .unwrap();
+    assert!(!rep_filtering_admin.iter().any(|b| b.id == priv_note_bug));
+    assert!(!rep_filtering_admin.iter().any(|b| b.id == b_priv_child));
+
+    let dev_scoped = db
+        .list_bugs_commented_by_user(&dev, Some(pub_child))
+        .unwrap();
+    assert_eq!(dev_scoped.len(), 1);
+    assert_eq!(dev_scoped[0].id, b_pub_child);
 }

@@ -223,6 +223,7 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         handler_id: q.handler_id.filter(|&v| v != 0),
         tag_id: q.tag_id.filter(|&v| v > 0),
         monitored_by: q.monitored_by.filter(|&v| v > 0),
+        commented_by: None,
         target_version: q
             .target_version
             .as_deref()
@@ -491,7 +492,13 @@ pub async fn my_view_config_update(
     }
 
     if form_map.get("action").map(String::as_str) == Some("reset") {
-        let _ = db.delete_config(MY_VIEW_CONFIG_ID, 0, ctx.user.id);
+        if let Err(e) = db.delete_config(MY_VIEW_CONFIG_ID, 0, ctx.user.id) {
+            return Redirect::to(&format!(
+                "/my_view_page?err={}",
+                crate::models::url_encode(&format!("Failed to reset My View layout: {}", e))
+            ))
+            .into_response();
+        }
         return Redirect::to("/my_view_page?msg=My+View+layout+reset+to+defaults").into_response();
     }
 
@@ -3040,6 +3047,7 @@ pub struct BugnoteAddForm {
 }
 
 fn parse_time_tracking_minutes(raw: Option<&str>) -> i32 {
+    const MAX_NOTE_MINUTES: i32 = 100_000;
     let s = match raw {
         Some(v) => v.trim(),
         None => return 0,
@@ -3050,9 +3058,11 @@ fn parse_time_tracking_minutes(raw: Option<&str>) -> i32 {
     if let Some((hh, mm)) = s.split_once(':') {
         let h = hh.trim().parse::<i32>().unwrap_or(0).max(0);
         let m = mm.trim().parse::<i32>().unwrap_or(0).max(0);
-        h * 60 + m
+        h.saturating_mul(60)
+            .saturating_add(m)
+            .clamp(0, MAX_NOTE_MINUTES)
     } else {
-        s.parse::<i32>().unwrap_or(0).max(0)
+        s.parse::<i32>().unwrap_or(0).clamp(0, MAX_NOTE_MINUTES)
     }
 }
 

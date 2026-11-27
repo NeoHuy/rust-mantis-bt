@@ -167,7 +167,7 @@ pub struct BillingIssueSummary {
     pub bug_id: i64,
     pub bug_summary: String,
     pub project_name: String,
-    pub minutes: i32,
+    pub minutes: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -178,9 +178,10 @@ pub struct BillingFilterOptions {
     pub hourly_rate: f64,
 }
 
-pub fn compute_billing_cost(minutes: i32, hourly_rate: f64) -> f64 {
+pub fn compute_billing_cost(minutes: i64, hourly_rate: f64) -> f64 {
     if hourly_rate.is_finite() && hourly_rate > 0.0 && minutes > 0 {
-        (minutes as f64) * hourly_rate / 60.0
+        let capped_rate = hourly_rate.min(1_000_000.0);
+        (minutes as f64) * capped_rate / 60.0
     } else {
         0.0
     }
@@ -347,8 +348,11 @@ impl MyViewBox {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MyViewBoxConfigEntry {
+    #[serde(default)]
     pub key: String,
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
     pub order: i32,
 }
 
@@ -358,6 +362,7 @@ fn default_show_timeline() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MyViewConfig {
+    #[serde(default)]
     pub boxes: Vec<MyViewBoxConfigEntry>,
     #[serde(default = "default_show_timeline")]
     pub show_timeline: bool,

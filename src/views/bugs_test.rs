@@ -2043,5 +2043,6 @@ fn test_render_my_view_config_and_custom_9box_order() {
     let idx_ver = mv_html.find("Waiting for Verification").unwrap();
     assert!(idx_comm < idx_ver);
     assert!(!mv_html.contains("Timeline"));
+    assert!(!mv_html.contains(r#"id="timeline""#));
     assert_no_nested_forms(&mv_html);
 }

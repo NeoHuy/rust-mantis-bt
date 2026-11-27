@@ -572,6 +572,7 @@ fn build_palette_items<I: Iterator<Item = (String, usize)>>(
 pub fn render_summary_page_extended(
     ctx: &AuthContext,
     summary: &ExtendedSummaryData,
+    show_user_metrics: bool,
 ) -> Html<String> {
     let proj_rows: Vec<(String, SummaryCounts)> = summary
         .by_project
@@ -813,6 +814,15 @@ pub fn render_summary_page_extended(
         &render_issues_trend_svg("Issues Trend", &summary.trend_points),
     );
 
+    let (rep_eff_slot, dev_res_slot) = if show_user_metrics {
+        (
+            rep_eff_widget,
+            format!(r#"<div class="mt-4">{dev_res_widget}</div>"#),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
     let content = format!(
         r#"{subnav}
         <div class="widget-box widget-color-blue2">
@@ -844,13 +854,11 @@ pub fn render_summary_page_extended(
             {by_date_widget}
             {longest_widget}
             {most_active_widget}
-            {rep_eff_widget}
+            {rep_eff_slot}
             {rep_widget}
             {hnd_widget}
         </div>
-        <div class="mt-4">
-            {dev_res_widget}
-        </div>"#,
+        {dev_res_slot}"#,
         subnav = render_summary_subnav(false),
         total = summary.total_bugs,
         open = summary.open_count,
@@ -867,16 +875,20 @@ pub fn render_summary_page_extended(
         by_date_widget = by_date_widget,
         longest_widget = longest_widget,
         most_active_widget = most_active_widget,
-        rep_eff_widget = rep_eff_widget,
+        rep_eff_slot = rep_eff_slot,
         rep_widget = rep_widget,
         hnd_widget = hnd_widget,
-        dev_res_widget = dev_res_widget,
+        dev_res_slot = dev_res_slot,
     );
 
     render_layout("Summary", ctx, None, &content)
 }
 
-pub fn render_summary_graph_page(ctx: &AuthContext, summary: &ExtendedSummaryData) -> Html<String> {
+pub fn render_summary_graph_page(
+    ctx: &AuthContext,
+    summary: &ExtendedSummaryData,
+    show_user_metrics: bool,
+) -> Html<String> {
     let status_items: Vec<(String, usize, &'static str)> = summary
         .by_status
         .iter()
@@ -973,18 +985,24 @@ pub fn render_summary_graph_page(ctx: &AuthContext, summary: &ExtendedSummaryDat
         "",
         &render_horizontal_bar_chart("By Resolution", &res_items),
     );
-    let dev_bar = render_summary_chart_widget(
-        "By Developer",
-        "fa-wrench",
-        "",
-        &render_horizontal_bar_chart("By Developer", &dev_items),
-    );
-    let rep_bar = render_summary_chart_widget(
-        "By Reporter",
-        "fa-user",
-        "",
-        &render_horizontal_bar_chart("By Reporter", &rep_items),
-    );
+    let (dev_bar, rep_bar) = if show_user_metrics {
+        (
+            render_summary_chart_widget(
+                "By Developer",
+                "fa-wrench",
+                "",
+                &render_horizontal_bar_chart("By Developer", &dev_items),
+            ),
+            render_summary_chart_widget(
+                "By Reporter",
+                "fa-user",
+                "",
+                &render_horizontal_bar_chart("By Reporter", &rep_items),
+            ),
+        )
+    } else {
+        (String::new(), String::new())
+    };
 
     let content = format!(
         r#"{subnav}
@@ -1019,8 +1037,8 @@ pub fn render_summary_graph_page(ctx: &AuthContext, summary: &ExtendedSummaryDat
 pub fn render_billing_page(
     ctx: &AuthContext,
     entries: &[TimeTrackingEntry],
-    by_user: &BTreeMap<String, i32>,
-    total_mins: i32,
+    by_user: &BTreeMap<String, i64>,
+    total_mins: i64,
 ) -> Html<String> {
     render_billing_page_extended(
         ctx,
@@ -1029,6 +1047,7 @@ pub fn render_billing_page(
         &[],
         total_mins,
         &BillingFilterOptions::default(),
+        None,
     )
 }
 
@@ -1060,10 +1079,11 @@ fn build_billing_export_url(base_path: &str, opts: &BillingFilterOptions) -> Str
 pub fn render_billing_page_extended(
     ctx: &AuthContext,
     entries: &[TimeTrackingEntry],
-    by_user: &BTreeMap<String, i32>,
+    by_user: &BTreeMap<String, i64>,
     by_issue: &[BillingIssueSummary],
-    total_mins: i32,
+    total_mins: i64,
     opts: &BillingFilterOptions,
+    warning: Option<&str>,
 ) -> Html<String> {
     let has_rate = opts.hourly_rate > 0.0;
     let total_cost = compute_billing_cost(total_mins, opts.hourly_rate);
@@ -1079,7 +1099,7 @@ pub fn render_billing_page_extended(
         let cost_td = if has_rate {
             format!(
                 r#"<td class="whitespace-nowrap">${:.2}</td>"#,
-                compute_billing_cost(e.minutes, opts.hourly_rate)
+                compute_billing_cost(i64::from(e.minutes), opts.hourly_rate)
             )
         } else {
             String::new()
@@ -1198,6 +1218,15 @@ pub fn render_billing_page_extended(
     };
     let csv_url = build_billing_export_url("/billing_export_csv", opts);
     let excel_url = build_billing_export_url("/billing_export_excel", opts);
+    let warning_html = warning
+        .filter(|w| !w.trim().is_empty())
+        .map(|w| {
+            format!(
+                r#"<div class="flash-error mb-3"><i class="fa fa-exclamation-triangle" aria-hidden="true"></i> {}</div>"#,
+                html_escape(w)
+            )
+        })
+        .unwrap_or_default();
 
     let content = format!(
         r#"<div class="flex flex-wrap items-center justify-between gap-2 mb-3">
@@ -1207,6 +1236,7 @@ pub fn render_billing_page_extended(
                 <a href="{excel_url}" class="btn btn-white btn-round btn-sm"><i class="fa fa-file-excel-o" aria-hidden="true"></i> Excel Export</a>
             </div>
         </div>
+        {warning_html}
         <div class="widget-box widget-color-blue2">
             <div class="widget-header widget-header-small">
                 <h4 class="widget-title"><i class="fa fa-filter" aria-hidden="true"></i> Billing Filters &amp; Rate</h4>
@@ -1292,6 +1322,7 @@ pub fn render_billing_page_extended(
         issue_rows = issue_rows,
         entry_count = entries.len(),
         rows_html = rows_html,
+        warning_html = warning_html,
     );
 
     render_layout("Time Tracking", ctx, None, &content)
@@ -1330,7 +1361,7 @@ pub fn render_billing_csv(entries: &[TimeTrackingEntry], hourly_rate: f64) -> St
         if has_rate {
             cells.push(format!(
                 "{:.2}",
-                compute_billing_cost(e.minutes, hourly_rate)
+                compute_billing_cost(i64::from(e.minutes), hourly_rate)
             ));
         }
         cells.push(sanitize_billing_csv_cell(&e.note));
@@ -1394,7 +1425,7 @@ pub fn render_billing_excel_xml(entries: &[TimeTrackingEntry], hourly_rate: f64)
         if has_rate {
             out.push_str(&format!(
                 "        <Cell><Data ss:Type=\"Number\">{:.2}</Data></Cell>\n",
-                compute_billing_cost(e.minutes, hourly_rate)
+                compute_billing_cost(i64::from(e.minutes), hourly_rate)
             ));
         }
         out.push_str(&text_cell(&e.note));

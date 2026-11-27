@@ -28,7 +28,25 @@ pub struct RoadmapQuery {
 
 #[derive(Deserialize, Default)]
 pub struct SummaryQuery {
-    pub days: Option<i64>,
+    pub days: Option<String>,
+}
+
+fn parse_summary_days(raw: Option<&str>) -> i64 {
+    raw.and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(30)
+}
+
+fn summary_access(db: &Db, ctx: &AuthContext) -> Result<bool, Box<Response>> {
+    if ctx.active_project_id > 0 {
+        let eff = db
+            .effective_access_level(&ctx.user, ctx.active_project_id)
+            .unwrap_or(0);
+        if eff < 10 {
+            return Err(Box::new(forbidden(ctx, "Access denied to this project.")));
+        }
+        Ok(eff >= 70)
+    } else {
+        Ok(ctx.user.access_level >= 70)
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -226,8 +244,12 @@ pub async fn summary_page(
     ctx: AuthContext,
     Query(q): Query<SummaryQuery>,
 ) -> Response {
-    let summary = load_extended_summary(&db, &ctx, q.days.unwrap_or(30));
-    views::planning::render_summary_page_extended(&ctx, &summary).into_response()
+    let show_user_metrics = match summary_access(&db, &ctx) {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+    let summary = load_extended_summary(&db, &ctx, parse_summary_days(q.days.as_deref()));
+    views::planning::render_summary_page_extended(&ctx, &summary, show_user_metrics).into_response()
 }
 
 pub async fn summary_graph_page(
@@ -235,16 +257,21 @@ pub async fn summary_graph_page(
     ctx: AuthContext,
     Query(q): Query<SummaryQuery>,
 ) -> Response {
-    let summary = load_extended_summary(&db, &ctx, q.days.unwrap_or(30));
-    views::planning::render_summary_graph_page(&ctx, &summary).into_response()
+    let show_user_metrics = match summary_access(&db, &ctx) {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+    let summary = load_extended_summary(&db, &ctx, parse_summary_days(q.days.as_deref()));
+    views::planning::render_summary_graph_page(&ctx, &summary, show_user_metrics).into_response()
 }
 
 struct BillingReportData {
     entries: Vec<TimeTrackingEntry>,
-    by_user: BTreeMap<String, i32>,
+    by_user: BTreeMap<String, i64>,
     by_issue: Vec<BillingIssueSummary>,
-    total_mins: i32,
+    total_mins: i64,
     opts: BillingFilterOptions,
+    warning: Option<String>,
 }
 
 fn load_billing_report(
@@ -255,8 +282,15 @@ fn load_billing_report(
     let eff = if ctx.active_project_id > 0 {
         db.effective_access_level(&ctx.user, ctx.active_project_id)
             .unwrap_or(0)
-    } else {
+    } else if ctx.user.access_level >= 55 {
         ctx.user.access_level
+    } else {
+        ctx.visible_projects
+            .iter()
+            .filter(|(p, _)| p.enabled != 0)
+            .filter_map(|(p, _)| db.effective_access_level(&ctx.user, p.id).ok())
+            .max()
+            .unwrap_or(0)
     };
     if eff < 55 {
         return Err(Box::new(forbidden(
@@ -265,59 +299,86 @@ fn load_billing_report(
         )));
     }
 
-    let from_clean = q
+    let from_raw = q
         .from
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
-    let to_clean =
+    let to_raw =
         q.to.as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(String::from);
-    let from_ts = from_clean
+    let from_ts = from_raw
         .as_deref()
         .map(views::parse_date_to_epoch)
         .filter(|&t| t > 0);
-    let to_ts = to_clean
+    let to_ts = to_raw
         .as_deref()
         .map(views::parse_date_to_epoch)
         .filter(|&t| t > 0)
         .map(|t| t + 86_399);
+    let from_clean = if from_ts.is_some() {
+        from_raw.clone()
+    } else {
+        None
+    };
+    let to_clean = if to_ts.is_some() {
+        to_raw.clone()
+    } else {
+        None
+    };
+    let invalid_date =
+        (from_raw.is_some() && from_ts.is_none()) || (to_raw.is_some() && to_ts.is_none());
+    let reversed_range = matches!((from_ts, to_ts), (Some(f), Some(t)) if f > t);
+    let warning = if invalid_date {
+        Some("Invalid date filter ignored; expected YYYY-MM-DD.".to_string())
+    } else if reversed_range {
+        Some("Start date is after end date; no entries match this range.".to_string())
+    } else {
+        None
+    };
+
     let include_subprojects = parse_bool(q.include_subprojects.as_deref());
     let hourly_rate = q
         .cost
         .as_deref()
         .and_then(|s| s.trim().parse::<f64>().ok())
         .filter(|r| r.is_finite() && *r >= 0.0)
+        .map(|r| r.min(1_000_000.0))
         .unwrap_or(0.0);
 
-    let entries = db
-        .list_time_tracking_filtered(
+    let entries = if reversed_range {
+        Vec::new()
+    } else {
+        db.list_time_tracking_filtered(
             &ctx.user,
             ctx.active_project_id,
             include_subprojects,
             from_ts,
             to_ts,
         )
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
-    let mut total_mins = 0i32;
-    let mut by_user: BTreeMap<String, i32> = BTreeMap::new();
+    let mut total_mins = 0i64;
+    let mut by_user: BTreeMap<String, i64> = BTreeMap::new();
     let mut by_issue_map: HashMap<i64, BillingIssueSummary> = HashMap::new();
 
     for e in &entries {
-        total_mins += e.minutes;
-        *by_user.entry(e.username.clone()).or_default() += e.minutes;
+        let mins = i64::from(e.minutes.max(0));
+        total_mins = total_mins.saturating_add(mins);
+        let u_entry = by_user.entry(e.username.clone()).or_default();
+        *u_entry = u_entry.saturating_add(mins);
         by_issue_map
             .entry(e.bug_id)
-            .and_modify(|item| item.minutes += e.minutes)
+            .and_modify(|item| item.minutes = item.minutes.saturating_add(mins))
             .or_insert_with(|| BillingIssueSummary {
                 bug_id: e.bug_id,
                 bug_summary: e.bug_summary.clone(),
                 project_name: e.project_name.clone(),
-                minutes: e.minutes,
+                minutes: mins,
             });
     }
 
@@ -339,6 +400,7 @@ fn load_billing_report(
             include_subprojects,
             hourly_rate,
         },
+        warning,
     })
 }
 
@@ -359,6 +421,7 @@ pub async fn billing_page(
         &report.by_issue,
         report.total_mins,
         &report.opts,
+        report.warning.as_deref(),
     )
     .into_response()
 }

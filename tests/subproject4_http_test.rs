@@ -688,6 +688,8 @@ async fn test_phase3_m3_extended_summary_and_svg_graphs_with_rbac() {
     assert!(rep_html.contains("Overview (Total Issues: 2)"));
     assert!(!rep_html.contains("SummaryPriv"));
     assert!(!rep_html.contains("Hidden Private Proj Issue"));
+    assert!(!rep_html.contains("Developer &times; Resolution Breakdown"));
+    assert!(!rep_html.contains("Reporter Effectiveness"));
 
     // Graphs page returns inline SVGs
     let res_g = app
@@ -711,6 +713,60 @@ async fn test_phase3_m3_extended_summary_and_svg_graphs_with_rbac() {
     .unwrap();
     assert!(g_html.contains("Issues Trend (Last 365 Days)"));
     assert!(g_html.contains("<svg"));
+    assert!(g_html.contains("By Developer"));
+    assert!(g_html.contains("By Reporter"));
+
+    // Reporter is hidden from per-user charts on summary_graph_page and denied on private project summary
+    let res_rep_g = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/summary_graph_page")
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rep_g.status(), StatusCode::OK);
+    let rep_g_html = String::from_utf8(
+        axum::body::to_bytes(res_rep_g.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!rep_g_html.contains("By Developer"));
+    assert!(!rep_g_html.contains("By Reporter"));
+
+    let rep_priv_cookie = format!(
+        "{}; MANTIS_PROJECT_COOKIE={}",
+        rep_cookie.split(';').next().unwrap(),
+        priv_proj
+    );
+    let res_rep_priv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/summary_page")
+                .header("cookie", &rep_priv_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rep_priv.status(), StatusCode::OK);
+    let rep_priv_html = String::from_utf8(
+        axum::body::to_bytes(res_rep_priv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(rep_priv_html.contains("Overview (Total Issues: 2)"));
+    assert!(!rep_priv_html.contains("SummaryPriv"));
+    assert!(!rep_priv_html.contains("Hidden Private Proj Issue"));
+    assert!(!rep_priv_html.contains("Developer &times; Resolution Breakdown"));
 }
 
 #[tokio::test]

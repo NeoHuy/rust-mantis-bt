@@ -259,7 +259,7 @@ fn test_render_extended_summary_graphs_and_billing_exports() {
         ..Default::default()
     };
 
-    let Html(sum_html) = render_summary_page_extended(&ctx, &summary);
+    let Html(sum_html) = render_summary_page_extended(&ctx, &summary, true);
     assert!(sum_html.contains("By Project"));
     assert!(sum_html.contains("By Date (Opened vs Resolved)"));
     assert!(sum_html.contains("Longest Open Issues"));
@@ -268,9 +268,20 @@ fn test_render_extended_summary_graphs_and_billing_exports() {
     assert!(sum_html.contains("Reporter Effectiveness"));
     assert!(sum_html.contains("<svg"));
 
-    let Html(graph_html) = render_summary_graph_page(&ctx, &summary);
+    let Html(sum_no_user) = render_summary_page_extended(&ctx, &summary, false);
+    assert!(sum_no_user.contains("By Project"));
+    assert!(!sum_no_user.contains("Developer &times; Resolution Breakdown"));
+    assert!(!sum_no_user.contains("Reporter Effectiveness"));
+
+    let Html(graph_html) = render_summary_graph_page(&ctx, &summary, true);
     assert!(graph_html.contains("<svg"));
+    assert!(graph_html.contains("By Developer"));
+    assert!(graph_html.contains("By Reporter"));
     assert!(graph_html.contains("/summary_page"));
+
+    let Html(graph_no_user) = render_summary_graph_page(&ctx, &summary, false);
+    assert!(!graph_no_user.contains("By Developer"));
+    assert!(!graph_no_user.contains("By Reporter"));
 
     let entries = vec![TimeTrackingEntry {
         bug_id: 7,
@@ -292,4 +303,21 @@ fn test_render_extended_summary_graphs_and_billing_exports() {
     assert!(xml.contains("&apos;=CMD|&apos;calc&apos;!A0 &lt;xss&gt;"));
     assert!(xml.contains("&apos;@SUM(1,2) &amp; log"));
     assert!(xml.contains("<Data ss:Type=\"Number\">120.00</Data>"));
+
+    // Billing extended page handles >i32::MAX total minutes and warning banner
+    let mut by_user = BTreeMap::new();
+    let big_mins = i64::from(i32::MAX) + 120;
+    by_user.insert("dev".to_string(), big_mins);
+    let Html(bill_html) = render_billing_page_extended(
+        &ctx,
+        &entries,
+        &by_user,
+        &[],
+        big_mins,
+        &BillingFilterOptions::default(),
+        Some("Invalid date <xss> ignored"),
+    );
+    assert!(bill_html.contains(&format!("({} mins)", big_mins)));
+    assert!(bill_html.contains("Invalid date &lt;xss&gt; ignored"));
+    assert!(!bill_html.contains("<xss>"));
 }

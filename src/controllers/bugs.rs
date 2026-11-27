@@ -160,8 +160,22 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
     if let Some(fid) = q.filter_id {
         if let Ok(Some((sf, mut bf))) = db.get_filter(fid) {
             if sf.is_public != 0 || sf.user_id == ctx.user.id || ctx.user.access_level >= 70 {
-                if ctx.active_project_id > 0 {
+                if let Some(pid) = q.project_id.filter(|&v| v > 0) {
+                    bf.project_id = Some(pid);
+                } else if ctx.active_project_id > 0 {
                     bf.project_id = Some(ctx.active_project_id);
+                }
+                if let Some(ref tv) = q.target_version {
+                    let trimmed = tv.trim();
+                    if !trimmed.is_empty() {
+                        bf.target_version = Some(trimmed.to_string());
+                    }
+                }
+                if let Some(ref fv) = q.fixed_in_version {
+                    let trimmed = fv.trim();
+                    if !trimmed.is_empty() {
+                        bf.fixed_in_version = Some(trimmed.to_string());
+                    }
                 }
                 if let Some(ref s) = q.sort {
                     let trimmed = s.trim();
@@ -191,7 +205,9 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
             .filter(|s| !s.trim().is_empty());
 
     BugFilter {
-        project_id: if ctx.active_project_id > 0 {
+        project_id: if let Some(pid) = q.project_id.filter(|&v| v > 0) {
+            Some(pid)
+        } else if ctx.active_project_id > 0 {
             Some(ctx.active_project_id)
         } else {
             None
@@ -206,6 +222,18 @@ fn resolve_bug_filter(db: &Db, ctx: &AuthContext, q: &ListBugsQuery) -> BugFilte
         handler_id: q.handler_id.filter(|&v| v != 0),
         tag_id: q.tag_id.filter(|&v| v > 0),
         monitored_by: q.monitored_by.filter(|&v| v > 0),
+        target_version: q
+            .target_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        fixed_in_version: q
+            .fixed_in_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         sort: q
             .sort
             .as_deref()
@@ -429,21 +457,41 @@ fn sanitize_csv_cell(val: &str) -> String {
     }
 }
 
-pub async fn csv_export(
-    State(db): State<Db>,
-    ctx: AuthContext,
-    Query(q): Query<ListBugsQuery>,
-) -> Response {
+fn check_project_filter_access(
+    db: &Db,
+    ctx: &AuthContext,
+    override_project_id: Option<i64>,
+) -> Option<Response> {
     if ctx.active_project_id > 0 {
         let eff = db
             .effective_access_level(&ctx.user, ctx.active_project_id)
             .unwrap_or(0);
         if eff < 10 {
-            return forbidden(&ctx, "You do not have access to this project.");
+            return Some(forbidden(ctx, "You do not have access to this project."));
         }
+    }
+    if let Some(pid) = override_project_id.filter(|&v| v > 0) {
+        let eff = db.effective_access_level(&ctx.user, pid).unwrap_or(0);
+        if eff < 10 {
+            return Some(forbidden(ctx, "You do not have access to this project."));
+        }
+    }
+    None
+}
+
+pub async fn csv_export(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<ListBugsQuery>,
+) -> Response {
+    if let Some(resp) = check_project_filter_access(&db, &ctx, q.project_id) {
+        return resp;
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
+    if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
+        return resp;
+    }
     let mut bugs = db.filter_bugs(&filter, &ctx.user).unwrap_or_default();
     let effective_sort = q
         .sort
@@ -533,16 +581,14 @@ pub async fn view_all_bug_page(
     ctx: AuthContext,
     Query(q): Query<ListBugsQuery>,
 ) -> Response {
-    if ctx.active_project_id > 0 {
-        let eff = db
-            .effective_access_level(&ctx.user, ctx.active_project_id)
-            .unwrap_or(0);
-        if eff < 10 {
-            return forbidden(&ctx, "You do not have access to this project.");
-        }
+    if let Some(resp) = check_project_filter_access(&db, &ctx, q.project_id) {
+        return resp;
     }
 
     let filter = resolve_bug_filter(&db, &ctx, &q);
+    if let Some(resp) = check_project_filter_access(&db, &ctx, filter.project_id) {
+        return resp;
+    }
     let page = q.page.unwrap_or(1).max(1);
 
     let effective_sort = q
@@ -601,9 +647,10 @@ pub async fn view_all_bug_page(
         .map(|(p, _)| (p.id, p.name.clone()))
         .collect();
 
+    let effective_project_id = filter.project_id.unwrap_or(ctx.active_project_id);
     let mut categories_map = db.list_all_categories_map().unwrap_or_default();
     let cats = db
-        .list_effective_categories(ctx.active_project_id)
+        .list_effective_categories(effective_project_id)
         .unwrap_or_default();
     let mut all_cats = Vec::new();
     for c in &cats {

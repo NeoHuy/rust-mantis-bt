@@ -41,7 +41,7 @@ pub fn render_manage_proj_page(
                 <td>{}</td>
                 <td>{}</td>
                 <td>
-                    <a href="/manage_proj_edit_page/{}" class="btn btn-secondary btn-sm">Edit</a>
+                    <a href="/manage_proj_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>
                 </td>
             </tr>"#,
             row_class,
@@ -90,50 +90,61 @@ pub fn render_manage_proj_page(
 
     let content = format!(
         r#"
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;">
-            <h2 class="section-title" style="margin:0; border:none;">Projects</h2>
-            <a href="/manage_proj_create_page" class="btn">Create New Project</a>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-folder-open" aria-hidden="true"></i> Projects</h4>
+                <div class="widget-toolbar">
+                    <a href="/manage_proj_create_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Create New Project</a>
+                </div>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Status</th>
+                                <th>Enabled</th>
+                                <th>View Status</th>
+                                <th>Description</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
 
-        <table class="data-table" style="margin-bottom:24px;">
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Status</th>
-                    <th>Enabled</th>
-                    <th>View Status</th>
-                    <th>Description</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {}
-            </tbody>
-        </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-tags" aria-hidden="true"></i> Global Categories</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Category</th>
+                                <th>Assign To</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
 
-        <div class="panel">
-            <div class="panel-header">Global Categories</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Category</th>
-                            <th>Assign To</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
-
-                <form method="POST" action="/manage_proj_cat_add" style="margin-top:14px; display:flex; align-items:center; gap:8px;">
+                <form method="POST" action="/manage_proj_cat_add" class="mt-3.5 flex flex-wrap items-center gap-2">
                     <input type="hidden" name="project_id" value="0" />
                     <input type="text" name="name" placeholder="New Global Category" required style="width:200px;" />
                     <select name="user_id" style="width:180px;">
                         {}
                     </select>
-                    <button type="submit" class="btn">Add Category</button>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Category</button>
                 </form>
             </div>
         </div>
@@ -146,49 +157,53 @@ pub fn render_manage_proj_page(
 
 pub fn render_proj_create_page(ctx: &AuthContext) -> Html<String> {
     let content = r#"
-    <div class="panel">
-        <div class="panel-header">Create Project</div>
-        <div class="panel-body">
+    <div class="widget-box widget-color-blue2">
+        <div class="widget-header">
+            <h4 class="widget-title"><i class="fa fa-plus-circle" aria-hidden="true"></i> Create Project</h4>
+        </div>
+        <div class="widget-body">
             <form method="POST" action="/manage_proj_create">
-                <table class="form-table">
-                    <tr>
-                        <td class="label-col">Project Name *</td>
-                        <td class="input-col"><input type="text" name="name" required autofocus /></td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Status</td>
-                        <td class="input-col">
-                            <select name="status">
-                                <option value="10" selected>development (10)</option>
-                                <option value="30">release (30)</option>
-                                <option value="50">stable (50)</option>
-                                <option value="70">obsolete (70)</option>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">View Status</td>
-                        <td class="input-col">
-                            <select name="view_state">
-                                <option value="10" selected>public (10)</option>
-                                <option value="50">private (50)</option>
-                            </select>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Inherit Global Categories</td>
-                        <td class="input-col">
-                            <label><input type="checkbox" name="inherit_global" value="1" checked /> Inherit global categories</label>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="label-col">Description</td>
-                        <td class="input-col"><textarea name="description"></textarea></td>
-                    </tr>
-                </table>
-                <div style="margin-top: 14px;">
-                    <button type="submit" class="btn">Add Project</button>
-                    <a href="/manage_proj_page" class="btn btn-secondary" style="margin-left:8px;">Cancel</a>
+                <div class="table-responsive">
+                    <table class="form-table">
+                        <tr>
+                            <td class="label-col">Project Name <span class="required">*</span></td>
+                            <td class="input-col"><input type="text" name="name" required autofocus /></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Status</td>
+                            <td class="input-col">
+                                <select name="status">
+                                    <option value="10" selected>development</option>
+                                    <option value="30">release</option>
+                                    <option value="50">stable</option>
+                                    <option value="70">obsolete</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">View Status</td>
+                            <td class="input-col">
+                                <select name="view_state">
+                                    <option value="10" selected>public</option>
+                                    <option value="50">private</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Inherit Global Categories</td>
+                            <td class="input-col">
+                                <label><input type="checkbox" name="inherit_global" value="1" checked /> Inherit global categories</label>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Description</td>
+                            <td class="input-col"><textarea name="description"></textarea></td>
+                        </tr>
+                    </table>
+                </div>
+                <div class="mt-3.5 flex gap-2">
+                    <button type="submit" class="btn btn-primary"><i class="fa fa-plus" aria-hidden="true"></i> Add Project</button>
+                    <a href="/manage_proj_page" class="btn btn-secondary">Cancel</a>
                 </div>
             </form>
         </div>
@@ -393,41 +408,44 @@ pub fn render_proj_edit_page(
 
     let content = format!(
         r#"
-        <div class="panel">
-            <div class="panel-header">Edit Project: {}</div>
-            <div class="panel-body">
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-pencil" aria-hidden="true"></i> Edit Project: {}</h4>
+            </div>
+            <div class="widget-body">
                 <form method="POST" action="/manage_proj_update/{}">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Project Name *</td>
-                            <td class="input-col"><input type="text" name="name" value="{}" required /></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Status</td>
-                            <td class="input-col">
-                                <select name="status">
-                                    <option value="10" {}>development (10)</option>
-                                    <option value="30" {}>release (30)</option>
-                                    <option value="50" {}>stable (50)</option>
-                                    <option value="70" {}>obsolete (70)</option>
-                                </select>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Enabled</td>
-                            <td class="input-col">
-                                <label><input type="checkbox" name="enabled" value="1" {} /> Enabled</label>
-                            </td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">View Status</td>
-                            <td class="input-col">
-                                <select name="view_state">
-                                    <option value="10" {}>public (10)</option>
-                                    <option value="50" {}>private (50)</option>
-                                </select>
-                            </td>
-                        </tr>
+                    <div class="table-responsive">
+                        <table class="form-table">
+                            <tr>
+                                <td class="label-col">Project Name <span class="required">*</span></td>
+                                <td class="input-col"><input type="text" name="name" value="{}" required /></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Status</td>
+                                <td class="input-col">
+                                    <select name="status">
+                                        <option value="10" {}>development</option>
+                                        <option value="30" {}>release</option>
+                                        <option value="50" {}>stable</option>
+                                        <option value="70" {}>obsolete</option>
+                                    </select>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Enabled</td>
+                                <td class="input-col">
+                                    <label><input type="checkbox" name="enabled" value="1" {} /> Enabled</label>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">View Status</td>
+                                <td class="input-col">
+                                    <select name="view_state">
+                                        <option value="10" {}>public</option>
+                                        <option value="50" {}>private</option>
+                                    </select>
+                                </td>
+                            </tr>
                         <tr>
                             <td class="label-col">Inherit Global Categories</td>
                             <td class="input-col">
@@ -439,123 +457,140 @@ pub fn render_proj_edit_page(
                             <td class="input-col"><textarea name="description">{}</textarea></td>
                         </tr>
                     </table>
-                    <div style="margin-top: 14px;">
-                        <button type="submit" class="btn">Update Project</button>
-                        <a href="/manage_proj_page" class="btn btn-secondary" style="margin-left:8px;">Back to Projects</a>
+                    </div>
+                    <div class="mt-3.5 flex gap-2">
+                        <button type="submit" class="btn btn-primary"><i class="fa fa-save" aria-hidden="true"></i> Update Project</button>
+                        <a href="/manage_proj_page" class="btn btn-secondary">Back to Projects</a>
                     </div>
                 </form>
                 <div style="margin-top: 12px; border-top: 1px solid #e0e6ed; padding-top: 12px;">
                     <form action="/manage_proj_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this project? All associated data will be removed.');">
-                        <button type="submit" class="btn btn-danger">Delete Project</button>
+                        <button type="submit" class="btn btn-danger"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Project</button>
                     </form>
                 </div>
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">Subprojects</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Subproject Name</th>
-                            <th>Inherit Parent Categories</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-sitemap" aria-hidden="true"></i> Subprojects</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Subproject Name</th>
+                                <th>Inherit Parent Categories</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
 
-                <form method="POST" action="/manage_proj_subproj_add/{}" style="margin-top:14px; display:flex; align-items:center; gap:8px;">
+                <form method="POST" action="/manage_proj_subproj_add/{}" class="mt-3.5 flex flex-wrap items-center gap-2">
                     <select name="child_id" required style="width:250px;">
                         <option value="">- Select Subproject to Link -</option>
                         {}
                     </select>
-                    <label style="display:flex; align-items:center; cursor:pointer;">
+                    <label class="flex items-center cursor-pointer">
                         <input type="checkbox" name="inherit_parent" value="1" checked /> Inherit Parent Categories
                     </label>
-                    <button type="submit" class="btn">Link Subproject</button>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-link" aria-hidden="true"></i> Link Subproject</button>
                 </form>
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">Categories</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Category</th>
-                            <th>Assign To</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-tags" aria-hidden="true"></i> Categories</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Category</th>
+                                <th>Assign To</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
 
-                <form method="POST" action="/manage_proj_cat_add" style="margin-top:14px; display:flex; align-items:center; gap:8px;">
+                <form method="POST" action="/manage_proj_cat_add" class="mt-3.5 flex flex-wrap items-center gap-2">
                     <input type="hidden" name="project_id" value="{}" />
                     <input type="text" name="name" placeholder="New Category Name" required style="width:200px;" />
                     <select name="user_id" style="width:180px;">
                         <option value="0">- None -</option>
                         {}
                     </select>
-                    <button type="submit" class="btn">Add Category</button>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Category</button>
                 </form>
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">Versions</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Version</th>
-                            <th>Description</th>
-                            <th>Date Order</th>
-                            <th>Released</th>
-                            <th>Obsolete</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-code-fork" aria-hidden="true"></i> Versions</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Version</th>
+                                <th>Description</th>
+                                <th>Date Order</th>
+                                <th>Released</th>
+                                <th>Obsolete</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
 
-                <form method="POST" action="/manage_proj_ver_add/{}" style="margin-top:14px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <form method="POST" action="/manage_proj_ver_add/{}" class="mt-3.5 flex flex-wrap items-center gap-2">
                     <input type="text" name="version" placeholder="Version (e.g. 1.0.0)" required style="width:160px;" />
                     <input type="text" name="description" placeholder="Description" style="width:220px;" />
                     <input type="date" name="date_order" style="width:140px;" placeholder="YYYY-MM-DD" title="Date Order" />
-                    <label style="display:flex; align-items:center;"><input type="checkbox" name="released" value="1" checked /> Released</label>
-                    <label style="display:flex; align-items:center;"><input type="checkbox" name="obsolete" value="1" /> Obsolete</label>
-                    <button type="submit" class="btn">Add Version</button>
+                    <label class="flex items-center"><input type="checkbox" name="released" value="1" /> Released</label>
+                    <label class="flex items-center"><input type="checkbox" name="obsolete" value="1" /> Obsolete</label>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Version</button>
                 </form>
             </div>
         </div>
 
-        <div class="panel">
-            <div class="panel-header">User Access & Overrides</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Username</th>
-                            <th>Project Access Level</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-users" aria-hidden="true"></i> User Access &amp; Overrides</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Username</th>
+                                <th>Project Access Level</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
 
-                <form method="POST" action="/manage_proj_user_add/{}" style="margin-top:14px; display:flex; align-items:center; gap:8px;">
+                <form method="POST" action="/manage_proj_user_add/{}" class="mt-3.5 flex flex-wrap items-center gap-2">
                     <select name="user_id" required style="width:220px;">
                         <option value="">- Select User -</option>
                         {}
@@ -568,7 +603,7 @@ pub fn render_proj_edit_page(
                         <option value="70">manager (70)</option>
                         <option value="90">administrator (90)</option>
                     </select>
-                    <button type="submit" class="btn">Add User</button>
+                    <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-user-plus" aria-hidden="true"></i> Add User</button>
                 </form>
             </div>
         </div>

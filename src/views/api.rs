@@ -190,13 +190,19 @@ pub fn render_manage_plugin_page(
         } else {
             let next_enabled = if p.enabled != 0 { "0" } else { "1" };
             let btn_label = if p.enabled != 0 { "Disable" } else { "Enable" };
+            let btn_cls = if p.enabled != 0 {
+                "btn btn-secondary btn-sm"
+            } else {
+                "btn btn-primary btn-sm"
+            };
             format!(
                 r#"<form method="POST" action="/manage_plugin_toggle/{}" style="display:inline;">
                     <input type="hidden" name="enabled" value="{}">
-                    <button type="submit" class="btn btn-secondary btn-sm">{}</button>
+                    <button type="submit" class="{}">{}</button>
                 </form>"#,
                 html_escape(&p.basename),
                 next_enabled,
+                btn_cls,
                 btn_label
             )
         };
@@ -219,23 +225,27 @@ pub fn render_manage_plugin_page(
 
     let content = format!(
         r#"{}
-        <div class="panel">
-            <div class="panel-header">Installed Plugins ({}) — EventAuditLog Dispatched Events: {}</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Plugin Basename</th>
-                            <th>Status</th>
-                            <th>Protected</th>
-                            <th>Priority</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-plug" aria-hidden="true"></i> Installed Plugins ({}) — EventAuditLog Dispatched Events: {}</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Plugin Basename</th>
+                                <th>Status</th>
+                                <th>Protected</th>
+                                <th>Priority</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>"#,
         err_banner,

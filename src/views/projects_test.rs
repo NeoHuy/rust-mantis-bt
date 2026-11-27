@@ -105,3 +105,26 @@ fn test_render_version_error() {
     assert!(html.contains("Failed to process version: Duplicate version name"));
     assert!(html.contains("/manage_proj_edit_page/42"));
 }
+
+#[test]
+fn test_ui_m4_proj_add_version_released_unchecked_and_clean_status_labels() {
+    let ctx = dummy_auth_ctx();
+    let create_html = render_proj_create_page(&ctx).0;
+    assert!(create_html.contains(">development</option>"));
+    assert!(!create_html.contains("development (10)"));
+
+    let project = Project {
+        id: 42,
+        name: "Alpha".to_string(),
+        status: 10,
+        enabled: 1,
+        view_state: 10,
+        access_min: 10,
+        description: "".to_string(),
+        category_id: 0,
+        inherit_global: 1,
+    };
+    let edit_html = render_proj_edit_page(&ctx, &project, &[], &[], &[], &[], &[], &[]).0;
+    assert!(edit_html.contains(r#"<input type="checkbox" name="released" value="1" /> Released"#));
+    assert!(!edit_html.contains(r#"name="released" value="1" checked"#));
+}

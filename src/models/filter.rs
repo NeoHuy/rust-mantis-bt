@@ -25,6 +25,10 @@ pub struct BugFilter {
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
     #[serde(default)]
+    pub target_version: Option<String>,
+    #[serde(default)]
+    pub fixed_in_version: Option<String>,
+    #[serde(default)]
     pub sort: Option<String>,
     #[serde(default)]
     pub dir: Option<String>,
@@ -36,6 +40,7 @@ pub struct BugFilter {
 pub struct ListBugsQuery {
     pub page: Option<i64>,
     pub filter_id: Option<i64>,
+    pub project_id: Option<i64>,
     pub q: Option<String>,
     pub search: Option<String>,
     pub status: Option<i32>,
@@ -47,6 +52,8 @@ pub struct ListBugsQuery {
     pub handler_id: Option<i64>,
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
+    pub target_version: Option<String>,
+    pub fixed_in_version: Option<String>,
     pub msg: Option<String>,
     pub err: Option<String>,
     pub sort: Option<String>,
@@ -144,13 +151,15 @@ pub fn clamp_per_page(val: Option<usize>) -> usize {
     }
 }
 
-pub fn build_view_all_bug_page_url(q: &ListBugsQuery, page: i64) -> String {
-    let mut params = Vec::new();
-    params.push(format!("page={}", page.max(1)));
-
+fn append_common_filter_params(q: &ListBugsQuery, params: &mut Vec<String>) {
     if let Some(fid) = q.filter_id {
         if fid > 0 {
             params.push(format!("filter_id={}", fid));
+        }
+    }
+    if let Some(pid) = q.project_id {
+        if pid > 0 {
+            params.push(format!("project_id={}", pid));
         }
     }
     if let Some(ref q_val) = q.q {
@@ -208,6 +217,18 @@ pub fn build_view_all_bug_page_url(q: &ListBugsQuery, page: i64) -> String {
             params.push(format!("monitored_by={}", monitored_by));
         }
     }
+    if let Some(ref tv) = q.target_version {
+        let trimmed = tv.trim();
+        if !trimmed.is_empty() {
+            params.push(format!("target_version={}", url_encode(trimmed)));
+        }
+    }
+    if let Some(ref fv) = q.fixed_in_version {
+        let trimmed = fv.trim();
+        if !trimmed.is_empty() {
+            params.push(format!("fixed_in_version={}", url_encode(trimmed)));
+        }
+    }
     if let Some(ref sort) = q.sort {
         if !sort.trim().is_empty() {
             params.push(format!("sort={}", url_encode(sort)));
@@ -218,6 +239,12 @@ pub fn build_view_all_bug_page_url(q: &ListBugsQuery, page: i64) -> String {
             params.push(format!("dir={}", url_encode(dir)));
         }
     }
+}
+
+pub fn build_view_all_bug_page_url(q: &ListBugsQuery, page: i64) -> String {
+    let mut params = Vec::new();
+    params.push(format!("page={}", page.max(1)));
+    append_common_filter_params(q, &mut params);
     if let Some(per_page) = q.per_page {
         if per_page > 0 {
             params.push(format!("per_page={}", clamp_per_page(Some(per_page))));
@@ -229,77 +256,7 @@ pub fn build_view_all_bug_page_url(q: &ListBugsQuery, page: i64) -> String {
 
 pub fn build_csv_export_url(q: &ListBugsQuery) -> String {
     let mut params = Vec::new();
-
-    if let Some(fid) = q.filter_id {
-        if fid > 0 {
-            params.push(format!("filter_id={}", fid));
-        }
-    }
-    if let Some(ref q_val) = q.q {
-        if !q_val.trim().is_empty() {
-            params.push(format!("q={}", url_encode(q_val)));
-        }
-    }
-    if let Some(ref s_val) = q.search {
-        if !s_val.trim().is_empty() && q.q.as_deref().map(|s| s.trim()) != Some(s_val.trim()) {
-            params.push(format!("search={}", url_encode(s_val)));
-        }
-    }
-    if let Some(status) = q.status {
-        if status > 0 {
-            params.push(format!("status={}", status));
-        }
-    }
-    if let Some(hide_status) = q.hide_status {
-        if hide_status > 0 {
-            params.push(format!("hide_status={}", hide_status));
-        }
-    }
-    if let Some(priority) = q.priority {
-        if priority > 0 {
-            params.push(format!("priority={}", priority));
-        }
-    }
-    if let Some(severity) = q.severity {
-        if severity > 0 {
-            params.push(format!("severity={}", severity));
-        }
-    }
-    if let Some(category_id) = q.category_id {
-        if category_id > 0 {
-            params.push(format!("category_id={}", category_id));
-        }
-    }
-    if let Some(reporter_id) = q.reporter_id {
-        if reporter_id > 0 {
-            params.push(format!("reporter_id={}", reporter_id));
-        }
-    }
-    if let Some(handler_id) = q.handler_id {
-        if handler_id != 0 {
-            params.push(format!("handler_id={}", handler_id));
-        }
-    }
-    if let Some(tag_id) = q.tag_id {
-        if tag_id > 0 {
-            params.push(format!("tag_id={}", tag_id));
-        }
-    }
-    if let Some(monitored_by) = q.monitored_by {
-        if monitored_by > 0 {
-            params.push(format!("monitored_by={}", monitored_by));
-        }
-    }
-    if let Some(ref sort) = q.sort {
-        if !sort.trim().is_empty() {
-            params.push(format!("sort={}", url_encode(sort)));
-        }
-    }
-    if let Some(ref dir) = q.dir {
-        if !dir.trim().is_empty() {
-            params.push(format!("dir={}", url_encode(dir)));
-        }
-    }
+    append_common_filter_params(q, &mut params);
 
     if params.is_empty() {
         "/csv_export".to_string()

@@ -35,6 +35,9 @@ pub struct SaveFilterForm {
     pub reporter_id: Option<i64>,
     pub handler_id: Option<i64>,
     pub tag_id: Option<i64>,
+    pub project_id: Option<i64>,
+    pub target_version: Option<String>,
+    pub fixed_in_version: Option<String>,
     pub sort: Option<String>,
     pub dir: Option<String>,
     pub per_page: Option<usize>,
@@ -52,9 +55,17 @@ pub async fn filter_save(
     if is_public && ctx.user.access_level < 70 {
         return forbidden(&ctx, "Manager access required to save public filters.");
     }
+    if let Some(pid) = form.project_id.filter(|&v| v > 0) {
+        let eff = db.effective_access_level(&ctx.user, pid).unwrap_or(0);
+        if eff < 10 {
+            return forbidden(&ctx, "You do not have access to this project.");
+        }
+    }
 
     let filter = BugFilter {
-        project_id: if ctx.active_project_id > 0 {
+        project_id: if let Some(pid) = form.project_id.filter(|&v| v > 0) {
+            Some(pid)
+        } else if ctx.active_project_id > 0 {
             Some(ctx.active_project_id)
         } else {
             None
@@ -69,6 +80,18 @@ pub async fn filter_save(
         handler_id: form.handler_id.filter(|&v| v != 0),
         tag_id: form.tag_id.filter(|&v| v > 0),
         monitored_by: None,
+        target_version: form
+            .target_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        fixed_in_version: form
+            .fixed_in_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         sort: form.sort.filter(|s| !s.trim().is_empty()),
         dir: form.dir.filter(|s| !s.trim().is_empty()),
         per_page: form.per_page.filter(|&v| v > 0),

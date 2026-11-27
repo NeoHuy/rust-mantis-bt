@@ -89,6 +89,7 @@ fn test_render_roadmap_page_with_items() {
             bugs: vec![bug],
             project_name: None,
             project_id: None,
+            date_order: 0,
         },
         RoadmapVersionGroup {
             version: "2.0.0".to_string(),
@@ -96,6 +97,7 @@ fn test_render_roadmap_page_with_items() {
             bugs: vec![],
             project_name: None,
             project_id: None,
+            date_order: 0,
         },
     ];
     let mut users_map = HashMap::new();
@@ -122,6 +124,7 @@ fn test_render_roadmap_page_with_multiple_projects_shows_badge() {
             bugs: vec![],
             project_name: Some("Project Alpha".to_string()),
             project_id: Some(1),
+            date_order: 0,
         },
         RoadmapVersionGroup {
             version: "1.0.0".to_string(),
@@ -129,6 +132,7 @@ fn test_render_roadmap_page_with_multiple_projects_shows_badge() {
             bugs: vec![],
             project_name: Some("Project Beta".to_string()),
             project_id: Some(2),
+            date_order: 0,
         },
     ];
     let users_map = HashMap::new();
@@ -158,6 +162,8 @@ fn test_render_manage_email_queue_page() {
     assert!(html.contains("user@example.com"));
     assert!(html.contains("Issue #1 assigned"));
     assert!(html.contains(r#"action="/manage_email_delete/1""#));
+    assert!(html.contains("btn btn-danger btn-white btn-round btn-sm"));
+    assert!(html.contains("confirm('Delete queued email?')"));
 }
 
 #[test]
@@ -199,4 +205,38 @@ fn test_render_news_edit_page_and_news_page_edit_link() {
     // 3. News list does NOT render Edit link for Reporter (eff = 25)
     let out_list_rep = render_news_page(&ctx, &[news], &users_map, 25, None, None);
     assert!(!out_list_rep.0.contains(r#"href="/news_edit_page/42""#));
+    assert!(out_list_mgr.0.contains(r#"class="widget-toolbar""#));
+    assert!(out_list_mgr.0.contains("btn-white btn-round btn-sm"));
+    assert!(out_list_mgr
+        .0
+        .contains("btn btn-danger btn-white btn-round btn-sm"));
+}
+
+#[test]
+fn test_render_summary_page_ratio_tables() {
+    let ctx = dummy_ctx();
+    let mut by_status = BTreeMap::new();
+    by_status.insert(
+        10,
+        SummaryCounts {
+            open: 3,
+            resolved: 0,
+            closed: 0,
+        },
+    );
+    let by_sev = BTreeMap::new();
+    let by_pri = BTreeMap::new();
+    let by_cat = BTreeMap::new();
+    let by_res = BTreeMap::new();
+    let by_rep = BTreeMap::new();
+    let by_hnd = BTreeMap::new();
+
+    let html = render_summary_page(
+        &ctx, 3, 3, 0, 0, &by_status, &by_sev, &by_pri, &by_cat, &by_res, &by_rep, &by_hnd,
+    )
+    .0;
+    assert!(html.contains("By Status"));
+    assert!(html.contains("By Category"));
+    assert!(html.contains("By Resolution"));
+    assert!(html.contains("<th>Open</th><th>Resolved</th><th>Closed</th><th>Total</th>"));
 }

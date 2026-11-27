@@ -326,6 +326,34 @@ pub fn render_custom_fields_form_rows(
     rows_html
 }
 
+fn render_custom_field_type_options(selected: i32) -> String {
+    let type_ids = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let mut out = String::new();
+    let mut matched = false;
+    for val in type_ids {
+        let label = CustomFieldType::from_i32(val)
+            .map(|t| t.as_str())
+            .unwrap_or("Unknown");
+        let sel = if val == selected {
+            matched = true;
+            " selected"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            r#"<option value="{}"{}>{}</option>"#,
+            val, sel, label
+        ));
+    }
+    if !matched {
+        out.push_str(&format!(
+            r#"<option value="{}" selected>Unknown ({})</option>"#,
+            selected, selected
+        ));
+    }
+    out
+}
+
 pub fn render_manage_custom_field_page(
     ctx: &AuthContext,
     fields: &[(CustomField, usize)],
@@ -368,52 +396,49 @@ pub fn render_manage_custom_field_page(
 
     let content = format!(
         r#"{}
-        <div class="panel">
-            <div class="panel-header">Custom Fields ({})</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Name</th>
-                            <th>Linked Projects</th>
-                            <th>Type</th>
-                            <th>Possible Values</th>
-                            <th>Default Value</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {}
-                    </tbody>
-                </table>
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-sliders" aria-hidden="true"></i> Custom Fields ({})</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Linked Projects</th>
+                                <th>Type</th>
+                                <th>Possible Values</th>
+                                <th>Default Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
-        <div class="panel">
-            <div class="panel-header">New Custom Field</div>
-            <div class="panel-body">
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-plus-circle" aria-hidden="true"></i> New Custom Field</h4>
+            </div>
+            <div class="widget-body">
                 <form method="POST" action="/manage_custom_field_create">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Name *</td>
-                            <td class="input-col"><input type="text" name="name" required></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Type</td>
-                            <td class="input-col">
-                                <select name="field_type">
-                                    <option value="0">String</option>
-                                    <option value="1">Numeric</option>
-                                    <option value="2">Float</option>
-                                    <option value="3">Enumeration</option>
-                                    <option value="4">Email</option>
-                                    <option value="5">Checkbox</option>
-                                    <option value="6">List</option>
-                                    <option value="7">Multiselection list</option>
-                                    <option value="8">Date</option>
-                                    <option value="9">Radio</option>
-                                    <option value="10">Textarea</option>
-                                </select>
-                            </td>
-                        </tr>
+                    <div class="table-responsive">
+                        <table class="form-table">
+                            <tr>
+                                <td class="label-col">Name <span class="required">*</span></td>
+                                <td class="input-col"><input type="text" name="name" required></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Type</td>
+                                <td class="input-col">
+                                    <select name="field_type">
+                                        {}
+                                    </select>
+                                </td>
+                            </tr>
                         <tr>
                             <td class="label-col">Possible Values (pipe | separated)</td>
                             <td class="input-col"><input type="text" name="possible_values"></td>
@@ -454,13 +479,15 @@ pub fn render_manage_custom_field_page(
                             </td>
                         </tr>
                     </table>
-                    <button type="submit" class="btn">Create Custom Field</button>
+                    </div>
+                    <button type="submit" class="btn btn-primary mt-3"><i class="fa fa-plus" aria-hidden="true"></i> Create Custom Field</button>
                 </form>
             </div>
         </div>"#,
         err_banner,
         fields.len(),
-        rows_html
+        rows_html,
+        render_custom_field_type_options(0)
     );
 
     render_layout("Manage Custom Fields", ctx, msg, &content)
@@ -506,19 +533,26 @@ pub fn render_manage_custom_field_edit_page(
     }
 
     let content = format!(
-        r#"<div class="panel">
-            <div class="panel-header">Edit Custom Field: {}</div>
-            <div class="panel-body">
+        r#"<div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-pencil" aria-hidden="true"></i> Edit Custom Field: {}</h4>
+            </div>
+            <div class="widget-body">
                 <form method="POST" action="/manage_custom_field_update/{}">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Name *</td>
-                            <td class="input-col"><input type="text" name="name" value="{}" required></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Type</td>
-                            <td class="input-col"><input type="text" name="field_type" value="{}"></td>
-                        </tr>
+                    <div class="table-responsive">
+                        <table class="form-table">
+                            <tr>
+                                <td class="label-col">Name <span class="required">*</span></td>
+                                <td class="input-col"><input type="text" name="name" value="{}" required></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Type</td>
+                                <td class="input-col">
+                                    <select name="field_type">
+                                        {}
+                                    </select>
+                                </td>
+                            </tr>
                         <tr>
                             <td class="label-col">Possible Values</td>
                             <td class="input-col"><input type="text" name="possible_values" value="{}"></td>
@@ -559,31 +593,39 @@ pub fn render_manage_custom_field_edit_page(
                             </td>
                         </tr>
                     </table>
-                    <button type="submit" class="btn">Update Custom Field</button>
+                    </div>
+                    <div class="mt-3.5 flex gap-2">
+                        <button type="submit" class="btn btn-primary"><i class="fa fa-save" aria-hidden="true"></i> Update Custom Field</button>
+                        <a href="/manage_custom_field_page" class="btn btn-secondary">Back to Custom Fields</a>
+                    </div>
                 </form>
-                <form method="POST" action="/manage_custom_field_delete/{}" style="margin-top:10px;">
-                    <button type="submit" class="btn btn-danger">Delete Custom Field</button>
+                <form method="POST" action="/manage_custom_field_delete/{}" class="mt-3">
+                    <button type="submit" class="btn btn-danger"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Custom Field</button>
                 </form>
             </div>
         </div>
-        <div class="panel">
-            <div class="panel-header">Linked Projects</div>
-            <div class="panel-body">
-                <table class="data-table">
-                    <thead><tr><th>Project</th><th>Sequence</th><th>Actions</th></tr></thead>
-                    <tbody>{}</tbody>
-                </table>
-                <form method="POST" action="/manage_custom_field_proj_add/{}" style="display:flex; gap:8px; align-items:center;">
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-link" aria-hidden="true"></i> Linked Projects</h4>
+            </div>
+            <div class="widget-body">
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead><tr><th>Project</th><th>Sequence</th><th>Actions</th></tr></thead>
+                        <tbody>{}</tbody>
+                    </table>
+                </div>
+                <form method="POST" action="/manage_custom_field_proj_add/{}" class="flex flex-wrap gap-2 items-center mt-3">
                     <select name="project_id" style="width:auto;">{}</select>
                     <input type="text" name="sequence" value="0" style="width:70px;" placeholder="Seq">
-                    <button type="submit" class="btn btn-secondary btn-sm">Link Project</button>
+                    <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-link" aria-hidden="true"></i> Link Project</button>
                 </form>
             </div>
         </div>"#,
         html_escape(&cf.name),
         cf.id,
         html_escape(&cf.name),
-        cf.field_type,
+        render_custom_field_type_options(cf.field_type),
         html_escape(&cf.possible_values),
         html_escape(&cf.default_value),
         cf.length_min,

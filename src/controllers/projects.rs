@@ -240,11 +240,16 @@ pub async fn manage_proj_edit_page(
     };
 
     let subprojects = db.list_subprojects(id).unwrap_or_default();
+    let ancestor_ids = db.list_project_ancestor_ids(id).unwrap_or_default();
 
     let all_projs = db.list_all_projects().unwrap_or_default();
     let candidate_subprojs: Vec<_> = all_projs
         .into_iter()
-        .filter(|p| p.id != id && !subprojects.iter().any(|(c, _)| c.id == p.id))
+        .filter(|p| {
+            p.id != id
+                && !ancestor_ids.contains(&p.id)
+                && !subprojects.iter().any(|(c, _)| c.id == p.id)
+        })
         .collect();
 
     let direct_cats = db.list_direct_categories(id).unwrap_or_default();

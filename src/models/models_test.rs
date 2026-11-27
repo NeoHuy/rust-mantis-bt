@@ -360,6 +360,7 @@ fn test_build_csv_export_url() {
     let q = ListBugsQuery {
         page: Some(3),
         filter_id: Some(10),
+        project_id: Some(12),
         q: Some("buffer overflow".to_string()),
         search: None,
         status: Some(50),
@@ -371,6 +372,8 @@ fn test_build_csv_export_url() {
         handler_id: Some(8),
         tag_id: Some(3),
         monitored_by: Some(4),
+        target_version: Some("v2.0".to_string()),
+        fixed_in_version: Some("v1.5".to_string()),
         msg: Some("flash_msg".to_string()),
         err: Some("flash_err".to_string()),
         sort: Some("summary".to_string()),
@@ -399,6 +402,9 @@ fn test_build_csv_export_url() {
     assert!(url.contains("handler_id=8"));
     assert!(url.contains("tag_id=3"));
     assert!(url.contains("monitored_by=4"));
+    assert!(url.contains("project_id=12"));
+    assert!(url.contains("target_version=v2.0"));
+    assert!(url.contains("fixed_in_version=v1.5"));
     assert!(url.contains("sort=summary"));
     assert!(url.contains("dir=asc"));
 

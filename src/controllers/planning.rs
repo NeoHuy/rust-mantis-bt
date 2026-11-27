@@ -17,6 +17,11 @@ pub struct FlashQuery {
     pub err: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct RoadmapQuery {
+    pub show_released: Option<String>,
+}
+
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
     let body = format!(
         r#"<div class="flash-error">Access Denied: {}</div>"#,
@@ -29,7 +34,12 @@ fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
         .into_response()
 }
 
-pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
+pub async fn roadmap_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<RoadmapQuery>,
+) -> Response {
+    let show_released = parse_bool(q.show_released.as_deref());
     let filter = BugFilter {
         project_id: if ctx.active_project_id > 0 {
             Some(ctx.active_project_id)
@@ -44,6 +54,11 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .unwrap_or_default()
         .into_iter()
         .map(|u| (u.id, u.username))
+        .collect();
+    let categories_map: HashMap<i64, String> = db
+        .list_all_categories()
+        .unwrap_or_default()
+        .into_iter()
         .collect();
 
     // Determine accessible projects and their names
@@ -84,14 +99,25 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         }
     }
 
-    let version_groups = crate::models::build_roadmap_groups(
+    let mut version_groups = crate::models::build_roadmap_groups(
         &accessible_project_ids,
         all_project_versions,
         bugs,
         &project_names,
     );
 
-    views::planning::render_roadmap_page(&ctx, &version_groups, &users_map).into_response()
+    if !show_released {
+        version_groups.retain(|g| !g.released);
+    }
+
+    views::planning::render_roadmap_page_with_options(
+        &ctx,
+        &version_groups,
+        &users_map,
+        &categories_map,
+        show_released,
+    )
+    .into_response()
 }
 
 pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response {
@@ -110,6 +136,11 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
+    let categories_map: HashMap<i64, String> = db
+        .list_all_categories()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     let mut by_fixed: BTreeMap<String, Vec<Bug>> = BTreeMap::new();
     for b in bugs {
@@ -121,7 +152,8 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         }
     }
 
-    views::planning::render_changelog_page(&ctx, &by_fixed, &users_map).into_response()
+    views::planning::render_changelog_page(&ctx, &by_fixed, &users_map, &categories_map)
+        .into_response()
 }
 
 pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
@@ -140,34 +172,63 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
+    let categories_map: HashMap<i64, String> = db
+        .list_all_categories()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
-    let mut by_status: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_severity: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_priority: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_reporter: BTreeMap<String, usize> = BTreeMap::new();
-    let mut by_handler: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_status: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
+    let mut by_severity: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
+    let mut by_priority: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
+    let mut by_category: BTreeMap<String, crate::models::SummaryCounts> = BTreeMap::new();
+    let mut by_resolution: BTreeMap<i32, crate::models::SummaryCounts> = BTreeMap::new();
+    let mut by_reporter: BTreeMap<String, crate::models::SummaryCounts> = BTreeMap::new();
+    let mut by_handler: BTreeMap<String, crate::models::SummaryCounts> = BTreeMap::new();
 
     let mut open_count = 0usize;
     let mut resolved_count = 0usize;
     let mut closed_count = 0usize;
 
     for b in &bugs {
-        *by_status.entry(b.status).or_default() += 1;
-        *by_severity.entry(b.severity).or_default() += 1;
-        *by_priority.entry(b.priority).or_default() += 1;
+        by_status
+            .entry(b.status)
+            .or_default()
+            .record_status(b.status);
+        by_severity
+            .entry(b.severity)
+            .or_default()
+            .record_status(b.status);
+        by_priority
+            .entry(b.priority)
+            .or_default()
+            .record_status(b.status);
+        by_resolution
+            .entry(b.resolution)
+            .or_default()
+            .record_status(b.status);
+
+        let cat_name = categories_map
+            .get(&b.category_id)
+            .cloned()
+            .unwrap_or_else(|| "General".to_string());
+        by_category
+            .entry(cat_name)
+            .or_default()
+            .record_status(b.status);
 
         let rep = users_map
             .get(&b.reporter_id)
             .cloned()
             .unwrap_or_else(|| format!("user#{}", b.reporter_id));
-        *by_reporter.entry(rep).or_default() += 1;
+        by_reporter.entry(rep).or_default().record_status(b.status);
 
         if b.handler_id > 0 {
             let hnd = users_map
                 .get(&b.handler_id)
                 .cloned()
                 .unwrap_or_else(|| format!("user#{}", b.handler_id));
-            *by_handler.entry(hnd).or_default() += 1;
+            by_handler.entry(hnd).or_default().record_status(b.status);
         }
 
         if b.status == 90 {
@@ -188,6 +249,8 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         &by_status,
         &by_severity,
         &by_priority,
+        &by_category,
+        &by_resolution,
         &by_reporter,
         &by_handler,
     )

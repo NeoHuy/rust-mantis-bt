@@ -542,13 +542,41 @@ async fn test_roadmap_ordering_badges_and_fallback() {
     )
     .unwrap();
 
-    // 3. GET /roadmap_page
-    let res = app
+    // 3. GET /roadmap_page (default: unreleased only)
+    let res_unrel = app
         .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
                 .uri("/roadmap_page")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_unrel.status(), StatusCode::OK);
+    let html_unrel = String::from_utf8(
+        axum::body::to_bytes(res_unrel.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_unrel.contains("Target Version: v2.0"));
+    assert!(html_unrel.contains("Target Version: v-legacy-target"));
+    assert!(!html_unrel.contains("Target Version: v1.0"));
+    assert!(!html_unrel.contains("Target Version: v0.9"));
+    assert!(html_unrel.contains("/roadmap_page?show_released=1"));
+    assert!(html_unrel.contains("/changelog_page"));
+
+    // 4. GET /roadmap_page?show_released=1
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/roadmap_page?show_released=1")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -987,7 +1015,7 @@ async fn test_roadmap_subproject_versions_rollup_and_private_subproject_isolatio
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/roadmap_page")
+                .uri("/roadmap_page?show_released=1")
                 .header("cookie", &admin_proj_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1034,7 +1062,7 @@ async fn test_roadmap_subproject_versions_rollup_and_private_subproject_isolatio
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/roadmap_page")
+                .uri("/roadmap_page?show_released=1")
                 .header("cookie", &rep_proj_cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1182,4 +1210,564 @@ async fn test_roadmap_all_projects_obsolete_scoping_per_project() {
         !html.contains("Alpha issue for obsolete 1.0"),
         "Issue for Project Alpha obsolete 1.0 must be excluded from roadmap"
     );
+}
+
+#[tokio::test]
+async fn test_ui_m4_manage_overview_rbac_and_no_secret_leakage() {
+    let db = Db::open_in_memory().unwrap();
+    db.create_user("mgr1", "Manager", "mgr1@x.com", "pw123", 70, true, false)
+        .unwrap();
+    db.create_user("dev1", "Developer", "dev1@x.com", "pw123", 55, true, false)
+        .unwrap();
+    db.create_user("rep1", "Reporter", "rep1@x.com", "pw123", 25, true, false)
+        .unwrap();
+    db.save_jira_global_config(
+        true,
+        "https://jira.example.com",
+        "bot@example.com",
+        Some("SUPER_SECRET_JIRA_TOKEN_XYZ"),
+        "Bug",
+        "MANTIS",
+    )
+    .unwrap();
+
+    let app = rust_mantis_bt::controllers::build_router(db);
+    let (admin_cookie, _) = get_cookie(&app, "administrator", "root", false).await;
+    let (mgr_cookie, _) = get_cookie(&app, "mgr1", "pw123", false).await;
+    let (dev_cookie, _) = get_cookie(&app, "dev1", "pw123", false).await;
+    let (rep_cookie, _) = get_cookie(&app, "rep1", "pw123", false).await;
+
+    // Admin gets 200 OK with Site Information and zero secrets
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_overview_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Site Information"));
+    assert!(html.contains(env!("CARGO_PKG_VERSION")));
+    assert!(html.contains(r#"class="nav-tabs""#));
+    assert!(html.contains("/manage_overview_page"));
+    assert!(!html.contains("SUPER_SECRET_JIRA_TOKEN_XYZ"));
+
+    // Manager, Developer, Reporter get 403 Forbidden
+    for c in [&mgr_cookie, &dev_cookie, &rep_cookie] {
+        let r = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/manage_overview_page")
+                    .header("cookie", c)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn test_ui_m4_subproject_dropdown_excludes_ancestors_and_manage_users_prefix_filter() {
+    let db = Db::open_in_memory().unwrap();
+    let grandparent = db.create_project("GrandParent", 10, 10, "", true).unwrap();
+    let parent = db.create_project("ParentProj", 10, 10, "", true).unwrap();
+    let child = db.create_project("ChildProj", 10, 10, "", true).unwrap();
+    let unrelated = db
+        .create_project("UnrelatedProj", 10, 10, "", true)
+        .unwrap();
+    db.add_subproject(grandparent, parent, true).unwrap();
+    db.add_subproject(parent, child, true).unwrap();
+
+    db.create_user("alpha_user", "Alpha", "a@x.com", "pw123", 25, true, false)
+        .unwrap();
+    db.create_user("zulu_user", "Zulu", "z@x.com", "pw123", 25, true, false)
+        .unwrap();
+    db.create_user("007_agent", "Bond", "007@x.com", "pw123", 25, true, false)
+        .unwrap();
+
+    let b_v2 = db
+        .create_bug(
+            unrelated,
+            1,
+            1,
+            "Target v2 issue",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.update_bug_fields(
+        b_v2,
+        1,
+        BugUpdate {
+            target_version: Some("v2.0".to_string()),
+            fixed_in_version: Some("v1.9".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let b_other = db
+        .create_bug(
+            unrelated,
+            1,
+            1,
+            "Other version issue",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.update_bug_fields(
+        b_other,
+        1,
+        BugUpdate {
+            target_version: Some("v3.0".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let app = rust_mantis_bt::controllers::build_router(db);
+    let (admin_cookie, _) = get_cookie(&app, "administrator", "root", false).await;
+
+    // Edit ChildProj: GrandParent, ParentProj, and ChildProj itself must NOT appear in Add Subproject dropdown
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/manage_proj_edit_page/{}", child))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let subproj_select = html
+        .split(r#"name="child_id""#)
+        .nth(1)
+        .and_then(|s| s.split("</select>").next())
+        .expect("child_id select must exist");
+    assert!(!subproj_select.contains(&format!(r#"value="{}""#, grandparent)));
+    assert!(!subproj_select.contains(&format!(r#"value="{}""#, parent)));
+    assert!(!subproj_select.contains(&format!(r#"value="{}""#, child)));
+    assert!(subproj_select.contains(&format!(r#"value="{}""#, unrelated)));
+
+    // Manage Users A-Z prefix filter: ?prefix=Z shows zulu_user, not alpha_user
+    let res_z = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_user_page?prefix=Z")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_z.status(), StatusCode::OK);
+    let html_z = String::from_utf8(
+        axum::body::to_bytes(res_z.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_z.contains("zulu_user"));
+    assert!(!html_z.contains("alpha_user"));
+
+    // Manage Users 0-9 prefix filter + combined search
+    let res_num = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/manage_user_page?prefix=0-9&filter_enabled=1")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_num.status(), StatusCode::OK);
+    let html_num = String::from_utf8(
+        axum::body::to_bytes(res_num.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_num.contains("007_agent"));
+    assert!(!html_num.contains("zulu_user"));
+
+    // View Issues target_version & fixed_in_version filtering (Roadmap / Changelog "View Issues" links)
+    let res_tv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/view_all_bug_page?project_id={}&target_version=v2.0",
+                    unrelated
+                ))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_tv.status(), StatusCode::OK);
+    let html_tv = String::from_utf8(
+        axum::body::to_bytes(res_tv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_tv.contains("Target v2 issue"));
+    assert!(!html_tv.contains("Other version issue"));
+    assert!(html_tv.contains(r#"<input type="hidden" name="target_version" value="v2.0">"#));
+    assert!(html_tv.contains(&format!(
+        r#"<input type="hidden" name="project_id" value="{}">"#,
+        unrelated
+    )));
+
+    let res_fv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/view_all_bug_page?fixed_in_version=v1.9")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_fv.status(), StatusCode::OK);
+    let html_fv = String::from_utf8(
+        axum::body::to_bytes(res_fv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_fv.contains("Target v2 issue"));
+    assert!(!html_fv.contains("Other version issue"));
+
+    // Saved filter combined with target_version override narrows results
+    let save_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &admin_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=AllInProj&project_id={}&status=10",
+                    unrelated
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(save_res.status(), StatusCode::SEE_OTHER);
+
+    let res_all_filters = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/view_all_bug_page")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html_filters = String::from_utf8(
+        axum::body::to_bytes(res_all_filters.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    let fid = html_filters
+        .split("filter_id=")
+        .nth(1)
+        .and_then(|s| s.split(['"', '&']).next())
+        .expect("saved filter link must exist");
+
+    let res_fid_tv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/view_all_bug_page?filter_id={}&target_version=v2.0",
+                    fid
+                ))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_fid_tv.status(), StatusCode::OK);
+    let html_fid_tv = String::from_utf8(
+        axum::body::to_bytes(res_fid_tv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html_fid_tv.contains("Target v2 issue"));
+    assert!(!html_fid_tv.contains("Other version issue"));
+    assert!(html_fid_tv.contains("Target Version: v2.0"));
+}
+
+#[tokio::test]
+async fn test_version_scope_chip_and_project_id_override_rbac() {
+    let db = Db::open_in_memory().unwrap();
+    let priv_proj = db
+        .create_project("SecretVersionProj", 10, 50, "", true)
+        .unwrap();
+    let priv_only_cat = db.add_category(priv_proj, "SecretProjOnlyCat", 0).unwrap();
+    let priv_cat = db.list_effective_categories(priv_proj).unwrap()[0].id;
+    let admin_user = db.get_user_by_username("administrator").unwrap().unwrap();
+    let priv_filter_id = db
+        .save_filter(
+            admin_user.id,
+            priv_proj,
+            true,
+            "PrivProjPublicFilter",
+            &rust_mantis_bt::models::BugFilter {
+                project_id: Some(priv_proj),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let _ = priv_only_cat;
+    let priv_bug = db
+        .create_bug(
+            priv_proj,
+            admin_user.id,
+            priv_cat,
+            "Secret v2 issue",
+            "Private project issue details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.update_bug_fields(
+        priv_bug,
+        admin_user.id,
+        BugUpdate {
+            target_version: Some("v2.0".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    db.create_user(
+        "outside_rep",
+        "Outside Reporter",
+        "outside@example.com",
+        "pw1234",
+        25,
+        true,
+        false,
+    )
+    .unwrap();
+
+    let app = rust_mantis_bt::controllers::build_router(db);
+    let (admin_cookie, _) = get_cookie(&app, "administrator", "root", false).await;
+    let (rep_cookie, _) = get_cookie(&app, "outside_rep", "pw1234", false).await;
+
+    // 1. Unauthorized Reporter requesting private ?project_id= gets 403 Forbidden and no secret leak
+    let deny_view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/view_all_bug_page?project_id={}&target_version=v2.0",
+                    priv_proj
+                ))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_view.status(), StatusCode::FORBIDDEN);
+    let deny_view_body = String::from_utf8(
+        axum::body::to_bytes(deny_view.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!deny_view_body.contains("Secret v2 issue"));
+
+    // 2. Unauthorized Reporter requesting /csv_export?project_id= gets 403 Forbidden
+    let deny_csv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/csv_export?project_id={}", priv_proj))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_csv.status(), StatusCode::FORBIDDEN);
+
+    // 3. Unauthorized Reporter posting /filter_save with private project_id gets 403 Forbidden
+    let deny_save = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &rep_cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "name=StealScope&project_id={}&status=10",
+                    priv_proj
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_save.status(), StatusCode::FORBIDDEN);
+
+    // 4. Authorized admin viewing ?target_version=v2.0 sees Active (1) and removable Target Version chip
+    let auth_tv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/view_all_bug_page?target_version=v2.0")
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(auth_tv.status(), StatusCode::OK);
+    let auth_tv_body = String::from_utf8(
+        axum::body::to_bytes(auth_tv.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(auth_tv_body.contains("Active (1)"));
+    assert!(auth_tv_body.contains("Target Version: v2.0"));
+    assert_no_nested_forms(&auth_tv_body);
+
+    // 5. M-4: Saved filter pointing at an inaccessible private project also returns 403
+    let deny_fid_view = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/view_all_bug_page?filter_id={}", priv_filter_id))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_fid_view.status(), StatusCode::FORBIDDEN);
+
+    let deny_fid_csv = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/csv_export?filter_id={}", priv_filter_id))
+                .header("cookie", &rep_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deny_fid_csv.status(), StatusCode::FORBIDDEN);
+
+    // 6. M-3: Category dropdown follows ?project_id= override even when active_project_id == 0
+    let proj_cat_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/view_all_bug_page?project_id={}", priv_proj))
+                .header("cookie", &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(proj_cat_res.status(), StatusCode::OK);
+    let proj_cat_body = String::from_utf8(
+        axum::body::to_bytes(proj_cat_res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(proj_cat_body.contains("SecretProjOnlyCat"));
 }

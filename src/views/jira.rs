@@ -156,13 +156,14 @@ pub fn render_manage_jira_page(
 
     let body = format!(
         r#"{}
-        <div class="widget-box" style="margin-bottom:20px;">
+        <div class="widget-box widget-color-blue2" style="margin-bottom:20px;">
             <div class="widget-header">
-                <h2>Jira Cloud Integration Configuration</h2>
+                <h4 class="widget-title"><i class="fa fa-exchange" aria-hidden="true"></i> Jira Cloud Integration Configuration</h4>
             </div>
             <div class="widget-body" style="padding:16px;">
                 <form method="POST" action="/manage_jira_config">
-                    <table class="table" style="max-width:800px;">
+                    <div class="table-responsive">
+                        <table class="table" style="max-width:800px;">
                         <tr>
                             <th style="width:220px;">Enable Jira Integration</th>
                             <td>
@@ -237,6 +238,7 @@ pub fn render_manage_jira_page(
                             {}
                         </tbody>
                     </table>
+                    </div>
                     <small style="color:#777; display:block; margin-bottom:20px;">When issues sync from Jira, their Mantis status will automatically update to match this mapping. Leave Jira status blank to remove a mapping.</small>
 
                     <div style="display:flex; gap:10px; align-items:center;">

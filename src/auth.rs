@@ -376,13 +376,7 @@ pub fn make_cookie_header_with_path(
     if let Some(age) = max_age {
         parts.push(format!("Max-Age={}", age));
     }
-    let secure = std::env::var("MANTIS_COOKIE_SECURE")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
-    if secure {
+    if crate::models::env_flag_enabled("MANTIS_COOKIE_SECURE") {
         parts.push("Secure".to_string());
     }
     parts.join("; ")

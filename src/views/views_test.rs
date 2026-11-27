@@ -100,3 +100,85 @@ fn test_view_labels() {
     assert_eq!(bugs::relationship_label(0), "related to");
     assert_eq!(bugs::relationship_label(999), "related to");
 }
+
+#[test]
+fn test_render_manage_tabs_rbac() {
+    let make_ctx = |access_level| AuthContext {
+        user: crate::models::User {
+            id: 1,
+            username: "u".to_string(),
+            realname: "U".to_string(),
+            email: "u@x.com".to_string(),
+            password: "h".to_string(),
+            enabled: 1,
+            protected: 0,
+            access_level,
+            login_count: 1,
+            lost_password_request_count: 0,
+            failed_login_count: 0,
+            cookie_string: "c".to_string(),
+            last_visit: 0,
+            date_created: 0,
+        },
+        active_project_id: 0,
+        visible_projects: vec![],
+    };
+
+    let admin_tabs = render_manage_tabs(&make_ctx(90), "overview");
+    assert!(admin_tabs.contains(r#"class="nav-tabs""#));
+    assert!(admin_tabs.contains("/manage_overview_page"));
+    assert!(admin_tabs.contains("/manage_user_page"));
+    assert!(admin_tabs.contains("/manage_proj_page"));
+    assert!(admin_tabs.contains("/manage_tags_page"));
+    assert!(admin_tabs.contains("/manage_custom_field_page"));
+    assert!(admin_tabs.contains("/manage_plugin_page"));
+    assert!(admin_tabs.contains("/manage_jira_page"));
+    assert!(admin_tabs.contains("/manage_email_queue_page"));
+
+    let mgr_tabs = render_manage_tabs(&make_ctx(70), "projects");
+    assert!(!mgr_tabs.contains("/manage_overview_page"));
+    assert!(!mgr_tabs.contains("/manage_user_page"));
+    assert!(mgr_tabs.contains("/manage_proj_page"));
+    assert!(mgr_tabs.contains("/manage_tags_page"));
+
+    let dev_tabs = render_manage_tabs(&make_ctx(55), "tags");
+    assert!(!dev_tabs.contains("/manage_overview_page"));
+    assert!(!dev_tabs.contains("/manage_proj_page"));
+    assert!(dev_tabs.contains("/manage_tags_page"));
+}
+
+#[test]
+fn test_render_manage_overview_page_escapes_html_and_shows_error() {
+    let ctx = AuthContext {
+        user: crate::models::User {
+            id: 1,
+            username: "admin".to_string(),
+            realname: "Admin".to_string(),
+            email: "a@x.com".to_string(),
+            password: "h".to_string(),
+            enabled: 1,
+            protected: 0,
+            access_level: 90,
+            login_count: 1,
+            lost_password_request_count: 0,
+            failed_login_count: 0,
+            cookie_string: "c".to_string(),
+            last_visit: 0,
+            date_created: 0,
+        },
+        active_project_id: 0,
+        visible_projects: vec![],
+    };
+    let stats = crate::models::SiteOverviewStats::default();
+    let html = render_manage_overview_page(
+        &ctx,
+        &stats,
+        &[("<script>k</script>", "<b>val</b>")],
+        Some("DB <err>"),
+    )
+    .0;
+    assert!(html.contains("&lt;script&gt;k&lt;/script&gt;"));
+    assert!(html.contains("&lt;b&gt;val&lt;/b&gt;"));
+    assert!(html.contains("DB &lt;err&gt;"));
+    assert!(!html.contains("<script>k</script>"));
+}

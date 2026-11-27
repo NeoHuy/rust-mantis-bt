@@ -192,8 +192,10 @@ async fn test_roadmap_changelog_summary_billing_news_and_email_queue() {
         .unwrap();
     let html = String::from_utf8_lossy(&body);
     assert!(html.contains("Total Issues: 2"));
-    assert!(html.contains("<strong>Open:</strong> 1"));
-    assert!(html.contains("<strong>Resolved:</strong> 1"));
+    assert!(html.contains("<th>Open</th><th>Resolved</th><th>Closed</th><th>Total</th>"));
+    assert!(html.contains(
+        "<tr class=\"row-1\"><td>1</td><td>1</td><td>0</td><td><strong>2</strong></td></tr>"
+    ));
 
     // 4. Add bugnote with HH:MM time tracking ("01:30" = 90 mins) and check billing_page + view_bug_page
     let res = app

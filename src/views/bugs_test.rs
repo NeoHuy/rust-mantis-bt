@@ -2237,8 +2237,10 @@ fn test_render_print_and_word_exports_escape_html_and_no_nested_forms() {
                 note: "Internal note <script>".to_string(),
             }],
         }],
+        Some(5),
     );
     assert!(word_doc.contains("xmlns:w=\"urn:schemas-microsoft-com:office:word\""));
+    assert!(word_doc.contains("Word export truncated to 1 of 5"));
     assert!(word_doc.contains("Env&lt;Prod&gt;"));
     assert!(word_doc.contains("Staging &amp; QA"));
     assert!(word_doc.contains("Internal note &lt;script&gt;"));

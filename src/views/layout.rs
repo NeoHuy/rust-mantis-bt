@@ -368,8 +368,6 @@ pub fn render_unauthenticated_layout(
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{title} - MantisBT</title>
     <link rel="icon" type="image/png" href="/images/mantis_logo.png">
-    <link rel="alternate" type="application/rss+xml" title="Issues RSS" href="/issues_rss">
-    <link rel="alternate" type="application/rss+xml" title="News RSS" href="/news_rss">
     <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
     <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
 </head>

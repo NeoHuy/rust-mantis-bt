@@ -43,7 +43,8 @@ fn test_render_news_rss_announcement_and_empty_channel() {
         &[],
     );
     assert!(empty_xml.contains("<channel>"));
-    assert!(empty_xml.contains("<lastBuildDate>Thu, 01 Jan 1970 00:00:00 +0000</lastBuildDate>"));
+    assert!(empty_xml.contains("<lastBuildDate>"));
+    assert!(!empty_xml.contains("1970"));
     assert!(!empty_xml.contains("<item>"));
 
     let items = vec![NewsRssEntry {

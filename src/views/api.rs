@@ -34,10 +34,16 @@ pub fn render_api_tokens_page(
         } else {
             "Never used".to_string()
         };
+        let scope_badge = if t.scope == "rss" {
+            r#"<span class="badge badge-info">RSS (read-only)</span>"#
+        } else {
+            r#"<span class="badge badge-warning">API (full)</span>"#
+        };
         rows_html.push_str(&format!(
             r#"<tr>
                 <td>{}</td>
                 <td><strong>{}</strong></td>
+                <td>{}</td>
                 <td>{}</td>
                 <td>{}</td>
                 <td>
@@ -48,13 +54,14 @@ pub fn render_api_tokens_page(
             </tr>"#,
             t.id,
             html_escape(&t.name),
+            scope_badge,
             format_timestamp(t.date_created),
             used_str,
             t.id
         ));
     }
     if rows_html.is_empty() {
-        rows_html.push_str(r#"<tr><td colspan="5">No API tokens created yet.</td></tr>"#);
+        rows_html.push_str(r#"<tr><td colspan="6">No API tokens created yet.</td></tr>"#);
     }
 
     let admin_table = if ctx.user.access_level >= 90 && !all_tokens.is_empty() {
@@ -70,11 +77,17 @@ pub fn render_api_tokens_page(
             } else {
                 format!("{} ({})", html_escape(realname), html_escape(username))
             };
+            let scope_badge = if t.scope == "rss" {
+                r#"<span class="badge badge-info">RSS</span>"#
+            } else {
+                r#"<span class="badge badge-warning">API</span>"#
+            };
             admin_rows.push_str(&format!(
                 r#"<tr>
                     <td>{}</td>
                     <td><strong>{}</strong></td>
                     <td><strong>{}</strong></td>
+                    <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
                     <td>
@@ -86,13 +99,14 @@ pub fn render_api_tokens_page(
                 t.id,
                 display_user,
                 html_escape(&t.name),
+                scope_badge,
                 format_timestamp(t.date_created),
                 used_str,
                 t.id
             ));
         }
         if admin_rows.is_empty() {
-            admin_rows.push_str(r#"<tr><td colspan="6">No tokens found in the system.</td></tr>"#);
+            admin_rows.push_str(r#"<tr><td colspan="7">No tokens found in the system.</td></tr>"#);
         }
         format!(
             r#"<div class="panel" style="margin-top:20px;">
@@ -104,6 +118,7 @@ pub fn render_api_tokens_page(
                                 <th>ID</th>
                                 <th>Owner User</th>
                                 <th>Token Name</th>
+                                <th>Scope</th>
                                 <th>Created</th>
                                 <th>Last Used</th>
                                 <th>Actions</th>
@@ -128,8 +143,12 @@ pub fn render_api_tokens_page(
         <div class="panel">
             <div class="panel-header">Create API Token</div>
             <div class="panel-body">
-                <form method="POST" action="/api_token_create" style="display:flex; gap:8px; align-items:center;">
+                <form method="POST" action="/api_token_create" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
                     <input type="text" name="name" placeholder="Token Name (e.g. CI/CD, CLI)" required style="max-width:300px;">
+                    <select name="scope" class="!w-auto" aria-label="Token Scope">
+                        <option value="api" selected>API (Full Access)</option>
+                        <option value="rss">RSS (Read-Only Feed Token)</option>
+                    </select>
                     <button type="submit" class="btn">Create API Token</button>
                 </form>
             </div>
@@ -142,6 +161,7 @@ pub fn render_api_tokens_page(
                         <tr>
                             <th>ID</th>
                             <th>Token Name</th>
+                            <th>Scope</th>
                             <th>Created</th>
                             <th>Last Used</th>
                             <th>Actions</th>
@@ -156,7 +176,7 @@ pub fn render_api_tokens_page(
         <div class="panel">
             <div class="panel-header">Authenticated RSS Feeds</div>
             <div class="panel-body text-xs space-y-1.5">
-                <p>Use any active API token with the RSS endpoints via <code>Authorization: Bearer &lt;TOKEN&gt;</code>, <code>?token=&lt;TOKEN&gt;</code>, or <code>?username=&lt;USER&gt;&amp;key=&lt;TOKEN&gt;</code>.</p>
+                <p>Use an <strong>RSS (Read-Only)</strong> feed token via <code>?token=&lt;RSS_TOKEN&gt;</code> or <code>?username=&lt;USER&gt;&amp;key=&lt;RSS_TOKEN&gt;</code>, or send any active token in <code>Authorization: Bearer &lt;TOKEN&gt;</code>. Full-access API tokens are rejected in RSS query parameters unless <code>MANTIS_ALLOW_QUERY_TOKEN=1</code> is set.</p>
                 <div class="flex flex-wrap gap-2">
                     <a href="/issues_rss" class="btn btn-white btn-round btn-sm"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> Issues RSS</a>
                     <a href="/news_rss" class="btn btn-white btn-round btn-sm"><i class="fa fa-rss text-orange-600" aria-hidden="true"></i> News RSS</a>

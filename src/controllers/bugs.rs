@@ -668,6 +668,14 @@ fn check_project_filter_access(
     None
 }
 
+fn word_export_max_rows() -> usize {
+    std::env::var("MANTIS_EXPORT_MAX_ROWS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1000)
+}
+
 struct PreparedExportBugs {
     bugs: Vec<Bug>,
     bug_eff_levels: HashMap<i64, i32>,
@@ -676,6 +684,7 @@ struct PreparedExportBugs {
     categories_map: HashMap<i64, String>,
     accessible_cfs: Vec<CustomField>,
     project_title: String,
+    effective_project_id: i64,
 }
 
 struct ExportTabularDataset {
@@ -724,18 +733,19 @@ fn load_filtered_export_bugs(
         bug_eff_levels.insert(b.id, eff);
     }
 
+    let effective_project_id = filter.project_id.unwrap_or(ctx.active_project_id);
     let projects_map: HashMap<i64, String> = ctx
         .visible_projects
         .iter()
         .map(|(p, _)| (p.id, p.name.clone()))
         .collect();
-    let project_title = if ctx.active_project_id == 0 {
+    let project_title = if effective_project_id == 0 {
         "All Projects".to_string()
     } else {
         projects_map
-            .get(&ctx.active_project_id)
+            .get(&effective_project_id)
             .cloned()
-            .unwrap_or_else(|| format!("Project #{}", ctx.active_project_id))
+            .unwrap_or_else(|| format!("Project #{}", effective_project_id))
     };
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
@@ -745,7 +755,7 @@ fn load_filtered_export_bugs(
         .collect();
     let categories_map = db.list_all_categories_map().unwrap_or_default();
     let accessible_cfs = db
-        .list_accessible_custom_fields_for_user(&ctx.user, ctx.active_project_id)
+        .list_accessible_custom_fields_for_user(&ctx.user, effective_project_id)
         .unwrap_or_default();
 
     Ok(PreparedExportBugs {
@@ -756,6 +766,7 @@ fn load_filtered_export_bugs(
         categories_map,
         accessible_cfs,
         project_title,
+        effective_project_id,
     })
 }
 
@@ -767,10 +778,16 @@ fn prepare_tabular_export_dataset(
     format_last_updated: bool,
 ) -> Result<ExportTabularDataset, Box<Response>> {
     let prepared = load_filtered_export_bugs(db, ctx, q)?;
+    let accessible_cf_ids: HashSet<i64> = prepared.accessible_cfs.iter().map(|c| c.id).collect();
     let raw_cols = db
-        .get_user_columns(&ctx.user, ctx.active_project_id, col_ctx)
+        .get_user_columns_with_cfs(
+            ctx.user.id,
+            prepared.effective_project_id,
+            col_ctx,
+            &accessible_cf_ids,
+        )
         .unwrap_or_else(|_| {
-            crate::models::default_columns_for_context(col_ctx, ctx.active_project_id)
+            crate::models::default_columns_for_context(col_ctx, prepared.effective_project_id)
         });
     let col_keys: Vec<String> = raw_cols
         .into_iter()
@@ -1052,9 +1069,18 @@ pub async fn word_all_bug_page(
     RawQuery(raw_query): RawQuery,
 ) -> Response {
     let q = ListBugsQuery::from_raw_query(raw_query.as_deref());
-    let prepared = match load_filtered_export_bugs(&db, &ctx, &q) {
+    let mut prepared = match load_filtered_export_bugs(&db, &ctx, &q) {
         Ok(p) => p,
         Err(res) => return *res,
+    };
+
+    let max_rows = word_export_max_rows();
+    let truncated_from = if prepared.bugs.len() > max_rows {
+        let total = prepared.bugs.len();
+        prepared.bugs.truncate(max_rows);
+        Some(total)
+    } else {
+        None
     };
 
     let bug_ids: Vec<i64> = prepared.bugs.iter().map(|b| b.id).collect();
@@ -1067,6 +1093,9 @@ pub async fn word_all_bug_page(
     } else {
         HashMap::new()
     };
+    let notes_map = db
+        .get_bugs_bugnotes_map(&bug_ids, &prepared.bug_eff_levels)
+        .unwrap_or_default();
 
     let mut entries = Vec::with_capacity(prepared.bugs.len());
     for b in prepared.bugs {
@@ -1108,22 +1137,24 @@ pub async fn word_all_bug_page(
             }
         }
 
-        let notes = db
-            .list_bugnotes(b.id, eff)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|n| views::bugs::WordBugnoteEntry {
-                id: n.id,
-                reporter_name: prepared
-                    .users_map
-                    .get(&n.reporter_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("user#{}", n.reporter_id)),
-                date_submitted: n.date_submitted,
-                view_state: n.view_state,
-                note: n.note,
+        let notes = notes_map
+            .get(&b.id)
+            .map(|list| {
+                list.iter()
+                    .map(|n| views::bugs::WordBugnoteEntry {
+                        id: n.id,
+                        reporter_name: prepared
+                            .users_map
+                            .get(&n.reporter_id)
+                            .cloned()
+                            .unwrap_or_else(|| format!("user#{}", n.reporter_id)),
+                        date_submitted: n.date_submitted,
+                        view_state: n.view_state,
+                        note: n.note.clone(),
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         entries.push(views::bugs::WordIssueEntry {
             bug: b,
@@ -1140,7 +1171,8 @@ pub async fn word_all_bug_page(
         });
     }
 
-    let doc = views::bugs::render_word_export_doc(&prepared.project_title, &entries);
+    let doc =
+        views::bugs::render_word_export_doc(&prepared.project_title, &entries, truncated_from);
 
     (
         StatusCode::OK,

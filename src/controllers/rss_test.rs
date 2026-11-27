@@ -26,7 +26,10 @@ async fn test_rss_requires_auth_and_supports_pat_bearer_and_query_token() {
         10,
     )
     .unwrap();
-    let (_, pat) = db.create_api_token(1, "rss-reader").unwrap();
+    let (_, api_pat) = db.create_api_token(1, "full-api").unwrap();
+    let (_, rss_pat) = db
+        .create_api_token_with_scope(1, "rss-reader", "rss")
+        .unwrap();
     let app = build_router(db);
 
     // 1. Unauthenticated returns 401 Unauthorized
@@ -48,7 +51,7 @@ async fn test_rss_requires_auth_and_supports_pat_bearer_and_query_token() {
         .oneshot(
             Request::builder()
                 .uri(format!("/issues_rss?project_id={}", proj_id))
-                .header("authorization", format!("Bearer {}", pat))
+                .header("authorization", format!("Bearer {}", api_pat))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -64,26 +67,64 @@ async fn test_rss_requires_auth_and_supports_pat_bearer_and_query_token() {
     .unwrap();
     assert!(body.contains("RSS Bug &lt;tag&gt;"));
     assert!(body.contains("Body &amp; details"));
-    assert!(!body.contains(&pat));
+    assert!(!body.contains(&api_pat));
 
-    // 3. Query ?token= works and ?username=&key= enforces username match
+    // 3. Full API token is rejected in query string by default; RSS-scoped token works in query string
+    let res_api_query = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/issues_rss?token={}", api_pat))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_api_query.status(), StatusCode::UNAUTHORIZED);
+
+    // 4. Read-only RSS token is rejected on /api/rest/*
+    let res_rss_rest = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/rest/issues")
+                .header("authorization", format!("Bearer {}", rss_pat))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rss_rest.status(), StatusCode::UNAUTHORIZED);
+
+    // 5. Query ?username=&key= with rss token enforces uniform 401 on username mismatch and accepts match
     let res_bad_user = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/news_rss?username=other&key={}", pat))
+                .uri(format!("/news_rss?username=other&key={}", rss_pat))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(res_bad_user.status(), StatusCode::UNAUTHORIZED);
+    let bad_user_body = String::from_utf8(
+        axum::body::to_bytes(res_bad_user.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(bad_user_body, "Invalid or revoked RSS feed token");
 
     let res_good_key = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/news_rss?username=administrator&key={}", pat))
+                .uri(format!(
+                    "/news_rss?username=administrator&key={}&project_id={}&project_id=0",
+                    rss_pat, 999999
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )

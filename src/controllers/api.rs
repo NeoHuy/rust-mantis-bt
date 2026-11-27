@@ -96,6 +96,8 @@ pub async fn api_tokens_page(
 #[derive(Deserialize)]
 pub struct ApiTokenCreateForm {
     pub name: String,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 pub async fn api_token_create(
@@ -110,7 +112,12 @@ pub async fn api_token_create(
         );
     }
 
-    match db.create_api_token(ctx.user.id, &form.name) {
+    let scope = match form.scope.as_deref().map(str::trim) {
+        Some("rss") => "rss",
+        _ => "api",
+    };
+
+    match db.create_api_token_with_scope(ctx.user.id, &form.name, scope) {
         Ok((_id, raw_token)) => {
             let mut res = Redirect::to("/api_tokens_page?msg=Token+created").into_response();
             let flash_cookie = make_cookie_header_with_path(

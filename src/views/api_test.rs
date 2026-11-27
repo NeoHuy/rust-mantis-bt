@@ -42,6 +42,7 @@ fn test_render_api_tokens_page_with_token_banner() {
         id: 10,
         user_id: 1,
         name: "test-token".to_string(),
+        scope: "api".to_string(),
         hash: "hashval".to_string(),
         date_created: 1700000000,
         date_used: 1700000000,
@@ -51,6 +52,7 @@ fn test_render_api_tokens_page_with_token_banner() {
     assert!(html.contains("New API Token Created!"));
     assert!(html.contains("secret_token_123"));
     assert!(html.contains("test-token"));
+    assert!(html.contains(r#"value="rss""#));
     assert!(html.contains(r#"action="/api_token_revoke/10""#));
 }
 

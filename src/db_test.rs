@@ -5243,4 +5243,42 @@ fn test_list_accessible_news_rbac_isolation() {
         .list_accessible_news(&admin, disabled_proj)
         .unwrap()
         .is_empty());
+
+    // RSS-scoped token rejected by authenticate_api_token_full (REST/MCP), accepted by authenticate_api_token_with_scope
+    let (_, rss_tok) = db
+        .create_api_token_with_scope(rep_id, "rss-only", "rss")
+        .unwrap();
+    assert!(db.authenticate_api_token_full(&rss_tok).unwrap().is_none());
+    let (_, authed_user, scope) = db
+        .authenticate_api_token_with_scope(&rss_tok)
+        .unwrap()
+        .unwrap();
+    assert_eq!(authed_user.id, rep_id);
+    assert_eq!(scope, "rss");
+    assert!(db
+        .create_api_token_with_scope(rep_id, "bad-scope", "admin")
+        .is_err());
+
+    // Batched get_bugs_bugnotes_map enforces per-bug access level on private notes
+    let b1 = db
+        .create_bug(
+            pub_proj, rep_id, 0, "N1", "d", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug(
+            priv_proj, dev_id, 0, "N2", "d", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    db.add_bugnote(b1, rep_id, "Public note", 10).unwrap();
+    db.add_bugnote(b1, dev_id, "Private note b1", 50).unwrap();
+    db.add_bugnote(b2, dev_id, "Private note b2", 50).unwrap();
+    let mut eff_map = HashMap::new();
+    eff_map.insert(b1, 25); // reporter: sees public only
+    eff_map.insert(b2, 55); // developer: sees private
+    let notes_map = db.get_bugs_bugnotes_map(&[b1, b2], &eff_map).unwrap();
+    assert_eq!(notes_map[&b1].len(), 1);
+    assert_eq!(notes_map[&b1][0].note, "Public note");
+    assert_eq!(notes_map[&b2].len(), 1);
+    assert_eq!(notes_map[&b2][0].note, "Private note b2");
 }

@@ -32,6 +32,7 @@ fn test_render_unauthenticated_layout() {
     assert!(html.contains(r#"src="/assets/mantis_logo.png""#));
     assert!(html.contains(r#"href="/assets/tailwind.css?v="#));
     assert!(html.contains(r#"href="/assets/font-awesome.min.css?v="#));
+    assert!(!html.contains(r#"rel="alternate" type="application/rss+xml""#));
 }
 
 #[test]

@@ -1,13 +1,13 @@
 use crate::auth::AuthContext;
 use crate::models::{
-    build_csv_export_url, build_excel_export_url, build_filter_permalink_url, build_issues_rss_url,
-    build_print_all_bug_page_url, build_view_all_bug_page_url, build_word_export_url,
-    clamp_per_page, default_columns_for_context, parse_custom_field_column_id,
-    sanitize_spreadsheet_cell, standard_column_label, Bug, BugFile, BugFilter, BugFull, BugHistory,
-    BugPriority, BugRelationship, BugReproducibility, BugResolution, BugRevision, BugSeverity,
-    BugStatus, BugTag, Bugnote, Category, ColumnContext, CustomField, CustomFieldType,
-    CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion, RelationshipType, SavedFilter, Tag,
-    TimelineEvent, User, ViewState, FILTER_MATCH_ANY,
+    build_csv_export_url, build_excel_export_url, build_filter_permalink_url,
+    build_issues_rss_url_for, build_print_all_bug_page_url, build_view_all_bug_page_url,
+    build_word_export_url, clamp_per_page, default_columns_for_context,
+    parse_custom_field_column_id, sanitize_spreadsheet_cell, standard_column_label, Bug, BugFile,
+    BugFilter, BugFull, BugHistory, BugPriority, BugRelationship, BugReproducibility,
+    BugResolution, BugRevision, BugSeverity, BugStatus, BugTag, Bugnote, Category, ColumnContext,
+    CustomField, CustomFieldType, CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion,
+    RelationshipType, SavedFilter, Tag, TimelineEvent, User, ViewState, FILTER_MATCH_ANY,
 };
 use crate::views::layout::render_layout;
 use crate::views::{
@@ -2192,15 +2192,7 @@ pub fn render_view_all_bug_page(
         ""
     };
 
-    let mut rss_export_url = build_issues_rss_url(query);
-    if ctx.active_project_id > 0 {
-        let sep = if rss_export_url.contains('?') {
-            '&'
-        } else {
-            '?'
-        };
-        rss_export_url.push_str(&format!("{}project_id={}", sep, ctx.active_project_id));
-    }
+    let rss_export_url = build_issues_rss_url_for(query, ctx.active_project_id);
 
     let range_badge = if bugs.is_empty() {
         format!("0 / {}", total)
@@ -4900,11 +4892,7 @@ pub fn render_print_all_bug_page(
     rows: &[Vec<String>],
 ) -> Html<String> {
     let asset_ver = env!("CARGO_PKG_VERSION");
-    let mut rss_url = build_issues_rss_url(query);
-    if ctx.active_project_id > 0 {
-        let sep = if rss_url.contains('?') { '&' } else { '?' };
-        rss_url.push_str(&format!("{}project_id={}", sep, ctx.active_project_id));
-    }
+    let rss_url = build_issues_rss_url_for(query, ctx.active_project_id);
 
     let mut th_html = String::new();
     for h in headers {
@@ -5029,8 +5017,19 @@ fn format_multiline_html(s: &str) -> String {
     html_escape(s).replace('\n', "<br>\n")
 }
 
-pub fn render_word_export_doc(project_title: &str, entries: &[WordIssueEntry]) -> String {
+pub fn render_word_export_doc(
+    project_title: &str,
+    entries: &[WordIssueEntry],
+    truncated_from: Option<usize>,
+) -> String {
     let mut blocks = String::new();
+    if let Some(total) = truncated_from {
+        blocks.push_str(&format!(
+            r#"<p><strong>Notice:</strong> Word export truncated to {} of {} matching issues (MANTIS_EXPORT_MAX_ROWS limit).</p>"#,
+            entries.len(),
+            total
+        ));
+    }
     if entries.is_empty() {
         blocks.push_str("<p>No matching issues found.</p>");
     } else {

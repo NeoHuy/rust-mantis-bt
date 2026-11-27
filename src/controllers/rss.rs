@@ -1,7 +1,9 @@
 use crate::auth::{extract_bearer_token, is_session_expired, parse_cookies};
 use crate::controllers::bugs::{resolve_bug_filter_for_user, FilterResolveError};
 use crate::db::Db;
-use crate::models::{build_issues_rss_url, parse_query_pairs, sort_bugs, Bug, ListBugsQuery, User};
+use crate::models::{
+    build_issues_rss_url_for, parse_query_pairs, sort_bugs, Bug, ListBugsQuery, User,
+};
 use crate::views;
 use crate::views::rss::{render_issues_rss, render_news_rss, IssueRssEntry, NewsRssEntry};
 use axum::extract::{RawQuery, State};
@@ -99,6 +101,12 @@ fn rss_unauthorized(msg: &str) -> Response {
     rss_text_error(StatusCode::UNAUTHORIZED, msg, true)
 }
 
+fn allow_full_query_token() -> bool {
+    std::env::var("MANTIS_ALLOW_QUERY_TOKEN")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE"))
+        .unwrap_or(false)
+}
+
 fn authenticate_rss_request(
     db: &Db,
     headers: &HeaderMap,
@@ -114,8 +122,8 @@ fn authenticate_rss_request(
         if raw.is_empty() {
             return Err(Box::new(rss_unauthorized("API token required")));
         }
-        return match db.authenticate_api_token(raw) {
-            Ok(Some(user)) => Ok(RssAuthContext {
+        return match db.authenticate_api_token_with_scope(raw) {
+            Ok(Some((_, user, _))) => Ok(RssAuthContext {
                 user,
                 cookie_project_id: 0,
             }),
@@ -133,14 +141,19 @@ fn authenticate_rss_request(
         if candidate.is_empty() {
             return Err(Box::new(rss_unauthorized("RSS feed token required")));
         }
-        return match db.authenticate_api_token(candidate) {
-            Ok(Some(user)) => {
+        return match db.authenticate_api_token_with_scope(candidate) {
+            Ok(Some((_, user, scope))) => {
                 if let Some(ref req_user) = extra.username {
                     if !user.username.eq_ignore_ascii_case(req_user) {
                         return Err(Box::new(rss_unauthorized(
-                            "RSS feed token does not match requested username",
+                            "Invalid or revoked RSS feed token",
                         )));
                     }
+                }
+                if scope != "rss" && !allow_full_query_token() {
+                    return Err(Box::new(rss_unauthorized(
+                        "Full-access API tokens are disabled in RSS query parameters. Create a read-only RSS token or use 'Authorization: Bearer <token>'.",
+                    )));
                 }
                 Ok(RssAuthContext {
                     user,
@@ -234,11 +247,8 @@ fn resolve_rss_project_id(
                 return Ok((cookie_pid, Some(p.name)));
             }
         }
-        return Err(Box::new(rss_text_error(
-            StatusCode::FORBIDDEN,
-            "You do not have access to this project.",
-            false,
-        )));
+        // Stale or disabled project cookie falls back to All Projects (matching AuthContext).
+        return Ok((0, None));
     }
 
     Ok((0, None))
@@ -274,7 +284,14 @@ pub async fn issues_rss(
             Err(res) => return *res,
         };
 
-    let q = ListBugsQuery::from_urlencoded_pairs(&pairs);
+    let mut q = ListBugsQuery::from_urlencoded_pairs(&pairs);
+    // Keep last project_id=0 aligned between RssExtraParams and ListBugsQuery
+    if extra.project_id == Some(0) {
+        q.project_id = None;
+    } else if let Some(pid) = extra.project_id.filter(|&v| v > 0) {
+        q.project_id = Some(pid);
+    }
+
     let filter = match resolve_bug_filter_for_user(&db, &auth.user, active_project_id, &q) {
         Ok(f) => f,
         Err(FilterResolveError::Forbidden(msg)) => {
@@ -287,6 +304,11 @@ pub async fn issues_rss(
             return rss_text_error(StatusCode::INTERNAL_SERVER_ERROR, msg, false);
         }
     };
+    if let Some(final_pid) = filter.project_id.filter(|&v| v > 0) {
+        if let Err(res) = resolve_rss_project_id(&db, &auth.user, Some(final_pid), 0) {
+            return *res;
+        }
+    }
 
     let mut bugs: Vec<Bug> = match db.filter_bugs(&filter, &auth.user) {
         Ok(b) => b,
@@ -335,11 +357,7 @@ pub async fn issues_rss(
     let base_url = db.base_url().trim_end_matches('/');
     let channel_link = format!("{}/view_all_bug_page", base_url);
     // Strip token/key credentials from self_link so RSS payloads never leak secret PATs
-    let mut self_rel = build_issues_rss_url(&q);
-    if active_project_id > 0 {
-        let sep = if self_rel.contains('?') { '&' } else { '?' };
-        self_rel.push_str(&format!("{}project_id={}", sep, active_project_id));
-    }
+    let mut self_rel = build_issues_rss_url_for(&q, active_project_id);
     if let Some(lim) = extra.limit {
         let sep = if self_rel.contains('?') { '&' } else { '?' };
         self_rel.push_str(&format!("{}limit={}", sep, lim.clamp(1, 200)));

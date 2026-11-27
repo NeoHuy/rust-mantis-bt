@@ -49,7 +49,12 @@ fn render_rss_document(
         .map(|item| item.pub_date_ts)
         .filter(|&ts| ts > 0)
         .max()
-        .unwrap_or(0);
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64
+        });
 
     let mut out = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\

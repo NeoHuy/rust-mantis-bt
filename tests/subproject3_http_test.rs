@@ -1609,8 +1609,14 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
         .create_user("rss_dev", "RSS Dev", "rd@x.com", "pass123", 55, true, false)
         .unwrap();
 
-    let (rep_tok_id, rep_pat) = db.create_api_token(rep_id, "rep-rss").unwrap();
-    let (_, dev_pat) = db.create_api_token(dev_id, "dev-rss").unwrap();
+    let (rep_tok_id, rep_pat) = db.create_api_token(rep_id, "rep-api").unwrap();
+    let (_, dev_pat) = db.create_api_token(dev_id, "dev-api").unwrap();
+    let (_, rep_rss_pat) = db
+        .create_api_token_with_scope(rep_id, "rep-rss", "rss")
+        .unwrap();
+    let (_, dev_rss_pat) = db
+        .create_api_token_with_scope(dev_id, "dev-rss", "rss")
+        .unwrap();
 
     db.create_bug(
         pub_proj,
@@ -1734,14 +1740,26 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
     assert!(!rep_rss.contains("PrivProj Secret Bug"));
     assert!(!rep_rss.contains(&rep_pat));
 
-    // 3. Private filter or inaccessible project returns 403
+    // 3. Private filter or inaccessible project returns 403; full API token in query string returns 401
+    let res_api_q_deny = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/issues_rss?token={}", rep_pat))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_api_q_deny.status(), StatusCode::UNAUTHORIZED);
+
     let res_priv_filter = app
         .clone()
         .oneshot(
             Request::builder()
                 .uri(format!(
                     "/issues_rss?filter_id={}&token={}",
-                    dev_priv_filter, rep_pat
+                    dev_priv_filter, rep_rss_pat
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -1756,7 +1774,7 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
             Request::builder()
                 .uri(format!(
                     "/news_rss?project_id={}&token={}",
-                    priv_proj, dev_pat
+                    priv_proj, dev_rss_pat
                 ))
                 .body(Body::empty())
                 .unwrap(),
@@ -1765,12 +1783,12 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
         .unwrap();
     assert_eq!(res_priv_proj.status(), StatusCode::FORBIDDEN);
 
-    // 4. Dev query ?token= sees private bug on pub_proj but NOT priv_proj bug, and token is stripped from XML
+    // 4. Dev query ?token= (rss scope) sees private bug on pub_proj but NOT priv_proj bug, and token is stripped from XML
     let res_dev = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/issues_rss?token={}", dev_pat))
+                .uri(format!("/issues_rss?token={}", dev_rss_pat))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1786,14 +1804,45 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
     .unwrap();
     assert!(dev_rss.contains("Private Bug On PubProj"));
     assert!(!dev_rss.contains("PrivProj Secret Bug"));
-    assert!(!dev_rss.contains(&dev_pat));
+    assert!(!dev_rss.contains(&dev_rss_pat));
 
-    // 5. News RSS RBAC via ?username=&key= and cookie
+    // RSS-scoped token cannot access /api/rest/* even via Bearer header
+    let res_rss_on_rest = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/rest/issues")
+                .header("authorization", format!("Bearer {}", dev_rss_pat))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rss_on_rest.status(), StatusCode::UNAUTHORIZED);
+    let _ = dev_pat;
+
+    // Duplicate ?project_id=priv_proj&project_id=0 consistently evaluates to All Projects (200 OK)
+    let res_dup_pid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/issues_rss?project_id={}&project_id=0&token={}",
+                    priv_proj, rep_rss_pat
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_dup_pid.status(), StatusCode::OK);
+
+    // 5. News RSS RBAC via ?username=&key= (rss token) and cookie
     let res_rep_news = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/news_rss?username=rss_rep&key={}", rep_pat))
+                .uri(format!("/news_rss?username=rss_rep&key={}", rep_rss_pat))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1815,7 +1864,7 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/news_rss?token={}", dev_pat))
+                .uri(format!("/news_rss?token={}", dev_rss_pat))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1831,8 +1880,49 @@ async fn test_phase3_m2_authenticated_rss_feeds_and_rbac() {
     assert!(dev_news.contains("Dev Secret News"));
     assert!(!dev_news.contains("PrivProj News"));
 
-    // Admin session cookie sees PrivProj News
+    // Admin session cookie sees PrivProj News, and stale project cookie falls back to All Projects (200 OK)
     let admin_cookie = login_as_admin(&app).await;
+    let res_stale_cookie = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/issues_rss")
+                .header(
+                    "cookie",
+                    format!("{}; MANTIS_PROJECT_COOKIE=999999", admin_cookie),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_stale_cookie.status(), StatusCode::OK);
+
+    // M4: ?project_id= override in Print/Excel/Word exports uses target project title & custom fields
+    let res_print_override = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/print_all_bug_page?project_id={}", pub_proj))
+                .header(
+                    "cookie",
+                    format!("{}; MANTIS_PROJECT_COOKIE={}", admin_cookie, priv_proj),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_print_override.status(), StatusCode::OK);
+    let print_override_html = String::from_utf8(
+        axum::body::to_bytes(res_print_override.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(print_override_html.contains("RssPubProj"));
+    assert!(!print_override_html.contains(&format!("project_id={}&amp;project_id=", pub_proj)));
     let res_admin_news = app
         .clone()
         .oneshot(

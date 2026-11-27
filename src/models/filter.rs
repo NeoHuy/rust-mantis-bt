@@ -1106,7 +1106,16 @@ pub fn build_word_export_url(q: &ListBugsQuery) -> String {
 }
 
 pub fn build_issues_rss_url(q: &ListBugsQuery) -> String {
-    build_export_url("/issues_rss", q)
+    build_issues_rss_url_for(q, 0)
+}
+
+pub fn build_issues_rss_url_for(q: &ListBugsQuery, active_project_id: i64) -> String {
+    let mut url = build_export_url("/issues_rss", q);
+    if active_project_id > 0 && q.project_id.is_none() {
+        let sep = if url.contains('?') { '&' } else { '?' };
+        url.push_str(&format!("{}project_id={}", sep, active_project_id));
+    }
+    url
 }
 
 pub fn sort_bugs(bugs: &mut [Bug], sort_key: Option<&str>, dir: Option<&str>) {

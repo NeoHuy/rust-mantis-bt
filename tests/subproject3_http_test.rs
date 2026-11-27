@@ -206,7 +206,7 @@ async fn test_custom_fields_tags_monitors_and_my_view() {
     )
     .unwrap();
     assert!(my_view_html.contains("Assigned to Me"));
-    assert!(my_view_html.contains("Monitored by Me (1)"));
+    assert!(my_view_html.contains(">Monitored by Me</a>"));
     assert!(my_view_html.contains("Crash on Safari"));
 }
 
@@ -2234,4 +2234,81 @@ async fn test_phase3_m2_export_max_rows_cap_and_notices() {
     )
     .unwrap();
     assert!(word_body.contains("1 of 2"));
+}
+
+#[tokio::test]
+async fn test_saved_filter_shows_accurate_active_count_and_login_page_alias() {
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db.clone());
+
+    // /login_page alias is served by the full app stack (GET only).
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login_page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let cookie = login_as_admin(&app).await;
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/filter_save")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("name=High+Only&priority=40"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SEE_OTHER);
+    let location = res
+        .headers()
+        .get("location")
+        .expect("filter_save redirect location")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let admin = db
+        .get_user_by_username("administrator")
+        .unwrap()
+        .expect("seed administrator");
+    let fid = db
+        .list_visible_filters(admin.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.name == "High Only")
+        .expect("saved filter")
+        .id;
+    assert!(
+        location.starts_with(&format!("/view_all_bug_page?filter_id={}", fid)),
+        "unexpected redirect location: {}",
+        location
+    );
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/view_all_bug_page?filter_id={}", fid))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("Active (1)"));
+    assert!(!html.contains("Active (2)"));
 }

@@ -211,10 +211,14 @@ pub fn render_issues_trend_svg(title: &str, points: &[TrendPoint]) -> String {
     let plot_h = height - pad_t - pad_b;
 
     let mut grid_svg = String::new();
-    for step in 0..=4 {
-        let frac = (step as f64) / 4.0;
-        let y = pad_t + plot_h * (1.0 - frac);
-        let tick_val = ((max_val as f64) * frac).round() as usize;
+    let steps = max_val.min(4);
+    for step in 0..=steps {
+        let tick_val = if max_val <= 4 {
+            step
+        } else {
+            ((max_val as f64) * (step as f64) / (steps as f64)).round() as usize
+        };
+        let y = pad_t + plot_h * (1.0 - (tick_val as f64) / (max_val as f64));
         grid_svg.push_str(&format!(
             r##"<line x1="{pad_l:.1}" y1="{y:.1}" x2="{x2:.1}" y2="{y:.1}" stroke="#e5e7eb" stroke-dasharray="3 3" />
             <text x="{lx:.1}" y="{ly:.1}" text-anchor="end" font-size="10" fill="#6b7280">{tick_val}</text>"##,

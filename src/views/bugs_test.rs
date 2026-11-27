@@ -32,7 +32,9 @@ fn test_labels() {
 #[test]
 fn test_render_my_view_box_empty() {
     let out = render_my_view_box("Unassigned", "/view_all_bug_page", &[]);
-    assert!(out.contains("Unassigned"));
+    assert!(out.contains(">Unassigned</a>"));
+    assert!(!out.contains("Unassigned (0)"));
+    assert!(out.contains(">0</span>"));
     assert!(out.contains("No issues found."));
     assert!(out.contains(r#"href="/view_all_bug_page""#));
 }
@@ -67,7 +69,9 @@ fn test_render_my_view_box_with_issues() {
     };
 
     let out = render_my_view_box("Recent", "/view_all_bug_page", &[sample_bug]);
-    assert!(out.contains("Recent"));
+    assert!(out.contains(">Recent</a>"));
+    assert!(!out.contains("Recent (1)"));
+    assert!(out.contains(">1 - 1 / 1</span>"));
     assert!(out.contains("0000007"));
     assert!(out.contains("Crash on startup"));
 }
@@ -2293,4 +2297,39 @@ fn test_render_my_view_config_and_custom_9box_order() {
     assert!(!mv_html.contains("Timeline"));
     assert!(!mv_html.contains(r#"id="timeline""#));
     assert_no_nested_forms(&mv_html);
+}
+
+#[test]
+fn test_saved_filter_active_count_matches_actual_criteria() {
+    let ctx = dummy_ctx(1, 55);
+    let filter = BugFilter {
+        priority: Some(40),
+        ..Default::default()
+    };
+    let q = ListBugsQuery {
+        filter_id: Some(1),
+        ..Default::default()
+    };
+    let Html(html) = render_view_all_bug_page(
+        &ctx,
+        &[],
+        0,
+        1,
+        25,
+        &filter,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q,
+        &ViewIssuesMeta::default(),
+    );
+    assert!(html.contains("Active (1)"));
+    assert!(!html.contains("Active (2)"));
 }

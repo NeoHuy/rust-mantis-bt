@@ -30,6 +30,8 @@ pub struct BugFilter {
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
     #[serde(default)]
+    pub commented_by: Option<i64>,
+    #[serde(default)]
     pub target_version: Option<String>,
     #[serde(default)]
     pub fixed_in_version: Option<String>,
@@ -246,6 +248,7 @@ impl BugFilter {
             handler_id: (handler_ids.len() == 1).then(|| handler_ids[0]),
             tag_id: (tag_ids.len() == 1).then(|| tag_ids[0]),
             monitored_by: (monitored_by_ids.len() == 1).then(|| monitored_by_ids[0]),
+            commented_by: self.commented_by.filter(|&v| v > 0),
             target_version: None,
             fixed_in_version: None,
             msg: None,
@@ -342,6 +345,8 @@ pub struct ListBugsQuery {
     pub handler_id: Option<i64>,
     pub tag_id: Option<i64>,
     pub monitored_by: Option<i64>,
+    #[serde(default)]
+    pub commented_by: Option<i64>,
     pub target_version: Option<String>,
     pub fixed_in_version: Option<String>,
     pub msg: Option<String>,
@@ -539,6 +544,13 @@ impl ListBugsQuery {
                 "page" => {
                     if let Ok(p) = trimmed.parse::<i64>() {
                         q.page = Some(p);
+                    }
+                }
+                "commented_by" => {
+                    if let Ok(uid) = trimmed.parse::<i64>() {
+                        if uid > 0 {
+                            q.commented_by = Some(uid);
+                        }
                     }
                 }
                 "filter_id" => {
@@ -972,6 +984,9 @@ fn append_filter_query_params(q: &ListBugsQuery, params: &mut Vec<String>, inclu
     }
     for v in q.effective_monitored_by_ids() {
         params.push(format!("monitored_by={}", v));
+    }
+    if let Some(commented_by) = q.commented_by.filter(|&v| v > 0) {
+        params.push(format!("commented_by={}", commented_by));
     }
     for v in merge_positive_i32(None, &q.resolutions) {
         params.push(format!("resolution={}", v));

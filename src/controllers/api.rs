@@ -925,7 +925,7 @@ pub async fn rest_add_issue_note(
             .into_response();
     }
     let mins = if eff >= 55 {
-        payload.time_tracking.unwrap_or(0).max(0)
+        crate::models::clamp_time_tracking_minutes(i64::from(payload.time_tracking.unwrap_or(0)))
     } else {
         0
     };

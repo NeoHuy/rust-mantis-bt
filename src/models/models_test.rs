@@ -372,6 +372,7 @@ fn test_build_csv_export_url() {
         handler_id: Some(8),
         tag_id: Some(3),
         monitored_by: Some(4),
+        commented_by: None,
         target_version: Some("v2.0".to_string()),
         fixed_in_version: Some("v1.5".to_string()),
         msg: Some("flash_msg".to_string()),
@@ -1122,5 +1123,232 @@ fn test_advanced_bug_filter_parsing_urls_and_columns() {
     assert_eq!(
         parsed_excess.custom_fields.get(&1).unwrap().len(),
         MAX_FILTER_VALUES_PER_FIELD
+    );
+}
+
+#[test]
+fn test_my_view_config_normalize_and_defaults() {
+    let def = MyViewConfig::default();
+    assert!(def.show_timeline);
+    assert_eq!(def.boxes.len(), 9);
+    assert_eq!(def.enabled_boxes().len(), 6);
+
+    let custom = MyViewConfig {
+        show_timeline: false,
+        boxes: vec![
+            MyViewBoxConfigEntry {
+                key: "unknown_widget".to_string(),
+                enabled: true,
+                order: 1,
+            },
+            MyViewBoxConfigEntry {
+                key: "my_comments".to_string(),
+                enabled: true,
+                order: 1,
+            },
+            MyViewBoxConfigEntry {
+                key: "feedback".to_string(),
+                enabled: true,
+                order: 2,
+            },
+            MyViewBoxConfigEntry {
+                key: "assigned".to_string(),
+                enabled: false,
+                order: 50,
+            },
+            MyViewBoxConfigEntry {
+                key: "unassigned".to_string(),
+                enabled: true,
+                order: 20,
+            },
+        ],
+    }
+    .normalize();
+
+    assert!(!custom.show_timeline);
+    assert_eq!(custom.boxes.len(), 9);
+    let enabled = custom.enabled_boxes();
+    assert_eq!(enabled[0], MyViewBox::MyComments);
+    assert_eq!(enabled[1], MyViewBox::Feedback);
+    assert!(!enabled.contains(&MyViewBox::Assigned));
+    assert!(!custom.boxes.iter().any(|b| b.key == "unknown_widget"));
+}
+
+#[test]
+fn test_sanitize_spreadsheet_cell_and_billing_cost() {
+    assert_eq!(sanitize_spreadsheet_cell("=CMD()"), "'=CMD()");
+    assert_eq!(sanitize_spreadsheet_cell(" +1+2"), "' +1+2");
+    assert_eq!(sanitize_spreadsheet_cell("-SUM(A1)"), "'-SUM(A1)");
+    assert_eq!(sanitize_spreadsheet_cell("@evil"), "'@evil");
+    assert_eq!(sanitize_spreadsheet_cell("\t=1"), "'\t=1");
+    assert_eq!(sanitize_spreadsheet_cell("\r+1"), "'\r+1");
+    assert_eq!(sanitize_spreadsheet_cell("Safe text"), "Safe text");
+
+    assert!((compute_billing_cost(90, 100.0) - 150.0).abs() < 1e-9);
+    assert_eq!(compute_billing_cost(90, -10.0), 0.0);
+    assert_eq!(compute_billing_cost(90, f64::NAN), 0.0);
+}
+
+#[test]
+fn test_compute_extended_summary_and_trend_math() {
+    let now = 1_700_000_000i64;
+    let b1 = Bug {
+        id: 1,
+        project_id: 10,
+        reporter_id: 1,
+        handler_id: 2,
+        duplicate_id: 0,
+        priority: 40,
+        severity: 60,
+        reproducibility: 10,
+        status: 10,
+        resolution: 10,
+        os: String::new(),
+        os_build: String::new(),
+        platform: String::new(),
+        version: String::new(),
+        fixed_in_version: String::new(),
+        build: String::new(),
+        view_state: 10,
+        summary: "Open Old Bug".to_string(),
+        sticky: 0,
+        target_version: String::new(),
+        category_id: 1,
+        date_submitted: now - 5 * 86_400,
+        due_date: 0,
+        last_updated: now - 86_400,
+    };
+    let b2 = Bug {
+        id: 2,
+        project_id: 10,
+        reporter_id: 1,
+        handler_id: 2,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 80,
+        resolution: 20, // fixed
+        os: String::new(),
+        os_build: String::new(),
+        platform: String::new(),
+        version: String::new(),
+        fixed_in_version: String::new(),
+        build: String::new(),
+        view_state: 10,
+        summary: "Resolved Bug".to_string(),
+        sticky: 0,
+        target_version: String::new(),
+        category_id: 1,
+        date_submitted: now - 2 * 86_400,
+        due_date: 0,
+        last_updated: now - 3_600,
+    };
+    let b3 = Bug {
+        id: 3,
+        project_id: 10,
+        reporter_id: 1,
+        handler_id: 2,
+        duplicate_id: 0,
+        priority: 30,
+        severity: 50,
+        reproducibility: 10,
+        status: 90,
+        resolution: 70, // not a bug (multiplier 5, sev 5 -> false 25)
+        os: String::new(),
+        os_build: String::new(),
+        platform: String::new(),
+        version: String::new(),
+        fixed_in_version: String::new(),
+        build: String::new(),
+        view_state: 10,
+        summary: "Invalid Bug".to_string(),
+        sticky: 0,
+        target_version: String::new(),
+        category_id: 1,
+        date_submitted: now - 10 * 86_400,
+        due_date: 0,
+        last_updated: now - 20_000,
+    };
+
+    let mut projs = HashMap::new();
+    projs.insert(10, "Core".to_string());
+    let mut cats = HashMap::new();
+    cats.insert(1, "General".to_string());
+    let mut users = HashMap::new();
+    users.insert(1, "alice".to_string());
+    users.insert(2, "bob".to_string());
+    let mut hist = HashMap::new();
+    hist.insert(1, 7);
+    let mut res_at = HashMap::new();
+    res_at.insert(2, now - 3_600);
+    res_at.insert(3, now - 20_000);
+
+    let summary = compute_extended_summary(
+        &[b1, b2, b3],
+        now,
+        &projs,
+        &cats,
+        &users,
+        &hist,
+        &res_at,
+        30,
+    );
+
+    assert_eq!(summary.total_bugs, 3);
+    assert_eq!(summary.open_count, 1);
+    assert_eq!(summary.resolved_count, 1);
+    assert_eq!(summary.closed_count, 1);
+    assert_eq!(summary.by_project["Core"].total(), 3);
+    assert_eq!(summary.longest_open[0].id, 1);
+    assert_eq!(summary.longest_open[0].days_open, 5);
+    assert_eq!(summary.most_active.len(), 1);
+    assert_eq!(summary.most_active[0].activity_count, 7);
+
+    // Developer x Resolution: bob has 3 issues, 1 fixed -> 33%
+    assert_eq!(summary.dev_resolution[0].username, "bob");
+    assert_eq!(summary.dev_resolution[0].total, 3);
+    assert_eq!(summary.dev_resolution[0].pct_fixed, 33);
+
+    // Reporter effectiveness: sev = 8+5+5 = 18, false = 0+0+(5*5)=25, eff = -7
+    assert_eq!(summary.reporter_effectiveness[0].username, "alice");
+    assert_eq!(summary.reporter_effectiveness[0].severity_score, 18);
+    assert_eq!(summary.reporter_effectiveness[0].false_score, 25);
+    assert_eq!(summary.reporter_effectiveness[0].effectiveness, -7);
+
+    // By date: 7d window -> opened 2 (b1, b2), resolved 2 (b2, b3), balance 0
+    let b7 = summary.by_date.iter().find(|d| d.days == 7).unwrap();
+    assert_eq!(b7.opened, 2);
+    assert_eq!(b7.resolved, 2);
+    assert_eq!(b7.balance, 0);
+
+    // Trend points: 10 buckets for 30 days
+    assert_eq!(summary.trend_days, 30);
+    assert_eq!(summary.trend_points.len(), 10);
+    assert_eq!(summary.trend_points.last().unwrap().cumulative_open, 1);
+
+    // Billing cost: supports i64 minutes without overflow and caps extreme hourly rates
+    let large_mins = i64::from(i32::MAX) * 2;
+    let large_cost = compute_billing_cost(large_mins, 60.0);
+    assert!((large_cost - large_mins as f64).abs() < 1.0);
+    let extreme_rate_cost = compute_billing_cost(60, 1e308);
+    assert!(extreme_rate_cost.is_finite());
+    assert!((extreme_rate_cost - 1_000_000.0).abs() < 1e-6);
+
+    // MyViewConfig lenient JSON deserialization (empty / partial config)
+    let empty_cfg: MyViewConfig = serde_json::from_str("{}").unwrap();
+    assert!(empty_cfg.show_timeline);
+    assert_eq!(empty_cfg.normalize().boxes.len(), 9);
+    let partial_cfg: MyViewConfig =
+        serde_json::from_str(r#"{"boxes":[{"key":"my_comments"}]}"#).unwrap();
+    assert_eq!(partial_cfg.boxes.len(), 1);
+    assert!(!partial_cfg.boxes[0].enabled);
+
+    // Time tracking clamping handles negative and u32-overflowing values safely
+    assert_eq!(clamp_time_tracking_minutes(-5), 0);
+    assert_eq!(clamp_time_tracking_minutes(90), 90);
+    assert_eq!(
+        clamp_time_tracking_minutes(4_294_967_356),
+        MAX_TIME_TRACKING_MINUTES
     );
 }

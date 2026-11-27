@@ -584,7 +584,7 @@ pub fn dispatch_tool_call(db: &Db, user: &User, name: &str, args: Value) -> Call
                         "Permission Denied: Developer (55) or higher required to record time tracking",
                     );
                 }
-                raw_time.max(0) as i32
+                crate::models::clamp_time_tracking_minutes(raw_time)
             } else {
                 0
             };

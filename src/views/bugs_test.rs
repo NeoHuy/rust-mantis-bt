@@ -2253,3 +2253,44 @@ fn test_render_print_and_word_exports_escape_html_and_no_nested_forms() {
     assert!(word_doc.contains("[private]"));
     assert!(!word_doc.contains("<script>"));
 }
+
+#[test]
+fn test_render_my_view_config_and_custom_9box_order() {
+    let ctx = dummy_ctx(1, 55);
+    let cfg = MyViewConfig {
+        show_timeline: false,
+        boxes: vec![
+            crate::models::MyViewBoxConfigEntry {
+                key: "my_comments".to_string(),
+                enabled: true,
+                order: 1,
+            },
+            crate::models::MyViewBoxConfigEntry {
+                key: "verify".to_string(),
+                enabled: true,
+                order: 2,
+            },
+        ],
+    }
+    .normalize();
+
+    let Html(cfg_html) = render_my_view_config_page(&ctx, &cfg, None, None);
+    assert!(cfg_html.contains("Configure My View Boxes"));
+    assert!(cfg_html.contains("Awaiting Feedback"));
+    assert!(cfg_html.contains("Waiting for Verification"));
+    assert!(cfg_html.contains("Issues I Have Commented On"));
+    assert_no_nested_forms(&cfg_html);
+
+    let boxes = vec![
+        (MyViewBox::MyComments, Vec::new()),
+        (MyViewBox::Verify, Vec::new()),
+    ];
+    let Html(mv_html) =
+        render_my_view_page_configured(&ctx, &boxes, &MyViewMeta::default(), false, None, None);
+    let idx_comm = mv_html.find("Issues I Have Commented On").unwrap();
+    let idx_ver = mv_html.find("Waiting for Verification").unwrap();
+    assert!(idx_comm < idx_ver);
+    assert!(!mv_html.contains("Timeline"));
+    assert!(!mv_html.contains(r#"id="timeline""#));
+    assert_no_nested_forms(&mv_html);
+}

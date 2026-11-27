@@ -1094,4 +1094,26 @@ fn test_mcp_mentions_on_create_issue_and_add_note() {
         !note_emails.iter().any(|e| e.email == "rep@test.com"),
         "Reporter must not receive private note mention email"
     );
+
+    // 3. add_issue_note clamps u32-overflowing time_tracking to MAX_TIME_TRACKING_MINUTES (100_000)
+    let res_overflow = dispatch_tool_call(
+        &db,
+        &actor,
+        "add_issue_note",
+        json!({
+            "issue_id": issue_id,
+            "text": "Overflow time test",
+            "time_tracking": 4_294_967_356i64
+        }),
+    );
+    assert!(!res_overflow.is_error);
+    let notes = db.list_bugnotes(issue_id, 55).unwrap();
+    let overflow_note = notes
+        .iter()
+        .find(|n| n.note == "Overflow time test")
+        .unwrap();
+    assert_eq!(
+        overflow_note.time_tracking,
+        rust_mantis_bt::models::MAX_TIME_TRACKING_MINUTES
+    );
 }

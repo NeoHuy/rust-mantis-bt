@@ -6,8 +6,9 @@ use crate::models::{
     parse_custom_field_column_id, sanitize_spreadsheet_cell, standard_column_label, Bug, BugFile,
     BugFilter, BugFull, BugHistory, BugPriority, BugRelationship, BugReproducibility,
     BugResolution, BugRevision, BugSeverity, BugStatus, BugTag, Bugnote, Category, ColumnContext,
-    CustomField, CustomFieldType, CustomFieldValue, JiraLink, ListBugsQuery, ProjectVersion,
-    RelationshipType, SavedFilter, Tag, TimelineEvent, User, ViewState, FILTER_MATCH_ANY,
+    CustomField, CustomFieldType, CustomFieldValue, JiraLink, ListBugsQuery, MyViewBox,
+    MyViewConfig, ProjectVersion, RelationshipType, SavedFilter, Tag, TimelineEvent, User,
+    ViewState, FILTER_MATCH_ANY,
 };
 use crate::views::layout::render_layout;
 use crate::views::{
@@ -636,6 +637,20 @@ pub fn render_timeline_widget(
     )
 }
 
+fn my_view_box_link(kind: MyViewBox, user_id: i64) -> String {
+    match kind {
+        MyViewBox::Assigned => format!("/view_all_bug_page?handler_id={}&hide_status=80", user_id),
+        MyViewBox::Unassigned => "/view_all_bug_page?handler_id=-1&hide_status=80".to_string(),
+        MyViewBox::Reported => format!("/view_all_bug_page?reporter_id={}", user_id),
+        MyViewBox::Resolved => "/view_all_bug_page?status=80".to_string(),
+        MyViewBox::RecentMod => "/view_all_bug_page".to_string(),
+        MyViewBox::Monitored => format!("/view_all_bug_page?monitored_by={}", user_id),
+        MyViewBox::Feedback => format!("/view_all_bug_page?reporter_id={}&status=20", user_id),
+        MyViewBox::Verify => format!("/view_all_bug_page?reporter_id={}&status=80", user_id),
+        MyViewBox::MyComments => format!("/view_all_bug_page?commented_by={}", user_id),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn render_my_view_page(
     ctx: &AuthContext,
@@ -647,81 +662,192 @@ pub fn render_my_view_page(
     monitored_by_me: &[Bug],
     meta: &MyViewMeta,
 ) -> Html<String> {
-    let assigned_link = format!(
-        "/view_all_bug_page?handler_id={}&hide_status=80",
-        ctx.user.id
-    );
-    let reported_link = format!("/view_all_bug_page?reporter_id={}", ctx.user.id);
-    let monitored_link = format!("/view_all_bug_page?monitored_by={}", ctx.user.id);
+    let boxes = vec![
+        (MyViewBox::Assigned, assigned_to_me.to_vec()),
+        (MyViewBox::Unassigned, unassigned.to_vec()),
+        (MyViewBox::Reported, reported_by_me.to_vec()),
+        (MyViewBox::Resolved, resolved.to_vec()),
+        (MyViewBox::RecentMod, recently_modified.to_vec()),
+        (MyViewBox::Monitored, monitored_by_me.to_vec()),
+    ];
+    render_my_view_page_configured(ctx, &boxes, meta, true, None, None)
+}
+
+pub fn render_my_view_page_configured(
+    ctx: &AuthContext,
+    boxes: &[(MyViewBox, Vec<Bug>)],
+    meta: &MyViewMeta,
+    show_timeline: bool,
+    flash_msg: Option<&str>,
+    flash_err: Option<&str>,
+) -> Html<String> {
+    let err_banner = flash_err
+        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
+
+    let mut boxes_html = String::new();
+    if boxes.is_empty() {
+        boxes_html.push_str(
+            r#"<div class="widget-box widget-color-blue2">
+                <div class="widget-header"><h4 class="widget-title"><i class="fa fa-sliders" aria-hidden="true"></i> My View</h4></div>
+                <div class="widget-body text-xs">No My View boxes are enabled. Visit <a href="/my_view_config_page">Configure My View</a> to choose your sections.</div>
+            </div>"#,
+        );
+    } else {
+        for (kind, bugs) in boxes {
+            let link = my_view_box_link(*kind, ctx.user.id);
+            boxes_html.push_str(&render_my_view_box_with_meta(
+                kind.label(),
+                &link,
+                bugs,
+                kind.widget_id(),
+                kind.icon(),
+                meta,
+            ));
+        }
+    }
+
+    let layout_body = if show_timeline {
+        let timeline_html = render_timeline_widget(&meta.timeline_events, &meta.users_map);
+        format!(
+            r#"<div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                <div class="lg:col-span-7 space-y-4">
+                    {boxes_html}
+                </div>
+                <div class="lg:col-span-5">
+                    {timeline_html}
+                </div>
+            </div>"#
+        )
+    } else {
+        format!(
+            r#"<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+                {boxes_html}
+            </div>"#
+        )
+    };
 
     let content = format!(
-        r#"<div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-            <div class="lg:col-span-7 space-y-4">
-                {}
-                {}
-                {}
-                {}
-                {}
-                {}
-            </div>
-            <div class="lg:col-span-5">
-                {}
-            </div>
+        r#"{err_banner}
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h2 class="section-title mb-0 border-none"><i class="fa fa-dashboard" aria-hidden="true"></i> My View</h2>
+            <a href="/my_view_config_page" class="btn btn-white btn-round btn-sm">
+                <i class="fa fa-sliders" aria-hidden="true"></i> Configure My View
+            </a>
         </div>
-        {}"#,
-        render_my_view_box_with_meta(
-            "Assigned to Me (Unresolved)",
-            &assigned_link,
-            assigned_to_me,
-            "my_view_assigned",
-            "fa-user",
-            meta
-        ),
-        render_my_view_box_with_meta(
-            "Unassigned",
-            "/view_all_bug_page?handler_id=-1&hide_status=80",
-            unassigned,
-            "my_view_unassigned",
-            "fa-inbox",
-            meta
-        ),
-        render_my_view_box_with_meta(
-            "Reported by Me",
-            &reported_link,
-            reported_by_me,
-            "my_view_reported",
-            "fa-bug",
-            meta
-        ),
-        render_my_view_box_with_meta(
-            "Resolved",
-            "/view_all_bug_page?status=80",
-            resolved,
-            "my_view_resolved",
-            "fa-check-square-o",
-            meta
-        ),
-        render_my_view_box_with_meta(
-            "Recently Modified",
-            "/view_all_bug_page",
-            recently_modified,
-            "my_view_recent",
-            "fa-history",
-            meta
-        ),
-        render_my_view_box_with_meta(
-            "Monitored by Me",
-            &monitored_link,
-            monitored_by_me,
-            "my_view_monitored",
-            "fa-eye",
-            meta
-        ),
-        render_timeline_widget(&meta.timeline_events, &meta.users_map),
-        render_status_legend()
+        {layout_body}
+        {legend}"#,
+        err_banner = err_banner,
+        layout_body = layout_body,
+        legend = render_status_legend(),
     );
 
-    render_layout("My View", ctx, None, &content)
+    render_layout("My View", ctx, flash_msg, &content)
+}
+
+pub fn render_my_view_config_page(
+    ctx: &AuthContext,
+    cfg: &MyViewConfig,
+    msg: Option<&str>,
+    err: Option<&str>,
+) -> Html<String> {
+    let err_banner = err
+        .map(|e| format!(r#"<div class="flash-error">{}</div>"#, html_escape(e)))
+        .unwrap_or_default();
+
+    let mut rows_html = String::new();
+    for (idx, entry) in cfg.boxes.iter().enumerate() {
+        let Some(kind) = MyViewBox::from_key(&entry.key) else {
+            continue;
+        };
+        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let checked = if entry.enabled { "checked" } else { "" };
+        rows_html.push_str(&format!(
+            r#"<tr class="{row_cls}">
+                <td class="text-center">
+                    <input type="checkbox" id="enabled_{key}" name="enabled_{key}" value="1" {checked}>
+                </td>
+                <td>
+                    <label for="enabled_{key}" class="font-semibold cursor-pointer">
+                        <i class="fa {icon} mr-1 text-blue-700" aria-hidden="true"></i> {label}
+                    </label>
+                </td>
+                <td class="text-xs text-gray-600">{desc}</td>
+                <td class="text-center">
+                    <input type="number" name="order_{key}" value="{order}" min="1" max="99" class="!w-20 text-center text-xs">
+                </td>
+            </tr>"#,
+            row_cls = row_cls,
+            key = kind.key(),
+            checked = checked,
+            icon = kind.icon(),
+            label = html_escape(kind.label()),
+            desc = html_escape(kind.description()),
+            order = entry.order,
+        ));
+    }
+
+    let timeline_checked = if cfg.show_timeline { "checked" } else { "" };
+
+    let content = format!(
+        r#"{err_banner}
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header widget-header-small">
+                <h4 class="widget-title lighter">
+                    <i class="fa fa-sliders" aria-hidden="true"></i> Configure My View Boxes (9 Boxes &amp; Timeline)
+                </h4>
+                <div class="widget-toolbar">
+                    <a href="/my_view_page" class="btn btn-white btn-round btn-sm">
+                        <i class="fa fa-arrow-left" aria-hidden="true"></i> Back to My View
+                    </a>
+                </div>
+            </div>
+            <div class="widget-body">
+                <form method="POST" action="/my_view_config_update">
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th class="w-16 text-center">Visible</th>
+                                    <th>Box</th>
+                                    <th>Description</th>
+                                    <th class="w-28 text-center">Order</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows_html}
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="mt-3 p-3 bg-gray-50 border border-gray-200 rounded">
+                        <label class="inline-flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                            <input type="checkbox" name="show_timeline" value="1" {timeline_checked}>
+                            <span>Show Activity Timeline panel on My View</span>
+                        </label>
+                    </div>
+                    <div class="mt-3 flex flex-wrap items-center gap-2">
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            <i class="fa fa-save" aria-hidden="true"></i> Save My View Layout
+                        </button>
+                        <a href="/my_view_page" class="btn btn-secondary btn-sm">Cancel</a>
+                    </div>
+                </form>
+                <div class="mt-4 pt-3 border-t border-gray-200">
+                    <form method="POST" action="/my_view_config_update" class="inline-form">
+                        <input type="hidden" name="action" value="reset">
+                        <button type="submit" class="btn btn-white btn-round btn-sm" data-confirm="Reset My View layout to defaults?">
+                            <i class="fa fa-undo" aria-hidden="true"></i> Reset to Defaults
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>"#,
+        err_banner = err_banner,
+        rows_html = rows_html,
+        timeline_checked = timeline_checked,
+    );
+
+    render_layout("Configure My View", ctx, msg, &content)
 }
 
 fn render_sortable_th_with_title(
@@ -811,6 +937,9 @@ fn count_active_filters(
         count += 1;
     }
     if !filter.effective_monitored_by_ids().is_empty() {
+        count += 1;
+    }
+    if filter.commented_by.unwrap_or(0) > 0 {
         count += 1;
     }
     if !filter.effective_resolutions().is_empty() {
@@ -1363,6 +1492,12 @@ fn render_filter_hidden_inputs(
     for v in filter.effective_monitored_by_ids() {
         out.push_str(&format!(
             r#"<input type="hidden" name="monitored_by" value="{}">"#,
+            v
+        ));
+    }
+    if let Some(v) = filter.commented_by.filter(|&x| x > 0) {
+        out.push_str(&format!(
+            r#"<input type="hidden" name="commented_by" value="{}">"#,
             v
         ));
     }

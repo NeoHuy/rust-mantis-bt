@@ -5282,3 +5282,247 @@ fn test_list_accessible_news_rbac_isolation() {
     assert_eq!(notes_map[&b2].len(), 1);
     assert_eq!(notes_map[&b2][0].note, "Private note b2");
 }
+
+#[test]
+fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let dev_id = db
+        .create_user("m3_dev", "M3 Dev", "m3d@x.com", "pw", 55, true, false)
+        .unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    // 1. My View config get / set / delete round-trip
+    let def = db.get_my_view_config(dev_id);
+    assert!(def.show_timeline);
+    assert_eq!(def.enabled_boxes().len(), 6);
+
+    let mut custom = def.clone();
+    custom.show_timeline = false;
+    for b in &mut custom.boxes {
+        if b.key == "my_comments" {
+            b.enabled = true;
+            b.order = 1;
+        } else {
+            b.order += 1;
+        }
+    }
+    db.set_my_view_config(dev_id, &custom).unwrap();
+    let reloaded = db.get_my_view_config(dev_id);
+    assert!(!reloaded.show_timeline);
+    assert_eq!(
+        reloaded.enabled_boxes()[0],
+        crate::models::MyViewBox::MyComments
+    );
+
+    db.delete_config(crate::models::MY_VIEW_CONFIG_ID, 0, dev_id)
+        .unwrap();
+    assert!(db.get_my_view_config(dev_id).show_timeline);
+
+    // 2. Projects & subprojects with private subproject RBAC isolation
+    let parent_p = db.create_project("ParentBill", 10, 10, "", true).unwrap();
+    let pub_child = db.create_project("PubChildBill", 10, 10, "", true).unwrap();
+    let priv_child = db
+        .create_project("PrivChildBill", 10, 50, "", true)
+        .unwrap();
+    db.add_subproject(parent_p, pub_child, true).unwrap();
+    db.add_subproject(parent_p, priv_child, true).unwrap();
+
+    let b_parent = db
+        .create_bug(
+            parent_p,
+            1,
+            1,
+            "Parent Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let b_pub_child = db
+        .create_bug(
+            pub_child,
+            1,
+            1,
+            "Pub Child Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let b_priv_child = db
+        .create_bug(
+            priv_child,
+            1,
+            1,
+            "Priv Child Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Commented bugs + history stats
+    db.add_bugnote_with_time(b_parent, dev_id, "Dev note parent", 10, 60)
+        .unwrap();
+    db.add_bugnote_with_time(b_pub_child, dev_id, "Dev note pub child", 10, 120)
+        .unwrap();
+    db.add_bugnote_with_time(b_priv_child, admin.id, "Admin secret child", 10, 180)
+        .unwrap();
+    db.change_bug_status(b_parent, admin.id, 80, 20, Some("Fixed"))
+        .unwrap();
+
+    let commented = db.list_bugs_commented_by_user(&dev, None).unwrap();
+    let commented_ids: Vec<i64> = commented.into_iter().map(|b| b.id).collect();
+    assert!(commented_ids.contains(&b_parent));
+    assert!(commented_ids.contains(&b_pub_child));
+    assert!(!commented_ids.contains(&b_priv_child));
+
+    let (hist_counts, resolved_at) = db
+        .get_bug_history_summary_stats(&[b_parent, b_pub_child], &HashMap::new())
+        .unwrap();
+    assert!(hist_counts.get(&b_parent).copied().unwrap_or(0) >= 1);
+    assert!(resolved_at.get(&b_parent).copied().unwrap_or(0) > 0);
+
+    // Private note history is excluded for viewers < 55 and visible for >= 55
+    let hist_priv_bug = db
+        .create_bug(
+            pub_child,
+            admin.id,
+            1,
+            "Priv note activity bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote_with_time(hist_priv_bug, admin.id, "Hidden note", 50, 45)
+        .unwrap();
+    let mut low_map = HashMap::new();
+    low_map.insert(hist_priv_bug, 25);
+    let (low_hist, _) = db
+        .get_bug_history_summary_stats(&[hist_priv_bug], &low_map)
+        .unwrap();
+    let mut dev_map = HashMap::new();
+    dev_map.insert(hist_priv_bug, 55);
+    let (dev_hist, _) = db
+        .get_bug_history_summary_stats(&[hist_priv_bug], &dev_map)
+        .unwrap();
+    assert!(dev_hist[&hist_priv_bug] > low_hist[&hist_priv_bug]);
+
+    // 3. Billing filtered: dev with include_subprojects=true sees parent + pub_child, NOT priv_child
+    let dev_rollup = db
+        .list_time_tracking_filtered(&dev, parent_p, true, None, None)
+        .unwrap();
+    let dev_bug_ids: Vec<i64> = dev_rollup.iter().map(|e| e.bug_id).collect();
+    assert!(dev_bug_ids.contains(&b_parent));
+    assert!(dev_bug_ids.contains(&b_pub_child));
+    assert!(!dev_bug_ids.contains(&b_priv_child));
+
+    // Direct parent only (include_subprojects=false)
+    let dev_direct = db
+        .list_time_tracking_filtered(&dev, parent_p, false, None, None)
+        .unwrap();
+    assert_eq!(dev_direct.len(), 1);
+    assert_eq!(dev_direct[0].bug_id, b_parent);
+
+    // Future date window returns empty
+    let empty_future = db
+        .list_time_tracking_filtered(&admin, parent_p, true, Some(4_000_000_000), None)
+        .unwrap();
+    assert!(empty_future.is_empty());
+
+    // Private note is not visible to lower-privilege user filtering commented_by another user,
+    // while project-scoped list_bugs_commented_by_user respects project_id & subprojects.
+    let priv_note_bug = db
+        .create_bug(
+            pub_child,
+            admin.id,
+            1,
+            "Bug with admin private note",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote_with_time(priv_note_bug, admin.id, "Secret admin note", 50, 0)
+        .unwrap();
+    let rep_id = db
+        .create_user("sub4_rep", "rep@ex.com", "Rep", "pw", 25, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let rep_filtering_admin = db
+        .filter_bugs(
+            &BugFilter {
+                commented_by: Some(admin.id),
+                ..Default::default()
+            },
+            &rep,
+        )
+        .unwrap();
+    assert!(!rep_filtering_admin.iter().any(|b| b.id == priv_note_bug));
+    assert!(!rep_filtering_admin.iter().any(|b| b.id == b_priv_child));
+
+    let dev_scoped = db
+        .list_bugs_commented_by_user(&dev, Some(pub_child))
+        .unwrap();
+    assert_eq!(dev_scoped.len(), 1);
+    assert_eq!(dev_scoped[0].id, b_pub_child);
+
+    // Oversized legacy time_tracking value (> i32::MAX) does not error out list_time_tracking_filtered
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+             VALUES (?1, ?2, 0, 10, 1700000000, 1700000000, 0, '', 3000000000)",
+            params![b_parent, dev_id],
+        )
+        .unwrap();
+    }
+    let big_entries = db
+        .list_time_tracking_filtered(&dev, parent_p, false, None, None)
+        .unwrap();
+    assert!(big_entries.iter().any(|e| e.minutes == i32::MAX));
+    let notes_with_big = db.list_bugnotes(b_parent, 55).unwrap();
+    assert!(notes_with_big.iter().any(|n| n.time_tracking == i32::MAX));
+}

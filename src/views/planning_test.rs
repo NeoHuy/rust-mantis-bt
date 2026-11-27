@@ -240,3 +240,86 @@ fn test_render_summary_page_ratio_tables() {
     assert!(html.contains("By Resolution"));
     assert!(html.contains("<th>Open</th><th>Resolved</th><th>Closed</th><th>Total</th>"));
 }
+
+#[test]
+fn test_render_extended_summary_graphs_and_billing_exports() {
+    let ctx = dummy_ctx();
+    let summary = ExtendedSummaryData {
+        total_bugs: 4,
+        open_count: 2,
+        resolved_count: 1,
+        closed_count: 1,
+        trend_days: 30,
+        trend_points: vec![crate::models::TrendPoint {
+            label: "2026-11-20".to_string(),
+            opened: 2,
+            resolved: 1,
+            cumulative_open: 2,
+        }],
+        ..Default::default()
+    };
+
+    let Html(sum_html) = render_summary_page_extended(&ctx, &summary, true);
+    assert!(sum_html.contains("By Project"));
+    assert!(sum_html.contains("By Date (Opened vs Resolved)"));
+    assert!(sum_html.contains("Longest Open Issues"));
+    assert!(sum_html.contains("Most Active Open Issues"));
+    assert!(sum_html.contains("Developer &times; Resolution Breakdown"));
+    assert!(sum_html.contains("Reporter Effectiveness"));
+    assert!(sum_html.contains("<svg"));
+
+    let Html(sum_no_user) = render_summary_page_extended(&ctx, &summary, false);
+    assert!(sum_no_user.contains("By Project"));
+    assert!(!sum_no_user.contains("By Reporter"));
+    assert!(!sum_no_user.contains("By Developer / Handler"));
+    assert!(!sum_no_user.contains("Developer &times; Resolution Breakdown"));
+    assert!(!sum_no_user.contains("Reporter Effectiveness"));
+
+    let Html(graph_html) = render_summary_graph_page(&ctx, &summary, true);
+    assert!(graph_html.contains("<svg"));
+    assert!(graph_html.contains("By Developer"));
+    assert!(graph_html.contains("By Reporter"));
+    assert!(graph_html.contains("/summary_page"));
+
+    let Html(graph_no_user) = render_summary_graph_page(&ctx, &summary, false);
+    assert!(!graph_no_user.contains("By Developer"));
+    assert!(!graph_no_user.contains("By Reporter"));
+
+    let entries = vec![TimeTrackingEntry {
+        bug_id: 7,
+        bug_summary: "=CMD|'calc'!A0 <xss>".to_string(),
+        user_id: 1,
+        username: "dev".to_string(),
+        minutes: 90,
+        date_submitted: 1_700_000_000,
+        note: "@SUM(1,2) & log".to_string(),
+        project_id: 1,
+        project_name: "Core".to_string(),
+    }];
+    let csv = render_billing_csv(&entries, 80.0);
+    assert!(csv.contains("'=CMD|'calc'!A0 <xss>"));
+    assert!(csv.contains("'@SUM(1,2) & log"));
+    assert!(csv.contains("120.00"));
+
+    let xml = render_billing_excel_xml(&entries, 80.0);
+    assert!(xml.contains("&apos;=CMD|&apos;calc&apos;!A0 &lt;xss&gt;"));
+    assert!(xml.contains("&apos;@SUM(1,2) &amp; log"));
+    assert!(xml.contains("<Data ss:Type=\"Number\">120.00</Data>"));
+
+    // Billing extended page handles >i32::MAX total minutes and warning banner
+    let mut by_user = BTreeMap::new();
+    let big_mins = i64::from(i32::MAX) + 120;
+    by_user.insert("dev".to_string(), big_mins);
+    let Html(bill_html) = render_billing_page_extended(
+        &ctx,
+        &entries,
+        &by_user,
+        &[],
+        big_mins,
+        &BillingFilterOptions::default(),
+        Some("Invalid date <xss> ignored"),
+    );
+    assert!(bill_html.contains(&format!("({} mins)", big_mins)));
+    assert!(bill_html.contains("Invalid date &lt;xss&gt; ignored"));
+    assert!(!bill_html.contains("<xss>"));
+}

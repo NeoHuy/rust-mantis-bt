@@ -3,8 +3,8 @@ use crate::auth::AuthContext;
 use crate::db::Db;
 use crate::models::{
     clamp_per_page, parse_custom_field_column_id, sanitize_spreadsheet_cell, sort_bugs, Bug,
-    BugFilter, BugUpdate, ColumnContext, CustomField, CustomFieldType, ListBugsQuery, User,
-    FILTER_MATCH_ANY,
+    BugFilter, BugUpdate, ColumnContext, CustomField, CustomFieldType, ListBugsQuery, MyViewBox,
+    MyViewBoxConfigEntry, MyViewConfig, User, FILTER_MATCH_ANY, MY_VIEW_CONFIG_ID,
 };
 use crate::views;
 use axum::body::Bytes;
@@ -219,6 +219,21 @@ pub(crate) fn filter_from_query(
     let target_versions = q.effective_target_versions();
     let fixed_in_versions = q.effective_fixed_in_versions();
 
+    let commented_by = q.commented_by.filter(|&v| v > 0).map(|uid| {
+        let can_query_other = uid == user.id
+            || user.access_level >= 55
+            || (effective_project_id > 0
+                && db
+                    .effective_access_level(user, effective_project_id)
+                    .unwrap_or(0)
+                    >= 55);
+        if can_query_other {
+            uid
+        } else {
+            user.id
+        }
+    });
+
     BugFilter {
         project_id: (effective_project_id > 0).then_some(effective_project_id),
         search: kw,
@@ -231,6 +246,7 @@ pub(crate) fn filter_from_query(
         handler_id: (handler_ids.len() == 1).then(|| handler_ids[0]),
         tag_id: (tag_ids.len() == 1).then(|| tag_ids[0]),
         monitored_by: (monitored_by_ids.len() == 1).then(|| monitored_by_ids[0]),
+        commented_by,
         target_version: None,
         fixed_in_version: None,
         sort: q
@@ -495,6 +511,8 @@ pub fn router() -> Router<Db> {
         .route("/file/bug/:id/:filename", get(bug_file_download))
         .route("/bug_file_delete/:id", post(bug_file_delete))
         .route("/my_view_page", get(my_view_page))
+        .route("/my_view_config_page", get(my_view_config_page))
+        .route("/my_view_config_update", post(my_view_config_update))
         .route("/csv_export", get(csv_export))
         .route("/print_all_bug_page", get(print_all_bug_page))
         .route("/excel_all_bug_page", get(excel_all_bug_page))
@@ -504,90 +522,116 @@ pub fn router() -> Router<Db> {
         .route("/bug_monitor_delete/:bug_id", post(bug_monitor_delete))
 }
 
-pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
+pub async fn my_view_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<FlashQuery>,
+) -> Response {
     let pid = if ctx.active_project_id > 0 {
         Some(ctx.active_project_id)
     } else {
         None
     };
 
-    let assigned_to_me = db
-        .filter_bugs(
-            &BugFilter {
-                project_id: pid,
-                handler_id: Some(ctx.user.id),
-                hide_status: Some(80),
-                ..Default::default()
-            },
-            &ctx.user,
-        )
-        .unwrap_or_default();
+    let cfg = db.get_my_view_config(ctx.user.id);
+    let enabled_boxes = cfg.enabled_boxes();
+    let mut ordered_boxes = Vec::with_capacity(enabled_boxes.len());
 
-    let unassigned = db
-        .filter_bugs(
-            &BugFilter {
-                project_id: pid,
-                handler_id: Some(-1),
-                hide_status: Some(80),
-                ..Default::default()
-            },
-            &ctx.user,
-        )
-        .unwrap_or_default();
-
-    let reported_by_me = db
-        .filter_bugs(
-            &BugFilter {
-                project_id: pid,
-                reporter_id: Some(ctx.user.id),
-                ..Default::default()
-            },
-            &ctx.user,
-        )
-        .unwrap_or_default();
-
-    let resolved = db
-        .filter_bugs(
-            &BugFilter {
-                project_id: pid,
-                status: Some(80),
-                ..Default::default()
-            },
-            &ctx.user,
-        )
-        .unwrap_or_default();
-
-    let recently_modified = db
-        .filter_bugs(
-            &BugFilter {
-                project_id: pid,
-                ..Default::default()
-            },
-            &ctx.user,
-        )
-        .unwrap_or_default();
-
-    let monitored_by_me = db
-        .filter_bugs(
-            &BugFilter {
-                project_id: pid,
-                monitored_by: Some(ctx.user.id),
-                ..Default::default()
-            },
-            &ctx.user,
-        )
-        .unwrap_or_default();
+    for kind in enabled_boxes {
+        let bugs = match kind {
+            MyViewBox::Assigned => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        handler_id: Some(ctx.user.id),
+                        hide_status: Some(80),
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::Unassigned => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        handler_id: Some(-1),
+                        hide_status: Some(80),
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::Reported => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        reporter_id: Some(ctx.user.id),
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::Resolved => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        status: Some(80),
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::RecentMod => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::Monitored => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        monitored_by: Some(ctx.user.id),
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::Feedback => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        reporter_id: Some(ctx.user.id),
+                        status: Some(20),
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::Verify => db
+                .filter_bugs(
+                    &BugFilter {
+                        project_id: pid,
+                        reporter_id: Some(ctx.user.id),
+                        status: Some(80),
+                        ..Default::default()
+                    },
+                    &ctx.user,
+                )
+                .unwrap_or_default(),
+            MyViewBox::MyComments => db
+                .list_bugs_commented_by_user(&ctx.user, pid)
+                .unwrap_or_default(),
+        };
+        ordered_boxes.push((kind, bugs));
+    }
 
     let mut eff_cache: HashMap<i64, i32> = HashMap::new();
     let mut editable_bug_ids = HashSet::new();
-    for list in [
-        &assigned_to_me,
-        &unassigned,
-        &reported_by_me,
-        &resolved,
-        &recently_modified,
-        &monitored_by_me,
-    ] {
+    for (_, list) in &ordered_boxes {
         for b in list.iter().take(10) {
             let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
                 db.effective_access_level(&ctx.user, b.project_id)
@@ -605,9 +649,12 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .iter()
         .map(|(p, _)| (p.id, p.name.clone()))
         .collect();
-    let timeline_events = db
-        .list_timeline_events(&ctx.user, pid, 25)
-        .unwrap_or_default();
+    let timeline_events = if cfg.show_timeline {
+        db.list_timeline_events(&ctx.user, pid, 25)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let users_map: HashMap<i64, String> = db
         .list_users(None, false)
         .unwrap_or_default()
@@ -624,17 +671,91 @@ pub async fn my_view_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         active_project_id: ctx.active_project_id,
     };
 
-    views::bugs::render_my_view_page(
+    views::bugs::render_my_view_page_configured(
         &ctx,
-        &assigned_to_me,
-        &unassigned,
-        &reported_by_me,
-        &resolved,
-        &recently_modified,
-        &monitored_by_me,
+        &ordered_boxes,
         &meta,
+        cfg.show_timeline,
+        q.msg.as_deref(),
+        q.err.as_deref(),
     )
     .into_response()
+}
+
+pub async fn my_view_config_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<FlashQuery>,
+) -> Response {
+    let cfg = db.get_my_view_config(ctx.user.id);
+    views::bugs::render_my_view_config_page(&ctx, &cfg, q.msg.as_deref(), q.err.as_deref())
+        .into_response()
+}
+
+pub async fn my_view_config_update(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    body: Bytes,
+) -> Response {
+    let pairs = parse_urlencoded_form(&body);
+    let mut form_map: HashMap<String, String> = HashMap::new();
+    for (k, v) in pairs {
+        form_map.insert(k, v);
+    }
+
+    if form_map.get("action").map(String::as_str) == Some("reset") {
+        if let Err(e) = db.delete_config(MY_VIEW_CONFIG_ID, 0, ctx.user.id) {
+            return Redirect::to(&format!(
+                "/my_view_page?err={}",
+                crate::models::url_encode(&format!("Failed to reset My View layout: {}", e))
+            ))
+            .into_response();
+        }
+        return Redirect::to("/my_view_page?msg=My+View+layout+reset+to+defaults").into_response();
+    }
+
+    let boxes = MyViewBox::all()
+        .into_iter()
+        .map(|kind| {
+            let enabled = form_map
+                .get(&format!("enabled_{}", kind.key()))
+                .map(|v| {
+                    let s = v.trim().to_ascii_lowercase();
+                    s == "1" || s == "on" || s == "true"
+                })
+                .unwrap_or(false);
+            let order = form_map
+                .get(&format!("order_{}", kind.key()))
+                .and_then(|v| v.trim().parse::<i32>().ok())
+                .unwrap_or_else(|| kind.default_order());
+            MyViewBoxConfigEntry {
+                key: kind.key().to_string(),
+                enabled,
+                order,
+            }
+        })
+        .collect();
+
+    let show_timeline = form_map
+        .get("show_timeline")
+        .map(|v| {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "on" || s == "true"
+        })
+        .unwrap_or(false);
+
+    let cfg = MyViewConfig {
+        boxes,
+        show_timeline,
+    }
+    .normalize();
+
+    match db.set_my_view_config(ctx.user.id, &cfg) {
+        Ok(_) => Redirect::to("/my_view_page?msg=My+View+configuration+saved").into_response(),
+        Err(_) => {
+            Redirect::to("/my_view_config_page?err=Failed+to+save+configuration").into_response()
+        }
+    }
 }
 
 fn sanitize_csv_cell(val: &str) -> String {
@@ -3724,11 +3845,11 @@ fn parse_time_tracking_minutes(raw: Option<&str>) -> i32 {
         return 0;
     }
     if let Some((hh, mm)) = s.split_once(':') {
-        let h = hh.trim().parse::<i32>().unwrap_or(0).max(0);
-        let m = mm.trim().parse::<i32>().unwrap_or(0).max(0);
-        h * 60 + m
+        let h = hh.trim().parse::<i64>().unwrap_or(0).max(0);
+        let m = mm.trim().parse::<i64>().unwrap_or(0).max(0);
+        crate::models::clamp_time_tracking_minutes(h.saturating_mul(60).saturating_add(m))
     } else {
-        s.parse::<i32>().unwrap_or(0).max(0)
+        crate::models::clamp_time_tracking_minutes(s.parse::<i64>().unwrap_or(0))
     }
 }
 

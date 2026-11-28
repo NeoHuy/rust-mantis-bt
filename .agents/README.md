@@ -28,16 +28,13 @@ Kiến trúc **1 Core Engine + Thin Manifests**: toàn bộ logic review, prompt
 
 Chỉnh sửa file `.agents/ai-review-config.json`:
 
-- **Đổi reviewer theo từng runtime (`reviewer_by_runtime`)**:
+- **Đổi reviewer theo từng runtime (`reviewer_by_runtime`)** (mặc định chỉ cần khai báo ngoại lệ `claude -> codex`, còn lại kế thừa `provider`/`model` cấp trên):
   ```json
   {
     "provider": "claude",
     "model": "",
     "reviewer_by_runtime": {
-      "antigravity": { "provider": "claude", "model": "" },
-      "codex": { "provider": "claude", "model": "" },
-      "claude": { "provider": "codex", "model": "" },
-      "cursor": { "provider": "claude", "model": "" }
+      "claude": { "provider": "codex", "model": "" }
     }
   }
   ```

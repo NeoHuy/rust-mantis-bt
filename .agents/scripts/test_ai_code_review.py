@@ -176,7 +176,7 @@ class AiCodeReviewHookTests(unittest.TestCase):
         state = hook.load_state(f"antigravity:{self.conv_id}")
         self.assertEqual(state["turn_rounds"], 1)
 
-        # Unchanged diff after NEEDS_FIX must re-block without re-running reviewer
+        # Unchanged diff after NEEDS_FIX must re-block without re-running reviewer (single header)
         with mock.patch.object(hook, "run_reviewer") as m_rev2:
             res_unfixed = hook.handle_review(
                 self._base_payload(
@@ -188,6 +188,7 @@ class AiCodeReviewHookTests(unittest.TestCase):
             )
             self.assertEqual(res_unfixed["decision"], "continue")
             self.assertIn("diff unchanged", res_unfixed["reason"])
+            self.assertEqual(res_unfixed["reason"].count("[AI Code Review"), 1)
             m_rev2.assert_not_called()
 
         # Once fixed and PASS, unchanged diff on subsequent stop allows without re-running reviewer
@@ -564,6 +565,239 @@ class AiCodeReviewHookTests(unittest.TestCase):
                 runtime="cursor",
             )
         self.assertEqual(res_ok, {})
+
+    def test_untracked_nested_dir_unicode_symlink_and_large_file_hash(self) -> None:
+        hook.handle_session_start(self._base_payload(), self.cfg)
+        nested_dir = self.repo / "src" / "newmod"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / "tên file.rs").write_text("pub fn ok() {}\n", encoding="utf-8")
+
+        outside = self.root / "secret.txt"
+        outside.write_text("SECRET_TOKEN_VALUE", encoding="utf-8")
+        symlink_path = self.repo / "leak.txt"
+        symlink_path.symlink_to(outside)
+
+        summary, bundle, hash1 = hook.collect_git_changes(
+            self.repo, self.cfg["ignore_patterns"]
+        )
+        self.assertIn("src/newmod/tên file.rs", summary)
+        self.assertIn("pub fn ok()", bundle)
+        self.assertNotIn("SECRET_TOKEN_VALUE", bundle)
+        self.assertIn("symlink outside workspace omitted", bundle)
+
+        # Large untracked file (>20KB): modifying past 20KB changes diff_hash
+        big_file = nested_dir / "big.txt"
+        big_file.write_text(("x" * 25000) + "A", encoding="utf-8")
+        _, _, hash_a = hook.collect_git_changes(self.repo, self.cfg["ignore_patterns"])
+        big_file.write_text(("x" * 25000) + "B", encoding="utf-8")
+        _, _, hash_b = hook.collect_git_changes(self.repo, self.cfg["ignore_patterns"])
+        self.assertNotEqual(hash_a, hash_b)
+
+    def test_committed_in_session_and_capped_next_turn_allow(self) -> None:
+        hook.handle_session_start(self._base_payload(), self.cfg)
+        (self.repo / "src" / "main.rs").write_text("fn main() { let c = 1; }\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "agent commit"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+        )
+
+        # Committed changes in this session are still reviewed
+        with mock.patch.object(
+            hook,
+            "run_reviewer",
+            return_value=(True, "VERDICT: PASS\n- committed looks good", ""),
+        ) as m_rev:
+            res = hook.handle_review(
+                self._base_payload(terminationReason="NO_TOOL_CALL", fullyIdle=True),
+                self.cfg,
+            )
+            m_rev.assert_called_once()
+            self.assertIn("Committed Changes", m_rev.call_args[0][0])
+        self.assertEqual(res, {"decision": "allow"})
+
+        # Next turn with no new edits -> allow without re-reviewing
+        with mock.patch.object(hook, "run_reviewer") as m_rev2:
+            res2 = hook.handle_review(
+                self._base_payload(
+                    terminationReason="NO_TOOL_CALL",
+                    fullyIdle=True,
+                    continuationActive=False,
+                ),
+                self.cfg,
+            )
+            self.assertEqual(res2, {"decision": "allow"})
+            m_rev2.assert_not_called()
+
+        # Capped turn -> new user turn with no edits must NOT re-block
+        cfg_1 = dict(self.cfg, max_review_rounds=1)
+        (self.repo / "src" / "main.rs").write_text("fn main() { let c = 2; }\n", encoding="utf-8")
+        with mock.patch.object(
+            hook,
+            "run_reviewer",
+            return_value=(True, "VERDICT: NEEDS_FIX\n- [NIT] fix c", ""),
+        ):
+            res_r1 = hook.handle_review(
+                self._base_payload(terminationReason="NO_TOOL_CALL", fullyIdle=True),
+                cfg_1,
+            )
+        self.assertEqual(res_r1["decision"], "continue")
+
+        # Hit cap on unchanged diff
+        res_cap = hook.handle_review(
+            self._base_payload(
+                terminationReason="NO_TOOL_CALL",
+                fullyIdle=True,
+                continuationActive=True,
+            ),
+            cfg_1,
+        )
+        self.assertEqual(res_cap, {"decision": "allow"})
+        self.assertEqual(hook.load_state(f"antigravity:{self.conv_id}")["last_verdict"], "CAPPED")
+
+        # Subsequent Q&A turn (continuationActive=False, no edits) must allow!
+        res_qa = hook.handle_review(
+            self._base_payload(
+                terminationReason="NO_TOOL_CALL",
+                fullyIdle=True,
+                continuationActive=False,
+            ),
+            cfg_1,
+        )
+        self.assertEqual(res_qa, {"decision": "allow"})
+
+    def test_non_git_workspace_preserves_edited_files_until_pass(self) -> None:
+        nongit = self.root / "nongit"
+        nongit.mkdir()
+        target = nongit / "app.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+
+        hook.handle_track(
+            {
+                "conversationId": "ng-1",
+                "cwd": str(nongit),
+                "workspacePaths": [str(nongit)],
+                "toolCall": {"name": "write_file", "args": {"Path": str(target)}},
+            },
+            self.cfg,
+        )
+        with mock.patch.object(
+            hook,
+            "run_reviewer",
+            return_value=(True, "VERDICT: NEEDS_FIX\n- [NIT] rename x", ""),
+        ):
+            r1 = hook.handle_review(
+                {
+                    "conversationId": "ng-1",
+                    "cwd": str(nongit),
+                    "workspacePaths": [str(nongit)],
+                    "terminationReason": "NO_TOOL_CALL",
+                    "fullyIdle": True,
+                },
+                self.cfg,
+            )
+        self.assertEqual(r1["decision"], "continue")
+        self.assertEqual(hook.load_state("antigravity:ng-1")["edited_files"], ["app.py"])
+
+        # Unchanged non-git file still re-blocks
+        with mock.patch.object(hook, "run_reviewer") as m_rev:
+            r2 = hook.handle_review(
+                {
+                    "conversationId": "ng-1",
+                    "cwd": str(nongit),
+                    "workspacePaths": [str(nongit)],
+                    "terminationReason": "NO_TOOL_CALL",
+                    "fullyIdle": True,
+                    "continuationActive": True,
+                },
+                self.cfg,
+            )
+            self.assertEqual(r2["decision"], "continue")
+            m_rev.assert_not_called()
+
+        # Fix -> PASS clears edited_files
+        target.write_text("count = 1\n", encoding="utf-8")
+        with mock.patch.object(
+            hook, "run_reviewer", return_value=(True, "VERDICT: PASS\n- ok", "")
+        ):
+            r3 = hook.handle_review(
+                {
+                    "conversationId": "ng-1",
+                    "cwd": str(nongit),
+                    "workspacePaths": [str(nongit)],
+                    "terminationReason": "NO_TOOL_CALL",
+                    "fullyIdle": True,
+                    "continuationActive": True,
+                },
+                self.cfg,
+            )
+        self.assertEqual(r3, {"decision": "allow"})
+        self.assertEqual(hook.load_state("antigravity:ng-1")["edited_files"], [])
+
+    def test_top_level_provider_inheritance_invalid_ints_track_git_root_and_atomic_report(self) -> None:
+        # Top-level custom provider & model apply to all runtimes unless explicitly overridden
+        cfg_path = self.root / "custom-cfg.json"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "provider": "custom",
+                    "model": "sonnet",
+                    "max_review_rounds": "five",
+                    "timeout_seconds": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = hook.load_config(cfg_path)
+        self.assertEqual(loaded["max_review_rounds"], 5)
+        self.assertEqual(loaded["timeout_seconds"], 120)
+        for rt in ("antigravity", "codex", "claude", "cursor"):
+            resolved = hook.resolve_reviewer_config(loaded, rt)
+            self.assertEqual(resolved["provider"], "custom")
+            self.assertEqual(resolved["model"], "sonnet")
+
+        # handle_track from subdirectory normalizes against git_root and ignores */target/*
+        sub_dir = self.repo / "crates" / "app"
+        sub_dir.mkdir(parents=True)
+        hook.handle_track(
+            {
+                "conversationId": "sub-1",
+                "cwd": str(sub_dir),
+                "toolCall": {"name": "write_file", "args": {"Path": "src/lib.rs"}},
+            },
+            self.cfg,
+        )
+        hook.handle_track(
+            {
+                "conversationId": "sub-1",
+                "cwd": str(sub_dir),
+                "toolCall": {"name": "write_file", "args": {"Path": "target/debug/out"}},
+            },
+            self.cfg,
+        )
+        self.assertEqual(
+            hook.load_state("antigravity:sub-1")["edited_files"],
+            ["crates/app/src/lib.rs"],
+        )
+
+        # Atomic report write does not follow pre-existing symlink
+        victim = self.root / "victim.txt"
+        victim.write_text("KEEP_ME", encoding="utf-8")
+        report_link = self.artifacts / "ai-code-review.md"
+        report_link.symlink_to(victim)
+        hook.write_artifact_report(
+            {"artifactDirectoryPath": str(self.artifacts)},
+            "claude",
+            "",
+            1,
+            5,
+            "PASS",
+            "VERDICT: PASS",
+        )
+        self.assertEqual(victim.read_text(encoding="utf-8"), "KEEP_ME")
+        self.assertFalse(report_link.is_symlink())
 
 
 if __name__ == "__main__":

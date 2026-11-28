@@ -3,10 +3,7 @@
   "provider": "claude",
   "model": "",
   "reviewer_by_runtime": {
-    "antigravity": { "provider": "claude", "model": "" },
-    "codex": { "provider": "claude", "model": "" },
-    "claude": { "provider": "codex", "model": "" },
-    "cursor": { "provider": "claude", "model": "" }
+    "claude": { "provider": "codex", "model": "" }
   },
   "max_review_rounds": 5,
   "include_nits": true,
@@ -17,9 +14,12 @@
     "Cargo.lock",
     "package-lock.json",
     "target/*",
+    "*/target/*",
     "node_modules/*",
+    "*/node_modules/*",
     ".git/*",
     "__pycache__/*",
+    "*/__pycache__/*",
     "*.pyc",
     "*.min.js",
     "*.min.css",

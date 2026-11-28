@@ -1,6 +1,12 @@
 {
   "version": 1,
   "hooks": {
+    "sessionStart": [
+      {
+        "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.agents/scripts/ai_code_review.py\" --runtime cursor session-start",
+        "timeout": 10
+      }
+    ],
     "afterFileEdit": [
       {
         "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.agents/scripts/ai_code_review.py\" --runtime cursor track",

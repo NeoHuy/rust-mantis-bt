@@ -25,17 +25,14 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 AGENTS_DIR = SCRIPT_DIR.parent
 DEFAULT_CONFIG_PATH = AGENTS_DIR / "ai-review-config.json"
-STATE_DIR = Path("/tmp/agy-ai-review")
+STATE_DIR = Path(f"/tmp/agy-ai-review-{os.getuid()}")
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "provider": "claude",
     "model": "",
     "reviewer_by_runtime": {
-        "antigravity": {"provider": "claude", "model": ""},
-        "codex": {"provider": "claude", "model": ""},
         "claude": {"provider": "codex", "model": ""},
-        "cursor": {"provider": "claude", "model": ""},
     },
     "max_review_rounds": 5,
     "include_nits": True,
@@ -46,9 +43,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "Cargo.lock",
         "package-lock.json",
         "target/*",
+        "*/target/*",
         "node_modules/*",
+        "*/node_modules/*",
         ".git/*",
         "__pycache__/*",
+        "*/__pycache__/*",
         "*.pyc",
         "*.min.js",
         "*.min.css",
@@ -81,12 +81,22 @@ def _truthy_env(name: str) -> bool:
     return val in {"1", "true", "yes", "on"}
 
 
+def _safe_int(value: Any, default: int, minimum: int) -> int:
+    try:
+        if value is None or isinstance(value, bool):
+            return default
+        return max(minimum, int(value))
+    except (ValueError, TypeError):
+        return default
+
+
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
     """Load config from JSON file and apply environment variable overrides."""
     cfg = dict(DEFAULT_CONFIG)
     merged_rt = {
         k: dict(v) for k, v in DEFAULT_CONFIG["reviewer_by_runtime"].items()
     }
+    explicit_runtimes: list[str] = []
     path = config_path or DEFAULT_CONFIG_PATH
     if path.is_file():
         try:
@@ -100,9 +110,11 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
                             base_entry = dict(merged_rt.get(rt_key, {}))
                             base_entry.update(rt_val)
                             merged_rt[rt_key] = base_entry
+                            explicit_runtimes.append(str(rt_key))
         except Exception as exc:
             print(f"[ai-code-review] Failed to parse {path}: {exc}", file=sys.stderr)
     cfg["reviewer_by_runtime"] = merged_rt
+    cfg["_explicit_runtimes"] = explicit_runtimes
 
     if _truthy_env("AI_REVIEW_DISABLED"):
         cfg["enabled"] = False
@@ -111,10 +123,7 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     if "AI_REVIEW_MODEL" in os.environ and os.environ["AI_REVIEW_MODEL"].strip():
         cfg["model"] = os.environ["AI_REVIEW_MODEL"].strip()
     if os.environ.get("AI_REVIEW_MAX_ROUNDS"):
-        try:
-            cfg["max_review_rounds"] = max(1, int(os.environ["AI_REVIEW_MAX_ROUNDS"]))
-        except ValueError:
-            pass
+        cfg["max_review_rounds"] = _safe_int(os.environ["AI_REVIEW_MAX_ROUNDS"], 5, 1)
     if "AI_REVIEW_INCLUDE_NITS" in os.environ:
         env_nits = os.environ["AI_REVIEW_INCLUDE_NITS"].strip().lower()
         if env_nits in {"1", "true", "yes", "on"}:
@@ -122,23 +131,18 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
         elif env_nits in {"0", "false", "no", "off"}:
             cfg["include_nits"] = False
     if os.environ.get("AI_REVIEW_TIMEOUT"):
-        try:
-            cfg["timeout_seconds"] = max(10, int(os.environ["AI_REVIEW_TIMEOUT"]))
-        except ValueError:
-            pass
+        cfg["timeout_seconds"] = _safe_int(os.environ["AI_REVIEW_TIMEOUT"], 120, 10)
 
     cfg["provider"] = str(cfg.get("provider", "claude")).strip().lower() or "claude"
     cfg["model"] = str(cfg.get("model", "")).strip()
-    cfg["max_review_rounds"] = max(1, int(cfg.get("max_review_rounds", 5)))
+    cfg["max_review_rounds"] = _safe_int(cfg.get("max_review_rounds"), 5, 1)
     cfg["include_nits"] = bool(cfg.get("include_nits", True))
-    cfg["timeout_seconds"] = max(10, int(cfg.get("timeout_seconds", 120)))
-    cfg["max_diff_chars"] = max(1000, int(cfg.get("max_diff_chars", 60000)))
+    cfg["timeout_seconds"] = _safe_int(cfg.get("timeout_seconds"), 120, 10)
+    cfg["max_diff_chars"] = _safe_int(cfg.get("max_diff_chars"), 60000, 1000)
     if not isinstance(cfg.get("ignore_patterns"), list):
         cfg["ignore_patterns"] = list(DEFAULT_CONFIG["ignore_patterns"])
     if not isinstance(cfg.get("custom_command"), list):
         cfg["custom_command"] = []
-    if not isinstance(cfg.get("reviewer_by_runtime"), dict):
-        cfg["reviewer_by_runtime"] = dict(DEFAULT_CONFIG["reviewer_by_runtime"])
     return cfg
 
 
@@ -178,14 +182,25 @@ def resolve_reviewer_config(config: dict[str, Any], runtime: str) -> dict[str, A
     env_provider = os.environ.get("AI_REVIEW_PROVIDER", "").strip().lower()
     env_model = os.environ.get("AI_REVIEW_MODEL", "").strip()
 
+    if env_provider:
+        return resolved
+
     rt_map = config.get("reviewer_by_runtime")
     rt_entry = rt_map.get(runtime) if isinstance(rt_map, dict) else None
-    if isinstance(rt_entry, dict) and not env_provider:
+    explicit_runtimes = set(config.get("_explicit_runtimes") or [])
+    is_explicit_rt = runtime in explicit_runtimes
+    is_same_provider_guard = resolved["provider"] == runtime
+
+    if isinstance(rt_entry, dict) and (is_explicit_rt or is_same_provider_guard):
         rt_prov = str(rt_entry.get("provider", "")).strip().lower()
         if rt_prov:
             resolved["provider"] = rt_prov
             if not env_model:
-                resolved["model"] = str(rt_entry.get("model", "")).strip()
+                rt_model = str(rt_entry.get("model", "")).strip()
+                if rt_model:
+                    resolved["model"] = rt_model
+                elif rt_prov != config.get("provider"):
+                    resolved["model"] = ""
     return resolved
 
 
@@ -232,12 +247,22 @@ def get_state_path(conversation_id: str | None) -> Path:
     return STATE_DIR / f"{digest}.json"
 
 
+def _ensure_state_dir() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(STATE_DIR, 0o700)
+    except OSError:
+        pass
+
+
 def default_state() -> dict[str, Any]:
     return {
+        "baseline_head": "",
         "baseline_diff_hash": "",
         "last_reviewed_diff_hash": "",
         "last_verdict": "",
         "last_reason": "",
+        "last_model_tag": "",
         "turn_rounds": 0,
         "edited_files": [],
     }
@@ -263,7 +288,7 @@ def load_state(conversation_id: str | None) -> dict[str, Any]:
 
 
 def save_state(conversation_id: str | None, state: dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_state_dir()
     path = get_state_path(conversation_id)
     fd, tmp_name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=str(STATE_DIR))
     try:
@@ -333,7 +358,7 @@ def run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str] | No
             cwd=str(cwd),
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=5,
             check=False,
         )
     except Exception:
@@ -347,19 +372,30 @@ def get_git_root(cwd: Path) -> Path | None:
     return None
 
 
-def _parse_porcelain_paths(porcelain_out: str) -> tuple[list[str], list[str]]:
-    """Return (tracked_changed_paths, untracked_paths) from `git status --porcelain`."""
+def get_git_head(git_root: Path) -> str:
+    res = run_git(git_root, ["rev-parse", "--verify", "HEAD"])
+    if res and res.returncode == 0:
+        return res.stdout.strip()
+    return ""
+
+
+def _parse_porcelain_z(porcelain_out: str) -> tuple[list[str], list[str]]:
+    """Return (tracked_changed_paths, untracked_paths) from `git status --porcelain=v1 -z`."""
     tracked: list[str] = []
     untracked: list[str] = []
-    for line in porcelain_out.splitlines():
-        if len(line) < 4:
+    tokens = porcelain_out.split("\x00")
+    idx = 0
+    while idx < len(tokens):
+        entry = tokens[idx]
+        idx += 1
+        if len(entry) < 4:
             continue
-        status = line[:2]
-        path_part = line[3:].strip()
-        if " -> " in path_part:
-            path_part = path_part.split(" -> ", 1)[1].strip()
-        if path_part.startswith('"') and path_part.endswith('"'):
-            path_part = path_part[1:-1]
+        status = entry[:2]
+        path_part = entry[3:]
+        if "R" in status or "C" in status:
+            # Rename/copy in `-z` is followed by the original source path token.
+            if idx < len(tokens):
+                idx += 1
         if status == "??":
             untracked.append(path_part)
         else:
@@ -367,38 +403,98 @@ def _parse_porcelain_paths(porcelain_out: str) -> tuple[list[str], list[str]]:
     return tracked, untracked
 
 
-def _read_text_preview(file_path: Path, max_bytes: int = 20000) -> str:
-    """Read a text file safely; return placeholder for binary or unreadable files."""
+def _read_text_preview_and_hash(
+    file_path: Path,
+    root: Path,
+    max_preview_bytes: int = 20000,
+    max_hash_bytes: int = 50 * 1024 * 1024,
+) -> tuple[str, str]:
+    """Stream file to compute full-content SHA-256 and bounded text preview."""
+    if not is_subpath(file_path, root):
+        return "<symlink outside workspace omitted>", "symlink-outside-workspace"
+
+    hasher = hashlib.sha256()
+    preview_chunks: list[bytes] = []
+    preview_len = 0
+    total_bytes = 0
     try:
-        raw = file_path.read_bytes()
+        with file_path.open("rb") as fh:
+            while True:
+                chunk = fh.read(65536)
+                if not chunk:
+                    break
+                if total_bytes < max_hash_bytes:
+                    hasher.update(chunk[: max_hash_bytes - total_bytes])
+                total_bytes += len(chunk)
+                if preview_len <= max_preview_bytes:
+                    need = (max_preview_bytes + 1) - preview_len
+                    preview_chunks.append(chunk[:need])
+                    preview_len += len(chunk[:need])
     except OSError as exc:
-        return f"<unreadable: {exc}>"
-    if b"\x00" in raw[:4096]:
-        return "<binary file omitted>"
-    truncated = len(raw) > max_bytes
-    text = raw[:max_bytes].decode("utf-8", errors="replace")
+        return f"<unreadable: {exc}>", f"unreadable:{exc}"
+
+    if total_bytes > max_hash_bytes:
+        hasher.update(f":size={total_bytes}".encode("ascii"))
+
+    raw_preview = b"".join(preview_chunks)
+    if b"\x00" in raw_preview[:4096]:
+        return "<binary file omitted>", hasher.hexdigest()
+
+    truncated = len(raw_preview) > max_preview_bytes
+    text = raw_preview[:max_preview_bytes].decode("utf-8", errors="replace")
     if truncated:
         text += "\n... [file content truncated]"
-    return text
+    return text, hasher.hexdigest()
 
 
 def collect_git_changes(
-    git_root: Path, ignore_patterns: list[str]
+    git_root: Path, ignore_patterns: list[str], baseline_head: str = ""
 ) -> tuple[str, str, str]:
     """Collect (summary, diff_bundle, diff_hash) for non-ignored git changes."""
-    status_res = run_git(git_root, ["status", "--porcelain"])
+    status_res = run_git(git_root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
     if not status_res or status_res.returncode != 0:
         return "", "", ""
 
-    tracked, untracked = _parse_porcelain_paths(status_res.stdout)
+    tracked, untracked = _parse_porcelain_z(status_res.stdout)
     kept_tracked = [p for p in tracked if not is_ignored(p, ignore_patterns)]
     kept_untracked = [p for p in untracked if not is_ignored(p, ignore_patterns)]
 
-    if not kept_tracked and not kept_untracked:
+    current_head = get_git_head(git_root) if baseline_head else ""
+    kept_committed: list[str] = []
+    if baseline_head and current_head and current_head != baseline_head:
+        committed_names = run_git(
+            git_root, ["diff", "--name-only", "-z", f"{baseline_head}..HEAD"]
+        )
+        if committed_names and committed_names.returncode == 0:
+            kept_committed = [
+                p
+                for p in committed_names.stdout.split("\x00")
+                if p and not is_ignored(p, ignore_patterns)
+            ]
+
+    if not kept_tracked and not kept_untracked and not kept_committed:
         return "", "", ""
 
     parts: list[str] = []
     summary_lines: list[str] = []
+    untracked_hashes: dict[str, str] = {}
+
+    if kept_committed:
+        c_stat = run_git(
+            git_root, ["diff", "--stat", f"{baseline_head}..HEAD", "--", *kept_committed]
+        )
+        if c_stat and c_stat.stdout.strip():
+            summary_lines.append(
+                f"Committed ({baseline_head[:7]}..{current_head[:7]}):\n{c_stat.stdout.strip()}"
+            )
+        c_diff = run_git(
+            git_root, ["diff", f"{baseline_head}..HEAD", "--", *kept_committed]
+        )
+        if c_diff and c_diff.returncode == 0 and c_diff.stdout.strip():
+            parts.append(
+                f"### Committed Changes ({baseline_head[:7]}..{current_head[:7]})\n"
+                f"```diff\n{c_diff.stdout.strip()}\n```"
+            )
 
     if kept_tracked:
         stat_res = run_git(git_root, ["diff", "--stat", "HEAD", "--", *kept_tracked])
@@ -420,7 +516,8 @@ def collect_git_changes(
         for rel in kept_untracked:
             target = git_root / rel
             if target.is_file():
-                preview = _read_text_preview(target)
+                preview, file_hash = _read_text_preview_and_hash(target, git_root)
+                untracked_hashes[rel] = file_hash
                 parts.append(f"### New File: {rel}\n```\n{preview}\n```")
 
     bundle = "\n\n".join(parts).strip()
@@ -429,7 +526,13 @@ def collect_git_changes(
 
     summary = "\n".join(summary_lines).strip()
     hash_input = json.dumps(
-        {"tracked": sorted(kept_tracked), "untracked": sorted(kept_untracked), "bundle": bundle},
+        {
+            "committed_head": current_head if kept_committed else "",
+            "committed": sorted(kept_committed),
+            "tracked": sorted(kept_tracked),
+            "untracked": untracked_hashes,
+            "bundle": bundle,
+        },
         sort_keys=True,
     )
     diff_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
@@ -445,17 +548,20 @@ def collect_tracked_file_changes(
         return "", "", ""
 
     parts: list[str] = []
+    file_hashes: dict[str, str] = {}
     for rel in sorted(set(kept)):
         target = cwd / rel
         if target.is_file():
-            preview = _read_text_preview(target)
+            preview, file_hash = _read_text_preview_and_hash(target, cwd)
+            file_hashes[rel] = file_hash
             parts.append(f"### Modified File: {rel}\n```\n{preview}\n```")
 
     bundle = "\n\n".join(parts).strip()
     if not bundle:
         return "", "", ""
     summary = "Edited files:\n" + "\n".join(f"  * {p}" for p in sorted(set(kept)))
-    diff_hash = hashlib.sha256(bundle.encode("utf-8")).hexdigest()
+    hash_input = json.dumps({"files": file_hashes}, sort_keys=True)
+    diff_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
     return summary, bundle, diff_hash
 
 
@@ -674,7 +780,8 @@ def write_artifact_report(
             target_dir.mkdir(parents=True, exist_ok=True)
             report_path = target_dir / "ai-code-review.md"
         else:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            _ensure_state_dir()
+            target_dir = STATE_DIR
             digest = hashlib.sha256((session_key or "default").encode("utf-8")).hexdigest()[:16]
             report_path = STATE_DIR / f"{digest}-report.md"
 
@@ -689,7 +796,19 @@ def write_artifact_report(
             f"---\n\n"
             f"{body.strip()}\n"
         )
-        report_path.write_text(content, encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=".report-", suffix=".tmp", dir=str(target_dir)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            os.replace(tmp_name, report_path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
     except Exception as exc:
         print(f"[ai-code-review] Failed to write artifact report: {exc}", file=sys.stderr)
 
@@ -770,10 +889,13 @@ def handle_session_start(
     session_key = extract_session_id(payload, runtime)
     git_root = get_git_root(cwd)
     baseline_hash = ""
+    baseline_head = ""
     if git_root:
+        baseline_head = get_git_head(git_root)
         _, _, baseline_hash = collect_git_changes(git_root, config["ignore_patterns"])
 
     state = default_state()
+    state["baseline_head"] = baseline_head
     state["baseline_diff_hash"] = baseline_hash
     save_state(session_key, state)
     return {}
@@ -790,10 +912,14 @@ def handle_track(
         return {}
 
     cwd = resolve_cwd(payload)
+    git_root = get_git_root(cwd)
     art_dir = payload.get("artifactDirectoryPath")
     art_path = Path(art_dir).expanduser() if isinstance(art_dir, str) and art_dir.strip() else None
 
-    ws_roots = [cwd]
+    ws_roots: list[Path] = []
+    if git_root:
+        ws_roots.append(git_root)
+    ws_roots.append(cwd)
     for list_key in ("workspacePaths", "workspace_roots"):
         if isinstance(payload.get(list_key), list):
             for p in payload[list_key]:
@@ -850,7 +976,9 @@ def handle_review(
     git_root = get_git_root(cwd)
     if git_root:
         summary, bundle, current_hash = collect_git_changes(
-            git_root, config["ignore_patterns"]
+            git_root,
+            config["ignore_patterns"],
+            baseline_head=state.get("baseline_head", ""),
         )
     else:
         summary, bundle, current_hash = collect_tracked_file_changes(
@@ -877,20 +1005,35 @@ def handle_review(
         return allow_response(runtime, "review")
 
     max_rounds = int(config["max_review_rounds"])
+    reviewer_cfg = resolve_reviewer_config(config, runtime)
+    follow_up = (
+        "Please address EVERY finding above (including LOW and NIT items), re-run verification checks, and finish."
+        if reviewer_cfg.get("include_nits", True)
+        else "Please address the actionable issues above, re-run verification checks, and finish."
+    )
+
     if current_hash == state["last_reviewed_diff_hash"]:
         if state.get("last_verdict") == "NEEDS_FIX":
             if state["turn_rounds"] >= max_rounds:
                 state["baseline_diff_hash"] = current_hash
+                if git_root:
+                    state["baseline_head"] = get_git_head(git_root)
+                state["last_verdict"] = "CAPPED"
+                state["last_reason"] = ""
+                state["last_model_tag"] = ""
                 state["edited_files"] = []
                 save_state(session_key, state)
                 return allow_response(runtime, "review")
             state["turn_rounds"] += 1
-            state["edited_files"] = []
+            if git_root:
+                state["edited_files"] = []
             save_state(session_key, state)
-            prev_reason = state.get("last_reason", "").strip()
+            prev_findings = state.get("last_reason", "").strip()
+            m_tag = state.get("last_model_tag") or reviewer_cfg["provider"]
             reblock_reason = (
-                f"[AI Code Review — unresolved issues, diff unchanged (round {state['turn_rounds']}/{max_rounds})]\n\n"
-                f"{prev_reason}"
+                f"[AI Code Review ({m_tag}, round {state['turn_rounds']}/{max_rounds}) — NEEDS_FIX (diff unchanged)]\n\n"
+                f"{prev_findings}\n\n"
+                f"{follow_up}"
             ).strip()
             return block_response(runtime, reblock_reason)
         state["edited_files"] = []
@@ -900,11 +1043,15 @@ def handle_review(
     if state["turn_rounds"] >= max_rounds:
         state["last_reviewed_diff_hash"] = current_hash
         state["baseline_diff_hash"] = current_hash
+        if git_root:
+            state["baseline_head"] = get_git_head(git_root)
+        state["last_verdict"] = "CAPPED"
+        state["last_reason"] = ""
+        state["last_model_tag"] = ""
         state["edited_files"] = []
         save_state(session_key, state)
         return allow_response(runtime, "review")
 
-    reviewer_cfg = resolve_reviewer_config(config, runtime)
     prompt = build_review_prompt(
         _extract_user_context(payload),
         summary,
@@ -928,7 +1075,8 @@ def handle_review(
             f"Reviewer failed to run: {err_msg}\n",
             session_key=session_key,
         )
-        state["edited_files"] = []
+        if git_root:
+            state["edited_files"] = []
         save_state(session_key, state)
         return allow_response(runtime, "review")
 
@@ -946,21 +1094,19 @@ def handle_review(
 
     if verdict == "NEEDS_FIX":
         model_tag = f"{provider}/{model}" if model else provider
-        follow_up = (
-            "Please address EVERY finding above (including LOW and NIT items), re-run verification checks, and finish."
-            if reviewer_cfg.get("include_nits", True)
-            else "Please address the actionable issues above, re-run verification checks, and finish."
-        )
+        findings_body = review_output.strip()
         reason = (
             f"[AI Code Review ({model_tag}, round {round_num}/{max_rounds}) — NEEDS_FIX]\n\n"
-            f"{review_output.strip()}\n\n"
+            f"{findings_body}\n\n"
             f"{follow_up}"
         )
         state["turn_rounds"] = round_num
         state["last_reviewed_diff_hash"] = current_hash
         state["last_verdict"] = "NEEDS_FIX"
-        state["last_reason"] = reason
-        state["edited_files"] = []
+        state["last_reason"] = findings_body
+        state["last_model_tag"] = model_tag
+        if git_root:
+            state["edited_files"] = []
         save_state(session_key, state)
         return block_response(runtime, reason)
 
@@ -969,14 +1115,18 @@ def handle_review(
             f"[ai-code-review] Reviewer ({provider}) output missing VERDICT line (fail-open)",
             file=sys.stderr,
         )
-        state["edited_files"] = []
+        if git_root:
+            state["edited_files"] = []
         save_state(session_key, state)
         return allow_response(runtime, "review")
 
     state["last_reviewed_diff_hash"] = current_hash
     state["baseline_diff_hash"] = current_hash
+    if git_root:
+        state["baseline_head"] = get_git_head(git_root)
     state["last_verdict"] = "PASS"
     state["last_reason"] = ""
+    state["last_model_tag"] = ""
     state["edited_files"] = []
     save_state(session_key, state)
     return allow_response(runtime, "review")

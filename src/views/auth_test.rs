@@ -100,7 +100,7 @@ fn test_render_account_page() {
     assert!(html.contains("alice@example.com"));
     assert!(html.contains("developer"));
     assert!(html.contains("Account updated"));
-    assert!(html.contains(r#"class="sub-nav-tabs""#));
+    assert_eq!(html.matches(r#"class="sub-nav-tabs""#).count(), 1);
     assert!(html.contains(r#"href="/account_page""#));
     assert!(html.contains(r#"href="/api_tokens_page""#));
     assert!(!html.contains("style="));

@@ -62,7 +62,6 @@ fn test_render_manage_columns_page_contexts_and_no_nested_forms() {
     );
 
     assert!(html.contains("Manage Columns"));
-    assert!(html.contains(r#"class="sub-nav-tabs""#));
     assert_eq!(html.matches(r#"class="sub-nav-tabs""#).count(), 1);
     assert!(html.contains(r#"href="/account_page""#));
     assert!(html.contains(r#"href="/account_manage_columns_page" class="active""#));

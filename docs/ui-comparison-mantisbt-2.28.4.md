@@ -2,6 +2,8 @@
 
 This document captures a direct side-by-side browser comparison between upstream **MantisBT 2.28.4** and **`rust-mantis-bt`** (on `develop` commit `6a341ba`), combined with source-level inspection of [`src/views/layout.rs`](../src/views/layout.rs), [`src/views/bugs.rs`](../src/views/bugs.rs), [`src/views/projects.rs`](../src/views/projects.rs), [`src/views/planning.rs`](../src/views/planning.rs), and upstream MantisBT templates/CSS.
 
+> **Historical Snapshot Notice:** Sections 1–3 record the baseline UI/feature audit captured at `6a341ba` **prior to** UI Phase 1 and UI Phase 2. See [Section 4](#4-100-uiux-parity-architecture--4-milestone-implementation-plan) for the completed implementation status on `develop`.
+
 ---
 
 ## 1. Executive Summary & Test Setup

@@ -58,7 +58,7 @@ fn test_render_api_tokens_page_with_token_banner() {
     assert!(html.contains(r#"value="rss""#));
     assert!(html.contains(r#"action="/api_token_revoke/10""#));
     assert!(html.contains("btn btn-danger btn-white btn-round btn-sm"));
-    assert!(html.contains(r#"class="sub-nav-tabs""#));
+    assert_eq!(html.matches(r#"class="sub-nav-tabs""#).count(), 1);
     assert!(html.contains(r#"href="/account_page""#));
     assert!(!html.contains("style="));
 }

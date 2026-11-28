@@ -10,14 +10,14 @@ This document summarizes the feature comparison between `rust-mantis-bt` and ups
 
 | Feature Area | MantisBT 2.28.4 (Upstream) | `rust-mantis-bt` | Status |
 | :--- | :--- | :--- | :--- |
-| Issue CRUD, Notes, History, Attachments, Monitors, Relationships | Full lifecycle + Revisions, Clone, Move, Bulk actions, Sticky, Reminders, Sponsorship | Core CRUD, Notes, History, Attachments, Self-monitoring, basic Relationships | **Partial (~50%)** |
+| Issue CRUD, Notes, History, Attachments, Monitors, Relationships | Full lifecycle + Revisions, Clone, Move, Bulk actions, Sticky, Reminders, Sponsorship | Full lifecycle: CRUD, Notes edit/visibility, Revisions, Optimistic Locking, Clone, Move, Bulk (`bug_actiongroup`), Sticky, Monitors, Reminders, Relationships, Multi-file upload/preview (no Sponsorships) | **Completed (Phase 2)** |
 | Workflow & Permissions UI | Workflow Transitions matrix, Thresholds, Graphviz, DB Config editor | Hardcoded in application logic (no configuration UI) | **Not implemented** |
-| Dashboard (`My View`), Filtering & Export | 9 configurable boxes + Timeline; multi-select/ANY-ALL/Custom Field filters + Permalinks; CSV, Excel, Print, Word, RSS | 6 fixed boxes; basic single-value filters; CSV export only | **Partial (~35%)** |
-| Planning & Reporting | Roadmap, Changelog, Summary (15+ tables) + MantisGraph (Chart.js), Billing (date range, rate, export) | Roadmap, Changelog, Summary (5 basic tables), basic Billing | **Partial (~40%)** |
+| Dashboard (`My View`), Filtering & Export | 9 configurable boxes + Timeline; multi-select/ANY-ALL/Custom Field filters + Permalinks; CSV, Excel, Print, Word, RSS | 9 configurable boxes + Activity Timeline; multi-select `ALL`/`ANY` + Custom Field filters + Permalinks; CSV, Excel XML, Print, Word, token-authenticated RSS | **Completed (Phase 3)** |
+| Planning & Reporting | Roadmap, Changelog, Summary (15+ tables) + MantisGraph (Chart.js), Billing (date range, rate, export) | Roadmap, Changelog, extended Summary (14 tables) + SVG Status Donut & Issues Trend charts, date-filtered Billing with rates & exports | **Completed (Phase 3)** |
 | Projects, Subprojects, Categories, Versions, Docs | Full CRUD + cross-project copy + Project Documentation (`proj_doc_*`) | Basic CRUD + subproject cycle check; missing copy actions & Project Docs | **Partial (~65%)** |
-| Custom Fields & Tags | 11 types with typed rendering/validation/regex/required/dynamic values + Tag detail/merge | All 11 types declared, UI renders text input only; basic Tag CRUD | **Partial (~40%)** |
+| Custom Fields & Tags | 11 types with typed rendering/validation/regex/required/dynamic values + Tag detail/merge | All 11 types with typed rendering/validation, regex (ReDoS-safe), dynamic values (`=versions`/`=categories`), Tag detail & CRUD (no Tag merge) | **Partial (~90%)** |
 | Users, Auth, Preferences & Profiles | LDAP/HTTP/MD5, Signup verification, Lost password, CAPTCHA, Anonymous, Impersonation, Pruning, Prefs, Profiles | Local auth (PBKDF2-SHA256), direct signup, lockout; remaining flows missing | **Partial (~35%)** |
-| Plugin System | 83 event hooks + 4 bundled plugins (`MantisCoreFormatting`, `MantisGraph`, `XmlImportExport`, `Gravatar`) | Toggle table + 2 stubs (`MantisCoreFormatting` unwired, `EventAuditLog` counter) | **Not implemented** |
+| Plugin System | 83 event hooks + 4 bundled plugins (`MantisCoreFormatting`, `MantisGraph`, `XmlImportExport`, `Gravatar`) | Toggle table + active `MantisCoreFormatting` (Markdown, `#123`/`~123` links, `@mention`) & `EventAuditLog` (charts built-in without plugin) | **Partial (~35%)** |
 | API (REST & SOAP) | Full REST API (~40+ routes, OpenAPI, ETag) + SOAP API (72 operations) | Basic REST API (9 routes), no SOAP | **Partial (~20%)** |
 | Email, i18n, Admin & Other Integrations | SMTP/PHPMailer + DKIM/S-MIME, 66 languages, Timezones, Wiki, OpenSearch, 16 Admin Checks | SendGrid API only (plain text), English & UTC only, no Admin Checks/Wiki | **Partial (~20%)** |
 | **MCP Server (AI Agent)** | Not available | Built-in SSE MCP Server with 8 tools | **Rust-only capability** |
@@ -41,8 +41,8 @@ This document summarizes the feature comparison between `rust-mantis-bt` and ups
 | Phase | Focus | Primary Objectives | Status |
 | :--- | :--- | :--- | :--- |
 | **Phase 1** | **Quick Wins & Closing Half-Built Features** | Wire existing DB columns/routes, fix filter pagination, complete Custom Fields rendering & validation | **Completed** (Milestones 1–4, `valid_regexp`, Roadmap subprojects/scoping, `tests/backward_compat_test.rs`) |
-| **Phase 2** | **Daily Issue & Note Workflows** | Bulk actions, Clone/Move, Bugnote editing + Revisions, Markdown & `#123`/`@mention`, multi-file upload & preview | Pending |
-| **Phase 3** | **Advanced Filtering, Reporting & Exports** | Multi-select filters, column customization, Print/Excel/RSS, Activity Timeline, extended Summary & Charts | Pending |
+| **Phase 2** | **Daily Issue & Note Workflows** | Bulk actions, Clone/Move, Bugnote editing + Revisions, Markdown & `#123`/`@mention`, multi-file upload & preview | **Completed** (Milestones 1–4 + polish: bugnote editing/revisions/optimistic locking, clone/move/bulk actions, `MantisCoreFormatting` Markdown/mentions, monitors/reminders/multi-file uploads) |
+| **Phase 3** | **Advanced Filtering, Reporting & Exports** | Multi-select filters, column customization, Print/Excel/RSS, Activity Timeline, extended Summary & Charts | **Completed** (Milestones 1–3: multi-select filters & custom columns, Print/Word/Excel/RSS exports, Activity Timeline & 9 My View boxes, extended Summary/Billing/SVG charts) |
 | **Phase 4** | **Configuration UI, Auth & SMTP** | Web UI for Workflow/Thresholds/Email Matrix, User Prefs & Profiles, Lost Password/Verification, SMTP | Pending |
 | **Phase 5** | **API Ecosystem, MCP Parity, Migration & i18n** | REST API parity with MantisBT 2.28, enhanced MCP tools, XML Import/Export, localization & Timezones | Pending |
 
@@ -74,7 +74,7 @@ This document summarizes the feature comparison between `rust-mantis-bt` and ups
 
 ---
 
-### Phase 2 — Upgrading Daily Issue & Note Workflows
+### Phase 2 — Upgrading Daily Issue & Note Workflows (Completed)
 
 *Goal: Deliver the full set of daily operations expected by Developers, QA engineers, and Managers in MantisBT.*
 
@@ -97,7 +97,7 @@ This document summarizes the feature comparison between `rust-mantis-bt` and ups
 
 ---
 
-### Phase 3 — Advanced Filtering, Reporting & Exports
+### Phase 3 — Advanced Filtering, Reporting & Exports (Completed)
 
 *Goal: Support complex issue queries, progress tracking, and management reporting.*
 

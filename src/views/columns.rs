@@ -4,7 +4,7 @@ use crate::models::{
     STANDARD_COLUMNS,
 };
 use crate::views::html_escape;
-use crate::views::layout::{render_account_tabs, render_layout};
+use crate::views::layout::render_layout;
 use axum::response::Html;
 
 #[allow(clippy::too_many_arguments)]
@@ -79,11 +79,8 @@ pub fn render_manage_columns_page(
     let def_csv = default_columns_for_context(ColumnContext::Csv, selected_project_id).join(", ");
     let def_excel =
         default_columns_for_context(ColumnContext::Excel, selected_project_id).join(", ");
-    let tabs_html = render_account_tabs("Manage Columns");
-
     let content = format!(
-        r#"{tabs_html}
-        {err_banner}
+        r#"{err_banner}
         <div class="widget-box widget-color-blue2 mb-4">
             <div class="widget-header widget-header-small">
                 <h4 class="widget-title lighter">
@@ -171,7 +168,6 @@ pub fn render_manage_columns_page(
                 </div>
             </div>
         </div>"#,
-        tabs_html = tabs_html,
         err_banner = err_banner,
         proj_opts = proj_opts,
         available_chips = available_chips,

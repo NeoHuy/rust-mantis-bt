@@ -163,7 +163,7 @@ fn test_render_manage_email_queue_page() {
     assert!(html.contains("Issue #1 assigned"));
     assert!(html.contains(r#"action="/manage_email_delete/1""#));
     assert!(html.contains("btn btn-danger btn-white btn-round btn-sm"));
-    assert!(html.contains("confirm('Delete queued email?')"));
+    assert!(html.contains(r#"data-confirm="Delete queued email?""#));
 }
 
 #[test]

@@ -759,7 +759,11 @@ pub fn render_my_view_config_page(
         let Some(kind) = MyViewBox::from_key(&entry.key) else {
             continue;
         };
-        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_cls = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let checked = if entry.enabled { "checked" } else { "" };
         rows_html.push_str(&format!(
             r#"<tr class="{row_cls}">
@@ -1738,7 +1742,11 @@ pub fn render_view_all_bug_page(
         ));
     } else {
         for (idx, b) in bugs.iter().enumerate() {
-            let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_class = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             let mut cells_html = String::new();
             for col in &active_columns {
                 cells_html.push_str(&render_buglist_data_cell(
@@ -3115,45 +3123,14 @@ pub fn render_status_change_form(
 }
 
 pub fn render_dropzone_html(id_suffix: &str, prompt: &str) -> String {
+    let id = html_escape(id_suffix);
+    let prompt = html_escape(prompt);
     format!(
-        r#"<div id="dropzone-{id}" style="border:2px dashed #bbb; border-radius:4px; padding:12px; text-align:center; background:#fafafa; cursor:pointer;">
-            <input type="file" name="file" id="file-input-{id}" multiple style="display:none;">
-            <p style="margin:0; font-size:13px; color:#555;">{prompt} <span style="color:#0052cc; text-decoration:underline;">browse</span></p>
-            <div id="file-list-{id}" style="margin-top:6px; font-size:12px; color:#333;"></div>
-        </div>
-        <script>
-        (function() {{
-            var dz = document.getElementById('dropzone-{id}');
-            var inp = document.getElementById('file-input-{id}');
-            var fl = document.getElementById('file-list-{id}');
-            if (!dz || !inp) return;
-            dz.addEventListener('click', function(e) {{ if (e.target !== inp) inp.click(); }});
-            dz.addEventListener('dragover', function(e) {{ e.preventDefault(); dz.style.borderColor = '#0052cc'; dz.style.background = '#f0f5ff'; }});
-            dz.addEventListener('dragleave', function(e) {{ e.preventDefault(); dz.style.borderColor = '#bbb'; dz.style.background = '#fafafa'; }});
-            dz.addEventListener('drop', function(e) {{
-                e.preventDefault();
-                dz.style.borderColor = '#bbb';
-                dz.style.background = '#fafafa';
-                if (e.dataTransfer && e.dataTransfer.files.length > 0) {{
-                    inp.files = e.dataTransfer.files;
-                    updateList();
-                }}
-            }});
-            inp.addEventListener('change', updateList);
-            function updateList() {{
-                if (!fl) return;
-                var files = inp.files;
-                if (!files || files.length === 0) {{ fl.textContent = ''; return; }}
-                var names = [];
-                for (var i = 0; i < files.length; i++) {{
-                    names.push(files[i].name + ' (' + Math.round(files[i].size / 1024) + ' KB)');
-                }}
-                fl.textContent = 'Selected: ' + names.join(', ');
-            }}
-        }})();
-        </script>"#,
-        id = id_suffix,
-        prompt = prompt
+        r#"<div id="dropzone-{id}" class="mantis-dropzone" data-dropzone data-dropzone-input="file-input-{id}" data-dropzone-list="file-list-{id}">
+            <input type="file" name="file" id="file-input-{id}" class="mantis-dropzone-input" multiple>
+            <p class="mantis-dropzone-prompt">{prompt} <span class="mantis-dropzone-browse">browse</span></p>
+            <div id="file-list-{id}" class="mantis-dropzone-list"></div>
+        </div>"#
     )
 }
 
@@ -3441,7 +3418,7 @@ pub fn render_bug_action_toolbar(
             20
         };
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_change_status/{}" class="inline-form" onsubmit="return confirm('Close this issue?');">
+            r#"<form method="POST" action="/bug_change_status/{}" class="inline-form" data-confirm="Close this issue?">
                 <input type="hidden" name="new_status" value="90">
                 <input type="hidden" name="resolution" value="{}">
                 <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-check-square-o" aria-hidden="true"></i> Close</button>
@@ -3457,7 +3434,7 @@ pub fn render_bug_action_toolbar(
 
     if eff >= 70 {
         actions_html.push_str(&format!(
-            r#"<form method="POST" action="/bug_delete/{}" class="inline-form" onsubmit="return confirm('Delete this issue? This action cannot be undone.');">
+            r#"<form method="POST" action="/bug_delete/{}" class="inline-form" data-confirm="Delete this issue? This action cannot be undone.">
                 <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Issue</button>
             </form>"#,
             bug.id
@@ -4371,7 +4348,7 @@ pub fn render_bugnotes_cards(
 
         if can_del_note {
             actions.push(format!(
-                r#"<form method="POST" action="/bugnote_delete/{}" class="inline-form" onsubmit="return confirm('Delete this note?');"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
+                r#"<form method="POST" action="/bugnote_delete/{}" class="inline-form" data-confirm="Delete this note?"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button></form>"#,
                 n.id
             ));
         }
@@ -4636,7 +4613,7 @@ pub fn render_bug_revision_view_page(
 
             let drop_btn = if can_drop {
                 format!(
-                    r#"<td style="width:140px;"><form method="POST" action="/bug_revision_drop/{}" style="display:inline;" onsubmit="return confirm('Are you sure you want to drop this revision?');"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Drop Revision</button></form></td>"#,
+                    r#"<td style="width:140px;"><form method="POST" action="/bug_revision_drop/{}" style="display:inline;" data-confirm="Are you sure you want to drop this revision?"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Drop Revision</button></form></td>"#,
                     r.id
                 )
             } else {
@@ -5063,7 +5040,11 @@ pub fn render_print_all_bug_page(
     } else {
         for (idx, row) in rows.iter().enumerate() {
             let bug_opt = bugs.get(idx);
-            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_cls = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             let mut tds = String::new();
             for (cidx, val) in row.iter().enumerate() {
                 let col_key = col_keys.get(cidx).map(String::as_str).unwrap_or("");

@@ -345,7 +345,11 @@ fn render_summary_ratio_widget(
         rows_html.push_str(r#"<tr><td colspan="5">No data available.</td></tr>"#);
     } else {
         for (idx, (label_html, counts)) in rows.iter().enumerate() {
-            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_cls = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             rows_html.push_str(&format!(
                 r#"<tr class="{}"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><strong>{}</strong></td></tr>"#,
                 row_cls,
@@ -465,7 +469,7 @@ pub fn render_summary_page(
                             <tr><th>Open</th><th>Resolved</th><th>Closed</th><th>Total</th></tr>
                         </thead>
                         <tbody>
-                            <tr class="row-1"><td>{}</td><td>{}</td><td>{}</td><td><strong>{}</strong></td></tr>
+                            <tr class="zebra-odd"><td>{}</td><td>{}</td><td>{}</td><td><strong>{}</strong></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -639,7 +643,11 @@ pub fn render_summary_page_extended(
 
     let mut date_rows_html = String::new();
     for (idx, b) in summary.by_date.iter().enumerate() {
-        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_cls = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let bal_cls = if b.balance > 0 {
             "text-red-700 font-semibold"
         } else if b.balance < 0 {
@@ -679,7 +687,11 @@ pub fn render_summary_page_extended(
         longest_rows_html.push_str(r#"<tr><td colspan="2">No open issues.</td></tr>"#);
     } else {
         for (idx, item) in summary.longest_open.iter().enumerate() {
-            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_cls = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             longest_rows_html.push_str(&format!(
                 r#"<tr class="{row_cls}"><td><a href="/view_bug_page/{id}">{id:07}</a> — {sum}</td><td class="whitespace-nowrap text-right">{days} d</td></tr>"#,
                 row_cls = row_cls,
@@ -706,7 +718,11 @@ pub fn render_summary_page_extended(
         active_rows_html.push_str(r#"<tr><td colspan="2">No active open issues.</td></tr>"#);
     } else {
         for (idx, item) in summary.most_active.iter().enumerate() {
-            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_cls = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             active_rows_html.push_str(&format!(
                 r#"<tr class="{row_cls}"><td><a href="/view_bug_page/{id}">{id:07}</a> — {sum}</td><td class="whitespace-nowrap text-right">{cnt}</td></tr>"#,
                 row_cls = row_cls,
@@ -742,7 +758,11 @@ pub fn render_summary_page_extended(
         ));
     } else {
         for (idx, row) in summary.dev_resolution.iter().enumerate() {
-            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_cls = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             let mut cells = format!("<td>{}</td>", html_escape(&row.username));
             for &code in &SUMMARY_RESOLUTION_CODES {
                 let c = row.counts_by_resolution.get(&code).copied().unwrap_or(0);
@@ -772,7 +792,11 @@ pub fn render_summary_page_extended(
         rep_eff_rows.push_str(r#"<tr><td colspan="5">No reporter data available.</td></tr>"#);
     } else {
         for (idx, row) in summary.reporter_effectiveness.iter().enumerate() {
-            let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_cls = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             rep_eff_rows.push_str(&format!(
                 r#"<tr class="{row_cls}"><td>{user}</td><td>{bugs}</td><td>{sev}</td><td>{fal}</td><td><strong>{eff}</strong></td></tr>"#,
                 row_cls = row_cls,
@@ -838,7 +862,7 @@ pub fn render_summary_page_extended(
                             <tr><th>Open</th><th>Resolved</th><th>Closed</th><th>Total</th></tr>
                         </thead>
                         <tbody>
-                            <tr class="row-1"><td>{open}</td><td>{resolved}</td><td>{closed}</td><td><strong>{total}</strong></td></tr>
+                            <tr class="zebra-odd"><td>{open}</td><td>{resolved}</td><td>{closed}</td><td><strong>{total}</strong></td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1097,7 +1121,11 @@ pub fn render_billing_page_extended(
 
     let mut rows_html = String::new();
     for (idx, e) in entries.iter().enumerate() {
-        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_cls = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let cost_td = if has_rate {
             format!(
                 r#"<td class="whitespace-nowrap">${:.2}</td>"#,
@@ -1144,7 +1172,11 @@ pub fn render_billing_page_extended(
 
     let mut user_rows = String::new();
     for (idx, (u, m)) in by_user.iter().enumerate() {
-        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_cls = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let cost_td = if has_rate {
             format!(
                 r#"<td>${:.2}</td>"#,
@@ -1173,7 +1205,11 @@ pub fn render_billing_page_extended(
 
     let mut issue_rows = String::new();
     for (idx, iss) in by_issue.iter().enumerate() {
-        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_cls = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let cost_td = if has_rate {
             format!(
                 r#"<td>${:.2}</td>"#,
@@ -1467,7 +1503,7 @@ pub fn render_news_page(
                 format!(
                     r#"<div class="widget-toolbar">
                         <a href="/news_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Edit</a>
-                        <form method="POST" action="/news_delete/{}" class="inline-block m-0" onsubmit="return confirm('Delete news item?');">
+                        <form method="POST" action="/news_delete/{}" class="inline-block m-0" data-confirm="Delete news item?">
                             <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                         </form>
                     </div>"#,
@@ -1561,7 +1597,11 @@ pub fn render_manage_email_queue_page(
 ) -> Html<String> {
     let mut rows_html = String::new();
     for (idx, e) in emails.iter().enumerate() {
-        let row_cls = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_cls = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         rows_html.push_str(&format!(
             r#"<tr class="{}">
                 <td>{}</td>
@@ -1570,7 +1610,7 @@ pub fn render_manage_email_queue_page(
                 <td class="whitespace-pre-wrap">{}</td>
                 <td class="whitespace-nowrap">{}</td>
                 <td>
-                    <form method="POST" action="/manage_email_delete/{}" class="inline-block m-0" onsubmit="return confirm('Delete queued email?');">
+                    <form method="POST" action="/manage_email_delete/{}" class="inline-block m-0" data-confirm="Delete queued email?">
                         <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>

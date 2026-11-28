@@ -21,10 +21,14 @@ pub fn render_manage_tags_page(
         );
     } else {
         for (idx, (t, count)) in tags.iter().enumerate() {
-            let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+            let row_class = if idx % 2 == 0 {
+                "zebra-odd"
+            } else {
+                "zebra-even"
+            };
             let actions = if ctx.user.access_level >= 70 {
                 format!(
-                    r#"<form method="POST" action="/tag_delete/{}" style="display:inline;" onsubmit="return confirm('Delete tag?');"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
+                    r#"<form method="POST" action="/tag_delete/{}" style="display:inline;" data-confirm="Delete tag?"><button type="submit" class="btn btn-danger btn-sm">Delete</button></form>"#,
                     t.id
                 )
             } else {

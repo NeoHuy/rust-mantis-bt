@@ -140,9 +140,7 @@ impl Default for JiraClient {
 }
 
 pub(crate) fn env_allow_local_jira() -> bool {
-    std::env::var("MANTIS_ALLOW_LOCAL_JIRA")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::models::env_flag_enabled("MANTIS_ALLOW_LOCAL_JIRA")
 }
 
 pub fn check_resolved_ips(

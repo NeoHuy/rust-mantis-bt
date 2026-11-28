@@ -15,7 +15,11 @@ pub fn render_manage_proj_page(
 ) -> Html<String> {
     let mut proj_rows = String::new();
     for (idx, (p, depth)) in projects_hierarchy.iter().enumerate() {
-        let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_class = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let mut indent_str = String::new();
         for _ in 0..*depth {
             indent_str.push_str("&nbsp;&nbsp;&nbsp;&nbsp;");
@@ -59,14 +63,18 @@ pub fn render_manage_proj_page(
 
     let mut cat_rows = String::new();
     for (idx, (c, assignee_name)) in global_cats.iter().enumerate() {
-        let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_class = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
 
         cat_rows.push_str(&format!(
             r#"<tr class="{}">
                 <td><strong>{}</strong></td>
                 <td>{}</td>
                 <td>
-                    <form action="/manage_proj_cat_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Delete category?');">
+                    <form action="/manage_proj_cat_delete/{}" method="POST" style="display:inline;" data-confirm="Delete category?">
                         <input type="hidden" name="project_id" value="0" />
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
                     </form>
@@ -226,14 +234,18 @@ pub fn render_proj_edit_page(
 ) -> Html<String> {
     let mut subproj_rows = String::new();
     for (idx, (child, inherit_parent)) in subprojects.iter().enumerate() {
-        let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_class = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let inherit_str = if *inherit_parent { "yes" } else { "no" };
         subproj_rows.push_str(&format!(
             r#"<tr class="{}">
                 <td><a href="/manage_proj_edit_page/{}">{}</a></td>
                 <td>{}</td>
                 <td>
-                    <form action="/manage_proj_subproj_delete/{}/{}" method="POST" style="display:inline;" onsubmit="return confirm('Remove subproject relationship?');">
+                    <form action="/manage_proj_subproj_delete/{}/{}" method="POST" style="display:inline;" data-confirm="Remove subproject relationship?">
                         <button type="submit" class="btn btn-danger btn-sm">Unlink</button>
                     </form>
                 </td>
@@ -258,7 +270,11 @@ pub fn render_proj_edit_page(
 
     let mut cat_rows = String::new();
     for (idx, (c, assignee_name)) in direct_cats.iter().enumerate() {
-        let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_class = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
 
         let mut cat_user_opts = String::new();
         cat_user_opts.push_str(r#"<option value="0">- None -</option>"#);
@@ -277,7 +293,7 @@ pub fn render_proj_edit_page(
                 <td><strong>{name}</strong></td>
                 <td>{assignee}</td>
                 <td>
-                    <form action="/manage_proj_cat_delete/{cat_id}" method="POST" style="display:inline;" onsubmit="return confirm('Delete category?');">
+                    <form action="/manage_proj_cat_delete/{cat_id}" method="POST" style="display:inline;" data-confirm="Delete category?">
                         <input type="hidden" name="project_id" value="{proj_id}" />
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
                     </form>
@@ -308,7 +324,11 @@ pub fn render_proj_edit_page(
 
     let mut ver_rows = String::new();
     for (idx, v) in versions.iter().enumerate() {
-        let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_class = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let rel_badge = if v.released == 1 { "yes" } else { "no" };
         let obs_badge = if v.obsolete == 1 { "yes" } else { "no" };
         let rel_checked = if v.released == 1 { "checked" } else { "" };
@@ -328,7 +348,7 @@ pub fn render_proj_edit_page(
                 <td>{rel_badge}</td>
                 <td>{obs_badge}</td>
                 <td>
-                    <form action="/manage_proj_ver_delete/{ver_id}" method="POST" style="display:inline;" onsubmit="return confirm('Delete version?');">
+                    <form action="/manage_proj_ver_delete/{ver_id}" method="POST" style="display:inline;" data-confirm="Delete version?">
                         <input type="hidden" name="project_id" value="{proj_id}" />
                         <button type="submit" class="btn btn-danger btn-sm">Delete</button>
                     </form>
@@ -364,7 +384,11 @@ pub fn render_proj_edit_page(
 
     let mut user_rows = String::new();
     for (idx, (u, access_level)) in proj_users.iter().enumerate() {
-        let row_class = if idx % 2 == 0 { "row-1" } else { "row-2" };
+        let row_class = if idx % 2 == 0 {
+            "zebra-odd"
+        } else {
+            "zebra-even"
+        };
         let lvl_name = AccessLevel::from_i32(*access_level)
             .map(|a| a.as_str())
             .unwrap_or("unknown");
@@ -373,7 +397,7 @@ pub fn render_proj_edit_page(
                 <td>{}</td>
                 <td>{} ({})</td>
                 <td>
-                    <form action="/manage_proj_user_remove/{}/{}" method="POST" style="display:inline;" onsubmit="return confirm('Remove user from project?');">
+                    <form action="/manage_proj_user_remove/{}/{}" method="POST" style="display:inline;" data-confirm="Remove user from project?">
                         <button type="submit" class="btn btn-danger btn-sm">Remove</button>
                     </form>
                 </td>
@@ -464,7 +488,7 @@ pub fn render_proj_edit_page(
                     </div>
                 </form>
                 <div style="margin-top: 12px; border-top: 1px solid #e0e6ed; padding-top: 12px;">
-                    <form action="/manage_proj_delete/{}" method="POST" style="display:inline;" onsubmit="return confirm('Are you sure you want to delete this project? All associated data will be removed.');">
+                    <form action="/manage_proj_delete/{}" method="POST" style="display:inline;" data-confirm="Are you sure you want to delete this project? All associated data will be removed.">
                         <button type="submit" class="btn btn-danger"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Project</button>
                     </form>
                 </div>

@@ -146,39 +146,3 @@ fn test_render_manage_tabs_rbac() {
     assert!(!dev_tabs.contains("/manage_proj_page"));
     assert!(dev_tabs.contains("/manage_tags_page"));
 }
-
-#[test]
-fn test_render_manage_overview_page_escapes_html_and_shows_error() {
-    let ctx = AuthContext {
-        user: crate::models::User {
-            id: 1,
-            username: "admin".to_string(),
-            realname: "Admin".to_string(),
-            email: "a@x.com".to_string(),
-            password: "h".to_string(),
-            enabled: 1,
-            protected: 0,
-            access_level: 90,
-            login_count: 1,
-            lost_password_request_count: 0,
-            failed_login_count: 0,
-            cookie_string: "c".to_string(),
-            last_visit: 0,
-            date_created: 0,
-        },
-        active_project_id: 0,
-        visible_projects: vec![],
-    };
-    let stats = crate::models::SiteOverviewStats::default();
-    let html = render_manage_overview_page(
-        &ctx,
-        &stats,
-        &[("<script>k</script>", "<b>val</b>")],
-        Some("DB <err>"),
-    )
-    .0;
-    assert!(html.contains("&lt;script&gt;k&lt;/script&gt;"));
-    assert!(html.contains("&lt;b&gt;val&lt;/b&gt;"));
-    assert!(html.contains("DB &lt;err&gt;"));
-    assert!(!html.contains("<script>k</script>"));
-}

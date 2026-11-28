@@ -67,6 +67,15 @@ pub struct SiteOverviewStats {
     pub pending_emails_count: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SiteRuntimeConfig {
+    pub cookie_secure: bool,
+    pub upload_fs: bool,
+    pub sendgrid_enabled: bool,
+    pub jira_enabled: bool,
+    pub query_token_enabled: bool,
+}
+
 #[cfg(test)]
 #[path = "models_test.rs"]
 mod tests;

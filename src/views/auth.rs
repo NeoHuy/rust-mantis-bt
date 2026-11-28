@@ -147,7 +147,7 @@ pub fn render_signup_disabled_page() -> Html<String> {
 pub fn render_signup_success_page(username: &str) -> Html<String> {
     let content = format!(
         r#"
-    <div class="login-box">
+    <div class="login-box" data-redirect-url="/my_view_page" data-redirect-seconds="5">
         <div class="login-header" style="background-color: #629b58; color: #ffffff;">
             <i class="fa fa-check-circle" aria-hidden="true"></i>
             <span>Registration Successful</span>
@@ -160,7 +160,7 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
                 You are now logged in as <strong>{}</strong>.
             </p>
             <p style="color: #777777; font-size: 13px; margin-bottom: 20px;">
-                You will be redirected to the dashboard in <span id="countdown" style="font-weight: bold; color: #337ab7;">5</span> seconds...
+                You will be redirected to the dashboard in <span id="countdown" data-redirect-countdown style="font-weight: bold; color: #337ab7;">5</span> seconds...
             </p>
             <div>
                 <a href="/my_view_page" class="btn-login-charcoal" style="text-decoration: none;">
@@ -169,20 +169,6 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
             </div>
         </div>
     </div>
-    <script>
-        let seconds = 5;
-        const countdownEl = document.getElementById('countdown');
-        const interval = setInterval(function() {{
-            seconds--;
-            if (countdownEl) {{
-                countdownEl.textContent = seconds;
-            }}
-            if (seconds <= 0) {{
-                clearInterval(interval);
-                window.location.href = '/my_view_page';
-            }}
-        }}, 1000);
-    </script>
     "#,
         html_escape(username)
     );
@@ -199,6 +185,7 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
     <link rel="icon" type="image/png" href="/images/mantis_logo.png">
     <link rel="stylesheet" href="/assets/tailwind.css?v={asset_ver}">
     <link rel="stylesheet" href="/assets/font-awesome.min.css?v={asset_ver}">
+    <script src="/assets/mantis.js?v={asset_ver}" defer></script>
 </head>
 <body class="login-layout light-login">
     <div class="login-container">

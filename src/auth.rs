@@ -282,12 +282,7 @@ pub fn verify_password(plain: &str, stored: &str) -> bool {
         return true;
     }
 
-    let allow_plaintext = std::env::var("MANTIS_ALLOW_LEGACY_PLAINTEXT_PASSWORD")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
+    let allow_plaintext = crate::models::env_flag_enabled("MANTIS_ALLOW_LEGACY_PLAINTEXT_PASSWORD");
     if allow_plaintext && !stored.is_empty() {
         return constant_time_eq(plain.as_bytes(), stored.as_bytes());
     }

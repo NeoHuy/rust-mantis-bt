@@ -832,7 +832,7 @@ fn test_render_bugnotes_cards_and_actions() {
     assert!(table_mgr.contains(r#"href="/bugnote_edit_page/102""#));
     assert!(table_mgr.contains(r#"action="/bugnote_delete/101""#));
     assert!(table_mgr.contains(r#"action="/bugnote_delete/102""#));
-    assert!(table_mgr.contains(r#"onsubmit="return confirm('Delete this note?');""#));
+    assert!(table_mgr.contains(r#"data-confirm="Delete this note?""#));
 }
 
 #[test]

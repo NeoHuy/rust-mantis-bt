@@ -602,7 +602,7 @@
           }
           var origHtml = btn.innerHTML;
           function showCopied() {
-            btn.innerHTML = '<i class="fa fa-check text-green-700" aria-hidden="true"></i> Copied!';
+            btn.innerHTML = '<i class="fa fa-check" aria-hidden="true"></i> Copied!';
             btn.classList.add('is-copied');
             setTimeout(function () {
               btn.innerHTML = origHtml;

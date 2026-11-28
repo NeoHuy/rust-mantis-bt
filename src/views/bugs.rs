@@ -304,7 +304,7 @@ pub fn render_status_square(status: i32) -> String {
     let label = status_label(status);
     let swatch_cls = match status {
         10 | 20 | 30 | 40 | 50 | 80 | 90 => format!("status-swatch-{}", status),
-        _ => "status-swatch-10".to_string(),
+        _ => "status-swatch-default".to_string(),
     };
     format!(
         r#"<i class="fa fa-square fa-status-box {}" title="{}" aria-hidden="true"></i>"#,
@@ -5319,6 +5319,7 @@ table.meta-table th, table.meta-table td {{ border: 1px solid #999; padding: 4px
 table.meta-table th.lbl {{ background: #edf3f4; font-weight: bold; width: 16%; }}
 .note-block {{ border-top: 1px dashed #ccc; padding-top: 4px; margin-top: 4px; }}
 .note-meta {{ font-weight: bold; font-size: 9pt; color: #444; margin-bottom: 2px; }}
+.print-page-break {{ page-break-before: always; }}
 </style>
 </head>
 <body>

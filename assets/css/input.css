@@ -1446,6 +1446,17 @@
   .status-swatch-50 { color: var(--color-status-assigned); }
   .status-swatch-80 { color: var(--color-status-resolved); }
   .status-swatch-90 { color: var(--color-status-closed); }
+  .status-swatch-default { color: #e8eef3; }
+
+  .btn.is-copied,
+  .btn.is-copied:hover {
+    border-color: #629b58;
+    color: #2d6a2e;
+  }
+
+  .btn.is-copied .fa-check {
+    color: #2d6a2e;
+  }
 
   .prio-immediate { color: #d15b47; }
   .prio-urgent { color: #d15b47; }

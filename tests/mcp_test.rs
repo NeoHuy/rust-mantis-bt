@@ -815,6 +815,7 @@ async fn test_mcp_sse_and_messages_e2e() {
     assert!(sse_msg.contains("event: message"));
     assert!(sse_msg.contains(r#""protocolVersion":"2024-11-05""#));
     assert!(sse_msg.contains("rust-mantis-bt"));
+    assert!(sse_msg.contains(&format!(r#""version":"{}""#, env!("CARGO_PKG_VERSION"))));
 
     // 6. POST tools/list
     let res = app

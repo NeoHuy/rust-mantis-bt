@@ -1,0 +1,206 @@
+# ========================================================
+# Automated Release Tag, GitHub Release & GHCR Publish
+# Driven by [package].version in Cargo.toml on push to main
+# ========================================================
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: auto-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Check Version & Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      created: ${{ steps.create_release.outputs.created || 'false' }}
+      tag: ${{ steps.check.outputs.tag }}
+      is_prerelease: ${{ steps.check.outputs.prerelease }}
+      commit_sha: ${{ github.sha }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all tags
+        run: git fetch --tags --force
+
+      - name: Check Cargo.toml version against existing tags
+        id: check
+        shell: python3 {0}
+        run: |
+          import os
+          import re
+          import subprocess
+          import sys
+
+          def write_output(values: dict[str, str]) -> None:
+              out_path = os.environ["GITHUB_OUTPUT"]
+              with open(out_path, "a", encoding="utf-8") as f:
+                  for k, v in values.items():
+                      f.write(f"{k}={v}\n")
+
+          def read_cargo_version() -> str:
+              with open("Cargo.toml", "rb") as f:
+                  raw = f.read()
+              try:
+                  import tomllib  # Python 3.11+
+                  data = tomllib.loads(raw.decode("utf-8"))
+                  ver = data.get("package", {}).get("version")
+                  if isinstance(ver, str):
+                      return ver.strip()
+              except ModuleNotFoundError:
+                  pass
+
+              text = raw.decode("utf-8")
+              in_pkg = False
+              for line in text.splitlines():
+                  stripped = line.strip()
+                  if stripped.startswith("["):
+                      in_pkg = stripped == "[package]"
+                      continue
+                  if in_pkg:
+                      m = re.match(r'^version\s*=\s*"([^"]+)"', stripped)
+                      if m:
+                          return m.group(1).strip()
+              raise RuntimeError("Could not find [package].version in Cargo.toml")
+
+          SEMVER_RE = re.compile(
+              r"^([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
+          )
+          LEGACY_TAG_RE = re.compile(
+              r"^v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
+          )
+
+          def parse_strict_semver(ver: str):
+              m = SEMVER_RE.match(ver)
+              if not m:
+                  return None
+              major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+              pre = tuple(m.group(4).split(".")) if m.group(4) else ()
+              return (major, minor, patch, pre)
+
+          def parse_tag_semver(tag_name: str):
+              m = LEGACY_TAG_RE.match(tag_name)
+              if not m:
+                  return None
+              major = int(m.group(1))
+              minor = int(m.group(2))
+              patch = int(m.group(3)) if m.group(3) is not None else 0
+              pre = tuple(m.group(4).split(".")) if m.group(4) else ()
+              return (major, minor, patch, pre)
+
+          def cmp_pre_id(a: str, b: str) -> int:
+              a_num = a.isdigit()
+              b_num = b.isdigit()
+              if a_num and b_num:
+                  ia, ib = int(a), int(b)
+                  return (ia > ib) - (ia < ib)
+              if a_num != b_num:
+                  # Numeric identifiers always have lower precedence than non-numeric
+                  return -1 if a_num else 1
+              return (a > b) - (a < b)
+
+          def cmp_semver(a, b) -> int:
+              for idx in range(3):
+                  if a[idx] != b[idx]:
+                      return (a[idx] > b[idx]) - (a[idx] < b[idx])
+              pre_a, pre_b = a[3], b[3]
+              if not pre_a and not pre_b:
+                  return 0
+              if not pre_a:
+                  return 1  # Release > prerelease
+              if not pre_b:
+                  return -1
+              for id_a, id_b in zip(pre_a, pre_b):
+                  c = cmp_pre_id(id_a, id_b)
+                  if c != 0:
+                      return c
+              return (len(pre_a) > len(pre_b)) - (len(pre_a) < len(pre_b))
+
+          version = read_cargo_version()
+          parsed_cargo = parse_strict_semver(version)
+          if parsed_cargo is None:
+              print(
+                  f"ERROR: Cargo.toml version '{version}' is not valid strict SemVer (X.Y.Z[-prerelease]).",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          tag = f"v{version}"
+          is_prerelease = "true" if parsed_cargo[3] else "false"
+
+          tags_raw = subprocess.check_output(["git", "tag", "--list"], text=True)
+          existing_tags = {line.strip() for line in tags_raw.splitlines() if line.strip()}
+
+          if tag in existing_tags or version in existing_tags:
+              print(f"Skipping release: tag '{tag}' or '{version}' already exists.")
+              write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
+              sys.exit(0)
+
+          highest_tag_name = None
+          highest_ver = None
+          for t in existing_tags:
+              parsed = parse_tag_semver(t)
+              if parsed is None:
+                  continue
+              if highest_ver is None or cmp_semver(parsed, highest_ver) > 0:
+                  highest_ver = parsed
+                  highest_tag_name = t
+
+          if highest_ver is not None and cmp_semver(parsed_cargo, highest_ver) <= 0:
+              print(
+                  f"Skipping release: Cargo.toml version '{version}' is not newer than highest existing tag '{highest_tag_name}'."
+              )
+              write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
+              sys.exit(0)
+
+          print(f"Ready to release {tag} (prerelease={is_prerelease}, previous highest={highest_tag_name}).")
+          write_output({
+              "should_release": "true",
+              "tag": tag,
+              "version": version,
+              "prerelease": is_prerelease,
+          })
+
+      - name: Create GitHub Release and tag
+        id: create_release
+        if: steps.check.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.check.outputs.tag }}
+          IS_PRERELEASE: ${{ steps.check.outputs.prerelease }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          args=(
+            "$RELEASE_TAG"
+            --target "$TARGET_SHA"
+            --title "$RELEASE_TAG"
+            --generate-notes
+          )
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+  publish-image:
+    name: Build & Publish Release Image
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-and-publish.yml
+    with:
+      release_tag: ${{ needs.release.outputs.tag }}
+      commit_sha: ${{ needs.release.outputs.commit_sha }}
+      is_prerelease: ${{ needs.release.outputs.is_prerelease == 'true' }}

@@ -172,7 +172,7 @@ pub async fn mcp_messages_handler(
                 },
                 "serverInfo": {
                     "name": "rust-mantis-bt",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }),
         ),

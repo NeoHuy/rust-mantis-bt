@@ -14,10 +14,23 @@ on:
       - 'docs/**'
       - '**.md'
       - '.gitignore'
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Release git tag (e.g. v1.4.0)'
+        required: false
+        type: string
+        default: ''
+      commit_sha:
+        description: 'Commit SHA to checkout and build'
+        required: false
+        type: string
+        default: ''
+      is_prerelease:
+        description: 'Whether the release is a prerelease'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,9 +40,14 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    concurrency:
+      group: build-and-publish-test-${{ inputs.commit_sha || github.sha }}
+      cancel-in-progress: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,9 +80,38 @@ jobs:
     name: Build & Push Docker Image
     needs: test
     runs-on: ubuntu-latest
+    concurrency:
+      group: build-and-publish-docker-${{ inputs.commit_sha || github.sha }}
+      cancel-in-progress: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+
+      - name: Resolve release context
+        id: release_ctx
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+          INPUT_PRERELEASE: ${{ inputs.is_prerelease }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          release_tag="$INPUT_TAG"
+          is_prerelease="$INPUT_PRERELEASE"
+          if [ -z "$release_tag" ] && [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            release_tag="$REF_NAME"
+            if [[ "$release_tag" == *-* ]]; then
+              is_prerelease="true"
+            else
+              is_prerelease="false"
+            fi
+          fi
+          {
+            echo "release_tag=$release_tag"
+            echo "is_prerelease=$is_prerelease"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set lower case repository name for GHCR
         run: |
@@ -88,11 +135,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ env.IMAGE_REPOSITORY }}
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && steps.release_ctx.outputs.is_prerelease != 'true' }}
             type=sha,format=short,prefix=
             type=sha,format=long,prefix=
-            type=ref,event=tag
+            type=semver,pattern=v{{version}},value=${{ steps.release_ctx.outputs.release_tag }},enable=${{ steps.release_ctx.outputs.release_tag != '' }}
+            type=semver,pattern={{version}},value=${{ steps.release_ctx.outputs.release_tag }},enable=${{ steps.release_ctx.outputs.release_tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.release_ctx.outputs.release_tag }},enable=${{ steps.release_ctx.outputs.release_tag != '' && steps.release_ctx.outputs.is_prerelease != 'true' }}
 
       - name: Build and push multi-arch Docker image (ARM64 & AMD64)
         uses: docker/build-push-action@v5

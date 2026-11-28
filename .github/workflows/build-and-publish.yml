@@ -6,14 +6,8 @@ name: Build and Publish Container Image
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - '.gitignore'
   workflow_call:
     inputs:
       release_tag:
@@ -75,7 +69,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run Tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
   build-and-publish:
     name: Build & Push Docker Image
@@ -98,8 +92,6 @@ jobs:
           INPUT_TAG: ${{ inputs.release_tag }}
           INPUT_PRERELEASE: ${{ inputs.is_prerelease }}
           TARGET_SHA: ${{ inputs.commit_sha || github.sha }}
-          GITHUB_REF: ${{ github.ref }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
@@ -114,17 +106,34 @@ jobs:
               is_prerelease="false"
             fi
           fi
+
+          semver_tag=""
+          if [ -n "$release_tag" ] && [[ "$release_tag" != *,* ]]; then
+            semver_tag="$release_tag"
+          fi
+
           push_latest="false"
           if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "$is_prerelease" != "true" ]; then
-            main_head=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha' 2>/dev/null || true)
-            if [ -n "$main_head" ] && [ "$TARGET_SHA" = "$main_head" ]; then
-              push_latest="true"
+            if main_head=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha' 2>/dev/null); then
+              if [ -n "$main_head" ] && [ "$TARGET_SHA" = "$main_head" ]; then
+                push_latest="true"
+              else
+                echo "::notice::Commit ${TARGET_SHA} is no longer main head (${main_head}); skipping :latest tag."
+              fi
+            else
+              echo "::warning::Could not resolve main head; skipping :latest tag."
             fi
           fi
+
+          short_sha="${TARGET_SHA:0:7}"
+          long_sha="$TARGET_SHA"
+
           {
-            echo "release_tag=$release_tag"
+            echo "semver_tag=$semver_tag"
             echo "is_prerelease=$is_prerelease"
             echo "push_latest=$push_latest"
+            echo "short_sha=$short_sha"
+            echo "long_sha=$long_sha"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set lower case repository name for GHCR
@@ -153,11 +162,11 @@ jobs:
             latest=false
           tags: |
             type=raw,value=latest,enable=${{ steps.release_ctx.outputs.push_latest == 'true' }}
-            type=sha,format=short,prefix=
-            type=sha,format=long,prefix=
-            type=semver,pattern=v{{version}},value=${{ steps.release_ctx.outputs.release_tag }},enable=${{ steps.release_ctx.outputs.release_tag != '' }}
-            type=semver,pattern={{version}},value=${{ steps.release_ctx.outputs.release_tag }},enable=${{ steps.release_ctx.outputs.release_tag != '' }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.release_ctx.outputs.release_tag }},enable=${{ steps.release_ctx.outputs.release_tag != '' && steps.release_ctx.outputs.is_prerelease != 'true' }}
+            type=raw,value=${{ steps.release_ctx.outputs.short_sha }},enable=${{ steps.release_ctx.outputs.short_sha != '' }}
+            type=raw,value=${{ steps.release_ctx.outputs.long_sha }},enable=${{ steps.release_ctx.outputs.long_sha != '' }}
+            type=semver,pattern=v{{version}},value=${{ steps.release_ctx.outputs.semver_tag }},enable=${{ steps.release_ctx.outputs.semver_tag != '' }}
+            type=semver,pattern={{version}},value=${{ steps.release_ctx.outputs.semver_tag }},enable=${{ steps.release_ctx.outputs.semver_tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.release_ctx.outputs.semver_tag }},enable=${{ steps.release_ctx.outputs.semver_tag != '' && steps.release_ctx.outputs.is_prerelease != 'true' }}
             type=ref,event=tag,enable=${{ inputs.release_tag == '' }}
 
       - name: Build and push multi-arch Docker image (ARM64 & AMD64)

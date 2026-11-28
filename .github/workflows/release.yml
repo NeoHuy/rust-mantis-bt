@@ -27,6 +27,7 @@ jobs:
       contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
+      should_publish_image: ${{ steps.check.outputs.should_publish_image }}
       tag: ${{ steps.check.outputs.tag }}
       is_prerelease: ${{ steps.check.outputs.prerelease }}
       commit_sha: ${{ github.sha }}
@@ -37,13 +38,15 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check Cargo.toml version against existing tags
+      - name: Check Cargo.toml version and changed paths
         id: check
         shell: python3 {0}
         env:
           GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
         run: |
+          import json
           import os
           import re
           import subprocess
@@ -80,9 +83,11 @@ jobs:
                           return m.group(1).strip()
               raise RuntimeError("Could not find [package].version in Cargo.toml")
 
-          # Reject '+build' metadata because Docker tags cannot contain '+'.
+          # Strict SemVer 2.0.0 without '+build' metadata (Docker tags reject '+').
           SEMVER_RE = re.compile(
-              r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?"
+              r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+              r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
           )
           LEGACY_TAG_RE = re.compile(
               r"v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?"
@@ -113,7 +118,6 @@ jobs:
                   ia, ib = int(a), int(b)
                   return (ia > ib) - (ia < ib)
               if a_num != b_num:
-                  # Numeric identifiers always have lower precedence than non-numeric
                   return -1 if a_num else 1
               return (a > b) - (a < b)
 
@@ -125,7 +129,7 @@ jobs:
               if not pre_a and not pre_b:
                   return 0
               if not pre_a:
-                  return 1  # Release > prerelease
+                  return 1
               if not pre_b:
                   return -1
               for id_a, id_b in zip(pre_a, pre_b):
@@ -134,11 +138,40 @@ jobs:
                       return c
               return (len(pre_a) > len(pre_b)) - (len(pre_a) < len(pre_b))
 
+          def is_ignored_path(path: str) -> bool:
+              return path.startswith("docs/") or path.endswith(".md") or path == ".gitignore"
+
+          def compute_should_publish_image(repo: str, should_release: bool) -> str:
+              if should_release:
+                  return "true"
+              before = os.environ.get("BEFORE_SHA", "").strip()
+              current = os.environ.get("CURRENT_SHA", "").strip()
+              if not before or set(before) == {"0"} or not current:
+                  return "true"
+              try:
+                  raw = subprocess.check_output(
+                      ["gh", "api", f"repos/{repo}/compare/{before}...{current}", "--jq", ".files[].filename"],
+                      text=True,
+                      stderr=subprocess.PIPE,
+                  )
+              except subprocess.CalledProcessError as exc:
+                  print(
+                      f"::warning::Could not compare {before}...{current} ({exc.stderr.strip()}); running image build.",
+                  )
+                  return "true"
+              changed = [line.strip() for line in raw.splitlines() if line.strip()]
+              if not changed:
+                  return "true"
+              if any(not is_ignored_path(p) for p in changed):
+                  return "true"
+              print("Only docs/markdown/.gitignore changed and no new release; skipping Docker image build.")
+              return "false"
+
           version = read_cargo_version()
           parsed_cargo = parse_strict_semver(version)
           if parsed_cargo is None:
               print(
-                  f"ERROR: Cargo.toml version '{version}' must be strict SemVer X.Y.Z[-prerelease] without '+build' metadata.",
+                  f"ERROR: Cargo.toml version '{version}' must be strict SemVer 2.0.0 X.Y.Z[-prerelease] without '+build' metadata.",
                   file=sys.stderr,
               )
               sys.exit(1)
@@ -153,82 +186,175 @@ jobs:
           )
           existing_tags = {line.strip() for line in tags_raw.splitlines() if line.strip()}
 
+          should_release = True
           if tag in existing_tags or version in existing_tags:
               print(f"Skipping release: tag '{tag}' or '{version}' already exists.")
-              write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
-              sys.exit(0)
+              should_release = False
+          else:
+              highest_tag_name = None
+              highest_ver = None
+              for t in existing_tags:
+                  parsed = parse_tag_semver(t)
+                  if parsed is None:
+                      continue
+                  if highest_ver is None or cmp_semver(parsed, highest_ver) > 0:
+                      highest_ver = parsed
+                      highest_tag_name = t
 
-          highest_tag_name = None
-          highest_ver = None
-          for t in existing_tags:
-              parsed = parse_tag_semver(t)
-              if parsed is None:
-                  continue
-              if highest_ver is None or cmp_semver(parsed, highest_ver) > 0:
-                  highest_ver = parsed
-                  highest_tag_name = t
+              if highest_ver is not None:
+                  cmp_res = cmp_semver(parsed_cargo, highest_ver)
+                  if cmp_res < 0:
+                      print(
+                          f"::warning::Cargo.toml version '{version}' is lower than highest existing tag '{highest_tag_name}' — skipping release."
+                      )
+                      should_release = False
+                  elif cmp_res == 0:
+                      print(
+                          f"Skipping release: Cargo.toml version '{version}' matches highest existing tag '{highest_tag_name}'."
+                      )
+                      should_release = False
 
-          if highest_ver is not None:
-              cmp_res = cmp_semver(parsed_cargo, highest_ver)
-              if cmp_res < 0:
-                  print(
-                      f"::warning::Cargo.toml version '{version}' is lower than highest existing tag '{highest_tag_name}' — skipping release."
-                  )
-                  write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
-                  sys.exit(0)
-              if cmp_res == 0:
-                  print(
-                      f"Skipping release: Cargo.toml version '{version}' matches highest existing tag '{highest_tag_name}'."
-                  )
-                  write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
-                  sys.exit(0)
+              if should_release:
+                  print(f"Ready to release {tag} (prerelease={is_prerelease}, previous highest={highest_tag_name}).")
 
-          print(f"Ready to release {tag} (prerelease={is_prerelease}, previous highest={highest_tag_name}).")
+          should_publish_image = compute_should_publish_image(repo, should_release)
           write_output({
-              "should_release": "true",
+              "should_release": "true" if should_release else "false",
+              "should_publish_image": should_publish_image,
               "tag": tag,
-              "version": version,
               "prerelease": is_prerelease,
           })
 
-  publish-image:
-    name: Build & Publish Release Image
+  prepare-release:
+    name: Create Draft Release
     needs: check
     if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.release_id }}
+    steps:
+      - name: Create or reuse draft release for exact commit
+        id: draft
+        shell: python3 {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.check.outputs.is_prerelease }}
+          TARGET_SHA: ${{ needs.check.outputs.commit_sha }}
+        run: |
+          import json
+          import os
+          import subprocess
+          import sys
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          is_prerelease = os.environ["IS_PRERELEASE"] == "true"
+          target_sha = os.environ["TARGET_SHA"]
+
+          releases_raw = subprocess.check_output(
+              ["gh", "api", "--paginate", f"repos/{repo}/releases"],
+              text=True,
+          )
+          releases = json.loads(releases_raw)
+
+          for rel in releases:
+              if rel.get("tag_name") == tag and rel.get("draft"):
+                  existing_sha = rel.get("target_commitish", "")
+                  if existing_sha == target_sha:
+                      release_id = str(rel["id"])
+                      print(f"Reusing existing draft release {release_id} for {tag} at {target_sha}.")
+                      with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+                          f.write(f"release_id={release_id}\n")
+                      sys.exit(0)
+                  print(
+                      f"ERROR: A draft release for '{tag}' already exists targeting commit '{existing_sha}', "
+                      f"not '{target_sha}'. Delete or publish it before releasing a different commit.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+          created_id = subprocess.check_output(
+              [
+                  "gh",
+                  "api",
+                  "-X",
+                  "POST",
+                  f"repos/{repo}/releases",
+                  "-f",
+                  f"tag_name={tag}",
+                  "-f",
+                  f"target_commitish={target_sha}",
+                  "-f",
+                  f"name={tag}",
+                  "-F",
+                  "draft=true",
+                  "-F",
+                  f"prerelease={'true' if is_prerelease else 'false'}",
+                  "-F",
+                  "generate_release_notes=true",
+                  "--jq",
+                  ".id",
+              ],
+              text=True,
+          ).strip()
+          print(f"Created draft release {created_id} for {tag} targeting {target_sha}.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"release_id={created_id}\n")
+
+  publish-image:
+    name: Build & Publish Container Image
+    needs: [check, prepare-release]
+    if: >-
+      !cancelled() &&
+      needs.check.result == 'success' &&
+      (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') &&
+      needs.check.outputs.should_publish_image == 'true'
     permissions:
       contents: read
       packages: write
     uses: ./.github/workflows/build-and-publish.yml
     with:
-      release_tag: ${{ needs.check.outputs.tag }}
+      release_tag: ${{ needs.check.outputs.should_release == 'true' && needs.check.outputs.tag || '' }}
       commit_sha: ${{ needs.check.outputs.commit_sha }}
-      is_prerelease: ${{ needs.check.outputs.is_prerelease == 'true' }}
+      is_prerelease: ${{ needs.check.outputs.should_release == 'true' && needs.check.outputs.is_prerelease == 'true' }}
 
-  create-release:
-    name: Create Git Tag & GitHub Release
-    needs: [check, publish-image]
-    if: needs.check.outputs.should_release == 'true'
+  publish-release:
+    name: Publish GitHub Release & Tag
+    needs: [check, prepare-release, publish-image]
+    if: >-
+      needs.check.outputs.should_release == 'true' &&
+      needs.prepare-release.result == 'success' &&
+      needs.publish-image.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      # Note: Releases created with GITHUB_TOKEN do not trigger `on: release` workflows.
-      - name: Create GitHub Release and tag
+      # Note: Releases published with GITHUB_TOKEN do not trigger `on: release` workflows.
+      - name: Publish draft release
         env:
           GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ needs.check.outputs.tag }}
-          IS_PRERELEASE: ${{ needs.check.outputs.is_prerelease }}
-          TARGET_SHA: ${{ needs.check.outputs.commit_sha }}
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
         run: |
-          args=(
-            "$RELEASE_TAG"
-            --repo "$GITHUB_REPOSITORY"
-            --target "$TARGET_SHA"
-            --title "$RELEASE_TAG"
-            --generate-notes
-          )
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            args+=(--prerelease)
-          fi
-          gh release create "${args[@]}"
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F draft=false
+
+  cleanup-draft:
+    name: Clean Up Failed Draft Release
+    needs: [check, prepare-release, publish-image]
+    if: >-
+      !cancelled() &&
+      needs.check.outputs.should_release == 'true' &&
+      needs.prepare-release.result == 'success' &&
+      needs.publish-image.result == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete failed draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
+        run: |
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"

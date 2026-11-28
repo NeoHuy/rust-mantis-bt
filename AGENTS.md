@@ -67,7 +67,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
   cargo test
   ```
 - **Automated Release Flow:**
-  When preparing a release PR (`develop` → `main`), bump `[package].version` in `Cargo.toml` (strict SemVer `X.Y.Z` or `X.Y.Z-prerelease`, without `+build` metadata) and update `Cargo.lock`. Merging to `main` triggers `.github/workflows/release.yml`, which verifies the version is newer than existing tags, runs tests and publishes multi-arch GHCR Docker images (`vX.Y.Z`, `X.Y.Z`, `X.Y`, and `latest` when on `main` head for non-prereleases), and then creates git tag `vX.Y.Z` + GitHub Release with generated notes.
+  When preparing a release PR (`develop` → `main`), bump `[package].version` in `Cargo.toml` (strict SemVer 2.0.0 `X.Y.Z` or `X.Y.Z-prerelease`, without `+build` metadata) and update `Cargo.lock`. `.github/workflows/release.yml` owns all `push` builds on `main` (skipping Docker builds on docs-only pushes when no new version is released) using a draft-release → test/publish-image → publish-release lifecycle: it verifies the version is newer than existing tags (versions lower than or equal to the highest tag are skipped—with a warning when lower—rather than failing), runs `cargo test --locked` and publishes multi-arch GHCR Docker images (`vX.Y.Z`, `X.Y.Z`, `X.Y`, and `latest` on `main` head for non-prereleases), and then publishes git tag `vX.Y.Z` + GitHub Release with generated notes. `.github/workflows/build-and-publish.yml` handles `workflow_call` from `release.yml` as well as manual `v*` tag pushes.
 - **PR Content Structure:**
   - **Summary:** Concise explanation of the problem solved.
   - **Key Changes:** Grouped by architectural layer (Model, View, Controller, DB, Integration).

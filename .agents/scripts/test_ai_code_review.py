@@ -800,12 +800,20 @@ class AiCodeReviewHookTests(unittest.TestCase):
         self.assertFalse(report_link.is_symlink())
 
     def test_state_dir_security_mixed_commit_pass_non_git_delete_and_timeout_cap(self) -> None:
-        # 1. _ensure_state_dir rejects unsafe permissions/owner
-        with mock.patch.object(Path, "mkdir"), mock.patch.object(
-            hook.os, "chmod", side_effect=PermissionError("wrong owner")
-        ):
+        # 1. _ensure_state_dir rejects symlinks via O_NOFOLLOW without chmod-ing the target
+        real_target = self.root / "real_target_dir"
+        real_target.mkdir(mode=0o755)
+        os.chmod(real_target, 0o755)
+        symlink_state = self.root / "symlink_state_dir"
+        symlink_state.symlink_to(real_target)
+        orig_dir = hook.STATE_DIR
+        try:
+            hook.STATE_DIR = symlink_state
             with self.assertRaises(PermissionError):
                 hook._ensure_state_dir()
+            self.assertEqual(os.stat(real_target).st_mode & 0o777, 0o755)
+        finally:
+            hook.STATE_DIR = orig_dir
 
         # 2. Mixed committed + dirty changes: PASS syncs baseline_diff_hash so next Stop allows
         hook.handle_session_start(self._base_payload(), self.cfg)
@@ -828,6 +836,33 @@ class AiCodeReviewHookTests(unittest.TestCase):
             self.assertEqual(r1, {"decision": "allow"})
             self.assertEqual(r2, {"decision": "allow"})
             self.assertEqual(m_rev.call_count, 1)
+
+        # 2b. Concurrent edit during reviewer run must NOT be swallowed into baseline
+        (self.repo / "src" / "main.rs").write_text("fn main() { let x = 3; }\n", encoding="utf-8")
+
+        def concurrent_edit_reviewer(prompt, cwd, cfg):
+            (self.repo / "src" / "main.rs").write_text(
+                "fn main() { let x = 4; /* concurrent */ }\n", encoding="utf-8"
+            )
+            return True, "VERDICT: PASS\n- ok for x=3", ""
+
+        with mock.patch.object(hook, "run_reviewer", side_effect=concurrent_edit_reviewer):
+            r_conc = hook.handle_review(
+                self._base_payload(terminationReason="NO_TOOL_CALL", fullyIdle=True),
+                self.cfg,
+            )
+        self.assertEqual(r_conc, {"decision": "allow"})
+
+        with mock.patch.object(
+            hook, "run_reviewer", return_value=(True, "VERDICT: PASS\n- ok for x=4", "")
+        ) as m_rev_next:
+            r_next = hook.handle_review(
+                self._base_payload(terminationReason="NO_TOOL_CALL", fullyIdle=True),
+                self.cfg,
+            )
+            self.assertEqual(r_next, {"decision": "allow"})
+            m_rev_next.assert_called_once()
+            self.assertIn("concurrent", m_rev_next.call_args[0][0])
 
         # 3. Non-git deleted file produces Deleted File bundle + hash
         nongit = self.root / "ng_del"

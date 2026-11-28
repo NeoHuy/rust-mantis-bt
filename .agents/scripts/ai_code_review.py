@@ -251,14 +251,24 @@ def get_state_path(conversation_id: str | None) -> Path:
 
 def _ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(STATE_DIR, 0o700)
-    st = os.lstat(STATE_DIR)
-    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
-        raise PermissionError(f"Unsafe state directory (not a real directory): {STATE_DIR}")
-    if st.st_uid != os.getuid():
-        raise PermissionError(f"Unsafe state directory owner ({st.st_uid} != {os.getuid()}): {STATE_DIR}")
-    if (st.st_mode & 0o077) != 0:
-        raise PermissionError(f"Unsafe state directory permissions ({oct(st.st_mode)}): {STATE_DIR}")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(STATE_DIR, flags)
+    except OSError as exc:
+        raise PermissionError(f"Unsafe state directory ({exc}): {STATE_DIR}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISDIR(st.st_mode):
+            raise PermissionError(f"Unsafe state directory (not a real directory): {STATE_DIR}")
+        if st.st_uid != os.getuid():
+            raise PermissionError(f"Unsafe state directory owner ({st.st_uid} != {os.getuid()}): {STATE_DIR}")
+        if (st.st_mode & 0o077) != 0:
+            os.fchmod(fd, 0o700)
+            st = os.fstat(fd)
+            if (st.st_mode & 0o077) != 0:
+                raise PermissionError(f"Unsafe state directory permissions ({oct(st.st_mode)}): {STATE_DIR}")
+    finally:
+        os.close(fd)
 
 
 def default_state() -> dict[str, Any]:
@@ -978,6 +988,32 @@ def handle_track(
     return {}
 
 
+def _sync_baseline_after_review(
+    state: dict[str, Any],
+    git_root: Path | None,
+    ignore_patterns: list[str],
+    current_hash: str,
+) -> None:
+    """Advance baseline only if the working tree did not change during review."""
+    if not git_root:
+        state["last_reviewed_diff_hash"] = current_hash
+        state["baseline_diff_hash"] = current_hash
+        return
+    _, _, live_hash = collect_git_changes(
+        git_root, ignore_patterns, baseline_head=state.get("baseline_head", "")
+    )
+    if live_hash != current_hash:
+        state["last_reviewed_diff_hash"] = current_hash
+        return
+    new_head = get_git_head(git_root)
+    state["baseline_head"] = new_head
+    _, _, synced_hash = collect_git_changes(
+        git_root, ignore_patterns, baseline_head=new_head
+    )
+    state["baseline_diff_hash"] = synced_hash
+    state["last_reviewed_diff_hash"] = synced_hash
+
+
 def handle_review(
     payload: dict[str, Any], config: dict[str, Any], runtime: str = "antigravity"
 ) -> dict[str, Any]:
@@ -1032,17 +1068,9 @@ def handle_review(
     if current_hash == state["last_reviewed_diff_hash"]:
         if state.get("last_verdict") == "NEEDS_FIX":
             if state["turn_rounds"] >= max_rounds:
-                if git_root:
-                    new_head = get_git_head(git_root)
-                    state["baseline_head"] = new_head
-                    _, _, synced_hash = collect_git_changes(
-                        git_root, config["ignore_patterns"], baseline_head=new_head
-                    )
-                    state["baseline_diff_hash"] = synced_hash
-                    state["last_reviewed_diff_hash"] = synced_hash
-                else:
-                    state["baseline_diff_hash"] = current_hash
-                    state["last_reviewed_diff_hash"] = current_hash
+                _sync_baseline_after_review(
+                    state, git_root, config["ignore_patterns"], current_hash
+                )
                 state["last_verdict"] = "CAPPED"
                 state["last_reason"] = ""
                 state["last_model_tag"] = ""
@@ -1066,17 +1094,9 @@ def handle_review(
         return allow_response(runtime, "review")
 
     if state["turn_rounds"] >= max_rounds:
-        if git_root:
-            new_head = get_git_head(git_root)
-            state["baseline_head"] = new_head
-            _, _, synced_hash = collect_git_changes(
-                git_root, config["ignore_patterns"], baseline_head=new_head
-            )
-            state["baseline_diff_hash"] = synced_hash
-            state["last_reviewed_diff_hash"] = synced_hash
-        else:
-            state["last_reviewed_diff_hash"] = current_hash
-            state["baseline_diff_hash"] = current_hash
+        _sync_baseline_after_review(
+            state, git_root, config["ignore_patterns"], current_hash
+        )
         state["last_verdict"] = "CAPPED"
         state["last_reason"] = ""
         state["last_model_tag"] = ""
@@ -1152,17 +1172,9 @@ def handle_review(
         save_state(session_key, state)
         return allow_response(runtime, "review")
 
-    if git_root:
-        new_head = get_git_head(git_root)
-        state["baseline_head"] = new_head
-        _, _, synced_hash = collect_git_changes(
-            git_root, config["ignore_patterns"], baseline_head=new_head
-        )
-        state["last_reviewed_diff_hash"] = synced_hash
-        state["baseline_diff_hash"] = synced_hash
-    else:
-        state["last_reviewed_diff_hash"] = current_hash
-        state["baseline_diff_hash"] = current_hash
+    _sync_baseline_after_review(
+        state, git_root, config["ignore_patterns"], current_hash
+    )
     state["last_verdict"] = "PASS"
     state["last_reason"] = ""
     state["last_model_tag"] = ""

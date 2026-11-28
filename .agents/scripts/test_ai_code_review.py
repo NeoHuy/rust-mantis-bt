@@ -176,9 +176,9 @@ class AiCodeReviewHookTests(unittest.TestCase):
         state = hook.load_state(f"antigravity:{self.conv_id}")
         self.assertEqual(state["turn_rounds"], 1)
 
-        # Duplicate diff guard: same diff hash should not re-run reviewer
+        # Unchanged diff after NEEDS_FIX must re-block without re-running reviewer
         with mock.patch.object(hook, "run_reviewer") as m_rev2:
-            res_dup = hook.handle_review(
+            res_unfixed = hook.handle_review(
                 self._base_payload(
                     terminationReason="NO_TOOL_CALL",
                     fullyIdle=True,
@@ -186,8 +186,65 @@ class AiCodeReviewHookTests(unittest.TestCase):
                 ),
                 self.cfg,
             )
-            self.assertEqual(res_dup, {"decision": "allow"})
+            self.assertEqual(res_unfixed["decision"], "continue")
+            self.assertIn("diff unchanged", res_unfixed["reason"])
             m_rev2.assert_not_called()
+
+        # Once fixed and PASS, unchanged diff on subsequent stop allows without re-running reviewer
+        (self.repo / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        with mock.patch.object(
+            hook, "run_reviewer", return_value=(True, "VERDICT: PASS\n- ok", "")
+        ):
+            res_pass = hook.handle_review(
+                self._base_payload(
+                    terminationReason="NO_TOOL_CALL",
+                    fullyIdle=True,
+                    continuationActive=True,
+                ),
+                self.cfg,
+            )
+            self.assertEqual(res_pass, {"decision": "allow"})
+
+        with mock.patch.object(hook, "run_reviewer") as m_rev3:
+            res_dup = hook.handle_review(
+                self._base_payload(
+                    terminationReason="NO_TOOL_CALL",
+                    fullyIdle=True,
+                    continuationActive=False,
+                ),
+                self.cfg,
+            )
+            self.assertEqual(res_dup, {"decision": "allow"})
+            m_rev3.assert_not_called()
+
+    def test_dot_path_ignore_deep_merge_and_unknown_verdict(self) -> None:
+        self.assertTrue(hook.is_ignored(".git/config", [".git/*"]))
+        self.assertTrue(hook.is_ignored("./.git/HEAD", [".git/*"]))
+        self.assertFalse(hook.is_ignored("./src/main.rs", [".git/*"]))
+
+        partial_cfg_path = self.root / "partial-config.json"
+        partial_cfg_path.write_text(
+            json.dumps({"reviewer_by_runtime": {"codex": {"provider": "claude", "model": "opus"}}}),
+            encoding="utf-8",
+        )
+        merged = hook.load_config(partial_cfg_path)
+        self.assertEqual(merged["reviewer_by_runtime"]["codex"]["model"], "opus")
+        self.assertEqual(merged["reviewer_by_runtime"]["claude"]["provider"], "codex")
+
+        # UNKNOWN verdict fails open and does not mark diff as PASS
+        hook.handle_session_start(self._base_payload(), self.cfg)
+        (self.repo / "src" / "main.rs").write_text("fn main() { let z = 1; }\n", encoding="utf-8")
+        with mock.patch.object(
+            hook, "run_reviewer", return_value=(True, "Missing verdict line", "")
+        ):
+            res_unk = hook.handle_review(
+                self._base_payload(terminationReason="NO_TOOL_CALL", fullyIdle=True),
+                self.cfg,
+            )
+            self.assertEqual(res_unk, {"decision": "allow"})
+        state = hook.load_state(f"antigravity:{self.conv_id}")
+        self.assertEqual(state["last_reviewed_diff_hash"], "")
+        self.assertEqual(state["last_verdict"], "")
 
     def test_review_pass_and_loop_guard_and_turn_reset(self) -> None:
         self.assertEqual(self.cfg["max_review_rounds"], 5)

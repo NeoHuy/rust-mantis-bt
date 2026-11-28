@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .agents/scripts/ai_code_review.py --runtime codex session-start",
+            "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.agents/scripts/ai_code_review.py\" --runtime codex session-start",
             "timeout": 10
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .agents/scripts/ai_code_review.py --runtime codex track",
+            "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.agents/scripts/ai_code_review.py\" --runtime codex track",
             "timeout": 10
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .agents/scripts/ai_code_review.py --runtime codex review",
+            "command": "python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.agents/scripts/ai_code_review.py\" --runtime codex review",
             "timeout": 180
           }
         ]

@@ -39,7 +39,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "max_review_rounds": 5,
     "include_nits": True,
-    "timeout_seconds": 150,
+    "timeout_seconds": 120,
     "max_diff_chars": 60000,
     "custom_command": [],
     "ignore_patterns": [
@@ -84,6 +84,9 @@ def _truthy_env(name: str) -> bool:
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
     """Load config from JSON file and apply environment variable overrides."""
     cfg = dict(DEFAULT_CONFIG)
+    merged_rt = {
+        k: dict(v) for k, v in DEFAULT_CONFIG["reviewer_by_runtime"].items()
+    }
     path = config_path or DEFAULT_CONFIG_PATH
     if path.is_file():
         try:
@@ -91,8 +94,15 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
                 loaded = json.load(fh)
             if isinstance(loaded, dict):
                 cfg.update(loaded)
+                if isinstance(loaded.get("reviewer_by_runtime"), dict):
+                    for rt_key, rt_val in loaded["reviewer_by_runtime"].items():
+                        if isinstance(rt_val, dict):
+                            base_entry = dict(merged_rt.get(rt_key, {}))
+                            base_entry.update(rt_val)
+                            merged_rt[rt_key] = base_entry
         except Exception as exc:
             print(f"[ai-code-review] Failed to parse {path}: {exc}", file=sys.stderr)
+    cfg["reviewer_by_runtime"] = merged_rt
 
     if _truthy_env("AI_REVIEW_DISABLED"):
         cfg["enabled"] = False
@@ -121,7 +131,7 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     cfg["model"] = str(cfg.get("model", "")).strip()
     cfg["max_review_rounds"] = max(1, int(cfg.get("max_review_rounds", 5)))
     cfg["include_nits"] = bool(cfg.get("include_nits", True))
-    cfg["timeout_seconds"] = max(10, int(cfg.get("timeout_seconds", 150)))
+    cfg["timeout_seconds"] = max(10, int(cfg.get("timeout_seconds", 120)))
     cfg["max_diff_chars"] = max(1000, int(cfg.get("max_diff_chars", 60000)))
     if not isinstance(cfg.get("ignore_patterns"), list):
         cfg["ignore_patterns"] = list(DEFAULT_CONFIG["ignore_patterns"])
@@ -226,6 +236,8 @@ def default_state() -> dict[str, Any]:
     return {
         "baseline_diff_hash": "",
         "last_reviewed_diff_hash": "",
+        "last_verdict": "",
+        "last_reason": "",
         "turn_rounds": 0,
         "edited_files": [],
     }
@@ -291,7 +303,10 @@ def resolve_cwd(payload: dict[str, Any]) -> Path:
 
 def is_ignored(rel_path: str, patterns: list[str]) -> bool:
     """Check whether a relative path matches any ignore pattern."""
-    norm = rel_path.replace("\\", "/").lstrip("./")
+    norm = rel_path.replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    norm = norm.lstrip("/")
     if not norm:
         return True
     name = Path(norm).name
@@ -843,23 +858,45 @@ def handle_review(
         )
 
     has_tracked_edits = len(state["edited_files"]) > 0
+    has_unfixed_needs_fix = (
+        bool(current_hash)
+        and current_hash == state["last_reviewed_diff_hash"]
+        and state.get("last_verdict") == "NEEDS_FIX"
+    )
     has_new_git_diff = (
         bool(current_hash)
         and current_hash != state["baseline_diff_hash"]
         and current_hash != state["last_reviewed_diff_hash"]
     )
 
-    if (not has_tracked_edits and not has_new_git_diff) or not current_hash:
-        state["edited_files"] = []
-        save_state(session_key, state)
-        return allow_response(runtime, "review")
-
-    if current_hash == state["last_reviewed_diff_hash"]:
+    if (
+        not has_tracked_edits and not has_new_git_diff and not has_unfixed_needs_fix
+    ) or not current_hash:
         state["edited_files"] = []
         save_state(session_key, state)
         return allow_response(runtime, "review")
 
     max_rounds = int(config["max_review_rounds"])
+    if current_hash == state["last_reviewed_diff_hash"]:
+        if state.get("last_verdict") == "NEEDS_FIX":
+            if state["turn_rounds"] >= max_rounds:
+                state["baseline_diff_hash"] = current_hash
+                state["edited_files"] = []
+                save_state(session_key, state)
+                return allow_response(runtime, "review")
+            state["turn_rounds"] += 1
+            state["edited_files"] = []
+            save_state(session_key, state)
+            prev_reason = state.get("last_reason", "").strip()
+            reblock_reason = (
+                f"[AI Code Review — unresolved issues, diff unchanged (round {state['turn_rounds']}/{max_rounds})]\n\n"
+                f"{prev_reason}"
+            ).strip()
+            return block_response(runtime, reblock_reason)
+        state["edited_files"] = []
+        save_state(session_key, state)
+        return allow_response(runtime, "review")
+
     if state["turn_rounds"] >= max_rounds:
         state["last_reviewed_diff_hash"] = current_hash
         state["baseline_diff_hash"] = current_hash
@@ -908,10 +945,6 @@ def handle_review(
     )
 
     if verdict == "NEEDS_FIX":
-        state["turn_rounds"] = round_num
-        state["last_reviewed_diff_hash"] = current_hash
-        state["edited_files"] = []
-        save_state(session_key, state)
         model_tag = f"{provider}/{model}" if model else provider
         follow_up = (
             "Please address EVERY finding above (including LOW and NIT items), re-run verification checks, and finish."
@@ -923,10 +956,27 @@ def handle_review(
             f"{review_output.strip()}\n\n"
             f"{follow_up}"
         )
+        state["turn_rounds"] = round_num
+        state["last_reviewed_diff_hash"] = current_hash
+        state["last_verdict"] = "NEEDS_FIX"
+        state["last_reason"] = reason
+        state["edited_files"] = []
+        save_state(session_key, state)
         return block_response(runtime, reason)
+
+    if verdict == "UNKNOWN":
+        print(
+            f"[ai-code-review] Reviewer ({provider}) output missing VERDICT line (fail-open)",
+            file=sys.stderr,
+        )
+        state["edited_files"] = []
+        save_state(session_key, state)
+        return allow_response(runtime, "review")
 
     state["last_reviewed_diff_hash"] = current_hash
     state["baseline_diff_hash"] = current_hash
+    state["last_verdict"] = "PASS"
+    state["last_reason"] = ""
     state["edited_files"] = []
     save_state(session_key, state)
     return allow_response(runtime, "review")

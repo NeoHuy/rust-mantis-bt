@@ -10,7 +10,7 @@
   },
   "max_review_rounds": 5,
   "include_nits": true,
-  "timeout_seconds": 150,
+  "timeout_seconds": 120,
   "max_diff_chars": 60000,
   "custom_command": [],
   "ignore_patterns": [

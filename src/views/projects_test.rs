@@ -128,3 +128,85 @@ fn test_ui_m4_proj_add_version_released_unchecked_and_clean_status_labels() {
     assert!(edit_html.contains(r#"<input type="checkbox" name="released" value="1" /> Released"#));
     assert!(!edit_html.contains(r#"name="released" value="1" checked"#));
 }
+
+fn assert_no_nested_forms(html: &str) {
+    let mut depth = 0usize;
+    let mut rest = html;
+    while let Some(pos) = rest.find('<') {
+        rest = &rest[pos + 1..];
+        let lower = rest.get(..6).unwrap_or(rest).to_ascii_lowercase();
+        if lower.starts_with("form")
+            && rest
+                .as_bytes()
+                .get(4)
+                .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>')
+        {
+            depth += 1;
+            assert!(depth <= 1, "Nested <form> detected in HTML");
+        } else if lower.starts_with("/form>") {
+            depth = depth.saturating_sub(1);
+        }
+    }
+}
+
+#[test]
+fn test_projects_views_no_inline_styles_or_js_and_wcag_buttons() {
+    let ctx = dummy_auth_ctx();
+    let project = Project {
+        id: 42,
+        name: "Alpha".to_string(),
+        status: 10,
+        enabled: 1,
+        view_state: 10,
+        access_min: 10,
+        description: "Desc".to_string(),
+        category_id: 0,
+        inherit_global: 1,
+    };
+    let cat = Category {
+        id: 5,
+        project_id: 42,
+        user_id: 1,
+        name: "Backend".to_string(),
+        status: 0,
+    };
+    let ver = ProjectVersion {
+        id: 7,
+        project_id: 42,
+        version: "1.0.0".to_string(),
+        description: "Initial".to_string(),
+        date_order: 1700000000,
+        released: 0,
+        obsolete: 0,
+    };
+
+    let manage_html = render_manage_proj_page(
+        &ctx,
+        &[(project.clone(), 0)],
+        &[(cat.clone(), "admin".to_string())],
+        std::slice::from_ref(&ctx.user),
+    )
+    .0;
+    assert!(!manage_html.contains("style="));
+    assert!(!manage_html.contains("onsubmit="));
+    assert!(manage_html.contains("btn btn-danger btn-white btn-round btn-sm"));
+    assert!(manage_html.contains(r#"data-confirm="Delete category?""#));
+    assert_no_nested_forms(&manage_html);
+
+    let edit_html = render_proj_edit_page(
+        &ctx,
+        &project,
+        &[(project.clone(), true)],
+        &[],
+        &[(cat, "admin".to_string())],
+        &[ver],
+        &[(ctx.user.clone(), 90)],
+        std::slice::from_ref(&ctx.user),
+    )
+    .0;
+    assert!(!edit_html.contains("style="));
+    assert!(!edit_html.contains("onsubmit="));
+    assert!(edit_html.contains("btn btn-danger btn-white btn-round btn-sm"));
+    assert!(edit_html.contains("fa-trash-o"));
+    assert_no_nested_forms(&edit_html);
+}

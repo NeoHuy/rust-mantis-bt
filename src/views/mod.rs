@@ -290,15 +290,20 @@ pub fn render_manage_tabs(ctx: &AuthContext, active_tab: &str) -> String {
         return String::new();
     }
 
-    let mut html = String::from(r#"<ul class="nav-tabs" role="tablist">"#);
+    let mut html = String::from(r#"<nav aria-label="Manage sections"><ul class="nav-tabs">"#);
     for (_key, href, label, is_active) in tabs {
         let li_cls = if is_active { r#" class="active""# } else { "" };
+        let current = if is_active {
+            r#" aria-current="page""#
+        } else {
+            ""
+        };
         html.push_str(&format!(
-            r#"<li{}><a href="{}">{}</a></li>"#,
-            li_cls, href, label
+            r#"<li{}><a href="{}"{}>{}</a></li>"#,
+            li_cls, href, current, label
         ));
     }
-    html.push_str("</ul>");
+    html.push_str("</ul></nav>");
     html
 }
 

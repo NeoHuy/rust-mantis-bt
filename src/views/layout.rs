@@ -235,7 +235,7 @@ pub fn render_layout(
                     </div>
                 </div>
                 <noscript>
-                    <form action="/set_project" method="POST" style="display:inline-flex; align-items:center; gap:4px; margin:0;">
+                    <form action="/set_project" method="POST" class="inline-flex items-center gap-1 m-0">
                         <select name="project_id" id="top_project_id">{project_options}</select>
                         <button type="submit">Switch</button>
                     </form>
@@ -260,7 +260,7 @@ pub fn render_layout(
                     </form>
                 </div>
                 <noscript>
-                    <form action="/logout" method="POST" style="display:inline; margin:0;">
+                    <form action="/logout" method="POST" class="inline-block m-0">
                         <button type="submit" class="nav-dropdown-toggle">Logout</button>
                     </form>
                 </noscript>

@@ -88,4 +88,49 @@ fn test_render_tag_view_page_manager_and_reporter() {
     let html_rep = out_rep.0;
     assert!(html_rep.contains("ui-bug"));
     assert!(!html_rep.contains(r#"action="/tag_update/7""#));
+    assert!(!html_mgr.contains("style="));
+    assert!(!html_rep.contains("style="));
+    assert_no_nested_forms(&html_mgr);
+}
+
+fn assert_no_nested_forms(html: &str) {
+    let mut depth = 0usize;
+    let mut rest = html;
+    while let Some(pos) = rest.find('<') {
+        rest = &rest[pos + 1..];
+        let lower = rest.get(..6).unwrap_or(rest).to_ascii_lowercase();
+        if lower.starts_with("form")
+            && rest
+                .as_bytes()
+                .get(4)
+                .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>')
+        {
+            depth += 1;
+            assert!(depth <= 1, "Nested <form> detected in HTML");
+        } else if lower.starts_with("/form>") {
+            depth = depth.saturating_sub(1);
+        }
+    }
+}
+
+#[test]
+fn test_manage_tags_wcag_delete_button_and_no_inline_styles() {
+    let ctx = dummy_ctx(70);
+    let tags = vec![(
+        Tag {
+            id: 3,
+            user_id: 1,
+            name: "security".to_string(),
+            description: "Desc".to_string(),
+            date_created: 1700000000,
+            date_updated: 1700000000,
+        },
+        2,
+    )];
+    let html = render_manage_tags_page(&ctx, &tags, None, None).0;
+    assert!(html.contains("btn btn-danger btn-white btn-round btn-sm"));
+    assert!(html.contains(r#"data-confirm="Delete tag?""#));
+    assert!(!html.contains("style="));
+    assert!(!html.contains("onsubmit="));
+    assert_no_nested_forms(&html);
 }

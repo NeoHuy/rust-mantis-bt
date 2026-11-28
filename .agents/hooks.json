@@ -4,7 +4,7 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "python3 ./scripts/ai_code_review.py session-start",
+        "command": "python3 ./scripts/ai_code_review.py --runtime antigravity session-start",
         "timeout": 10
       }
     ],
@@ -14,7 +14,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ./scripts/ai_code_review.py track",
+            "command": "python3 ./scripts/ai_code_review.py --runtime antigravity track",
             "timeout": 10
           }
         ]
@@ -23,7 +23,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "python3 ./scripts/ai_code_review.py review",
+        "command": "python3 ./scripts/ai_code_review.py --runtime antigravity review",
         "timeout": 180
       }
     ]

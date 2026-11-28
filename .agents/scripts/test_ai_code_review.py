@@ -79,7 +79,7 @@ class AiCodeReviewHookTests(unittest.TestCase):
         (self.repo / "src" / "main.rs").write_text("fn main() { /* dirty */ }\n", encoding="utf-8")
         out = hook.handle_session_start(self._base_payload(), self.cfg)
         self.assertEqual(out, {})
-        state = hook.load_state(self.conv_id)
+        state = hook.load_state(f"antigravity:{self.conv_id}")
         self.assertTrue(state["baseline_diff_hash"])
 
         # Stop without new edits in this turn -> allow without calling reviewer
@@ -121,7 +121,7 @@ class AiCodeReviewHookTests(unittest.TestCase):
             ),
             self.cfg,
         )
-        state = hook.load_state(self.conv_id)
+        state = hook.load_state(f"antigravity:{self.conv_id}")
         self.assertEqual(state["edited_files"], [])
 
         # Valid workspace file -> tracked
@@ -131,7 +131,7 @@ class AiCodeReviewHookTests(unittest.TestCase):
             ),
             self.cfg,
         )
-        state = hook.load_state(self.conv_id)
+        state = hook.load_state(f"antigravity:{self.conv_id}")
         self.assertEqual(state["edited_files"], ["src/main.rs"])
 
     def test_review_skips_on_non_normal_termination_or_not_idle_or_disabled(self) -> None:
@@ -173,7 +173,7 @@ class AiCodeReviewHookTests(unittest.TestCase):
         self.assertTrue(report_file.is_file())
         self.assertIn("Verdict:** `NEEDS_FIX`", report_file.read_text(encoding="utf-8"))
 
-        state = hook.load_state(self.conv_id)
+        state = hook.load_state(f"antigravity:{self.conv_id}")
         self.assertEqual(state["turn_rounds"], 1)
 
         # Duplicate diff guard: same diff hash should not re-run reviewer
@@ -243,7 +243,7 @@ class AiCodeReviewHookTests(unittest.TestCase):
                 self.cfg,
             )
         self.assertEqual(res_pass, {"decision": "allow"})
-        self.assertEqual(hook.load_state(self.conv_id)["turn_rounds"], 0)
+        self.assertEqual(hook.load_state(f"antigravity:{self.conv_id}")["turn_rounds"], 0)
 
     def test_include_nits_prompt_and_env_override(self) -> None:
         prompt_with_nits = hook.build_review_prompt("task", "1 file", "diff", self.cfg)
@@ -333,9 +333,180 @@ class AiCodeReviewHookTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AI_REVIEW_HOOK_ACTIVE": "1"}):
             with mock.patch("sys.stdin", new=mock.MagicMock(read=lambda: "{}")):
                 with mock.patch.object(hook, "emit_json") as m_emit:
-                    rc = hook.main(["review"])
+                    rc = hook.main(["--runtime", "antigravity", "review"])
                     self.assertEqual(rc, 0)
                     m_emit.assert_called_once_with({"decision": "allow"})
+
+            for rt in ("codex", "claude", "cursor"):
+                with mock.patch("sys.stdin", new=mock.MagicMock(read=lambda: "{}")):
+                    with mock.patch.object(hook, "emit_json") as m_emit:
+                        rc = hook.main(["--runtime", rt, "review"])
+                        self.assertEqual(rc, 0)
+                        m_emit.assert_called_once_with({})
+
+    def test_codex_runtime_apply_patch_and_block_decision(self) -> None:
+        codex_start = {
+            "session_id": "thr_codex_1",
+            "cwd": str(self.repo),
+        }
+        hook.handle_session_start(codex_start, self.cfg, runtime="codex")
+
+        patch_text = "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-fn main() {}\n+fn main() { let _ = 1; }\n*** End Patch\n"
+        hook.handle_track(
+            {
+                "session_id": "thr_codex_1",
+                "cwd": str(self.repo),
+                "tool_name": "apply_patch",
+                "tool_input": {"input": patch_text},
+            },
+            self.cfg,
+            runtime="codex",
+        )
+        state = hook.load_state("codex:thr_codex_1")
+        self.assertEqual(state["edited_files"], ["src/main.rs"])
+
+        (self.repo / "src" / "main.rs").write_text("fn main() { let _ = 1; }\n", encoding="utf-8")
+        with mock.patch.object(
+            hook,
+            "run_reviewer",
+            return_value=(True, "VERDICT: NEEDS_FIX\n- [NIT] src/main.rs:1 — unused", ""),
+        ) as m_rev:
+            res = hook.handle_review(
+                {
+                    "session_id": "thr_codex_1",
+                    "cwd": str(self.repo),
+                    "turn_id": "turn_1",
+                    "stop_hook_active": False,
+                },
+                self.cfg,
+                runtime="codex",
+            )
+            self.assertEqual(m_rev.call_args[0][2]["provider"], "claude")
+        self.assertEqual(res["decision"], "block")
+        self.assertIn("NEEDS_FIX", res["reason"])
+
+        # Fallback report written to /tmp/agy-ai-review/<hash>-report.md
+        reports = list(self.state_dir.glob("*-report.md"))
+        self.assertEqual(len(reports), 1)
+        self.assertIn("Verdict:** `NEEDS_FIX`", reports[0].read_text(encoding="utf-8"))
+
+        # PASS returns {}
+        (self.repo / "src" / "main.rs").write_text("fn main() { println!(\"ok\"); }\n", encoding="utf-8")
+        with mock.patch.object(
+            hook, "run_reviewer", return_value=(True, "VERDICT: PASS\n- clean", "")
+        ):
+            res_pass = hook.handle_review(
+                {
+                    "session_id": "thr_codex_1",
+                    "cwd": str(self.repo),
+                    "stop_hook_active": True,
+                },
+                self.cfg,
+                runtime="codex",
+            )
+        self.assertEqual(res_pass, {})
+
+    def test_claude_runtime_cross_model_routing_and_env_override(self) -> None:
+        claude_cfg = hook.resolve_reviewer_config(self.cfg, "claude")
+        self.assertEqual(claude_cfg["provider"], "codex")
+
+        with mock.patch.dict(os.environ, {"AI_REVIEW_PROVIDER": "claude"}):
+            overridden_cfg = hook.load_config(Path("/nonexistent/config.json"))
+            resolved = hook.resolve_reviewer_config(overridden_cfg, "claude")
+            self.assertEqual(resolved["provider"], "claude")
+
+        hook.handle_session_start(
+            {"session_id": "cc_1", "cwd": str(self.repo)},
+            self.cfg,
+            runtime="claude",
+        )
+        hook.handle_track(
+            {
+                "session_id": "cc_1",
+                "cwd": str(self.repo),
+                "tool_input": {"file_path": str(self.repo / "src" / "main.rs")},
+            },
+            self.cfg,
+            runtime="claude",
+        )
+        (self.repo / "src" / "main.rs").write_text("fn main() { todo!(); }\n", encoding="utf-8")
+        with mock.patch.object(
+            hook,
+            "run_reviewer",
+            return_value=(True, "VERDICT: NEEDS_FIX\n- [HIGH] remove todo!()", ""),
+        ) as m_rev:
+            res = hook.handle_review(
+                {"session_id": "cc_1", "cwd": str(self.repo), "stop_hook_active": False},
+                self.cfg,
+                runtime="claude",
+            )
+            self.assertEqual(m_rev.call_args[0][2]["provider"], "codex")
+        self.assertEqual(res["decision"], "block")
+        self.assertIn("codex, round 1/5", res["reason"])
+
+    def test_cursor_runtime_after_file_edit_and_followup_message(self) -> None:
+        hook.handle_track(
+            {
+                "conversation_id": "cur_1",
+                "workspace_roots": [str(self.repo)],
+                "file_path": str(self.repo / "src" / "main.rs"),
+            },
+            self.cfg,
+            runtime="cursor",
+        )
+        self.assertEqual(hook.load_state("cursor:cur_1")["edited_files"], ["src/main.rs"])
+
+        # Non-completed status skips review
+        (self.repo / "src" / "main.rs").write_text("fn main() { let _ = 42; }\n", encoding="utf-8")
+        with mock.patch.object(hook, "run_reviewer") as m_rev:
+            res_abort = hook.handle_review(
+                {
+                    "conversation_id": "cur_1",
+                    "workspace_roots": [str(self.repo)],
+                    "status": "aborted",
+                    "loop_count": 0,
+                },
+                self.cfg,
+                runtime="cursor",
+            )
+            self.assertEqual(res_abort, {})
+            m_rev.assert_not_called()
+
+        # Completed status with NEEDS_FIX -> followup_message
+        with mock.patch.object(
+            hook,
+            "run_reviewer",
+            return_value=(True, "VERDICT: NEEDS_FIX\n- [NIT] clean up", ""),
+        ):
+            res_fix = hook.handle_review(
+                {
+                    "conversation_id": "cur_1",
+                    "workspace_roots": [str(self.repo)],
+                    "status": "completed",
+                    "loop_count": 0,
+                },
+                self.cfg,
+                runtime="cursor",
+            )
+        self.assertIn("followup_message", res_fix)
+        self.assertIn("NEEDS_FIX", res_fix["followup_message"])
+
+        # PASS -> {}
+        (self.repo / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+        with mock.patch.object(
+            hook, "run_reviewer", return_value=(True, "VERDICT: PASS\n- ok", "")
+        ):
+            res_ok = hook.handle_review(
+                {
+                    "conversation_id": "cur_1",
+                    "workspace_roots": [str(self.repo)],
+                    "status": "completed",
+                    "loop_count": 1,
+                },
+                self.cfg,
+                runtime="cursor",
+            )
+        self.assertEqual(res_ok, {})
 
 
 if __name__ == "__main__":

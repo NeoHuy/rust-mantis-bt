@@ -2,6 +2,12 @@
   "enabled": true,
   "provider": "claude",
   "model": "",
+  "reviewer_by_runtime": {
+    "antigravity": { "provider": "claude", "model": "" },
+    "codex": { "provider": "claude", "model": "" },
+    "claude": { "provider": "codex", "model": "" },
+    "cursor": { "provider": "claude", "model": "" }
+  },
   "max_review_rounds": 5,
   "include_nits": true,
   "timeout_seconds": 150,

@@ -444,8 +444,8 @@
           return;
         }
       }
-      if (form.getAttribute('data-disable-on-submit') === 'true') {
-        var btn = form.querySelector('button[type="submit"]');
+      if (form.hasAttribute('data-disable-on-submit') && form.getAttribute('data-disable-on-submit') !== 'false') {
+        var btn = form.querySelector('button[type="submit"], input[type="submit"]');
         if (btn) {
           btn.disabled = true;
         }

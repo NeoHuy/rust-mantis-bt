@@ -51,9 +51,16 @@ fn test_render_api_tokens_page_with_token_banner() {
     let html = out.0;
     assert!(html.contains("New API Token Created!"));
     assert!(html.contains("secret_token_123"));
+    assert!(html.contains(r#"id="new-api-token""#));
+    assert!(html.contains(r#"data-copy-target="new-api-token""#));
+    assert!(html.contains("Copy Token"));
     assert!(html.contains("test-token"));
     assert!(html.contains(r#"value="rss""#));
     assert!(html.contains(r#"action="/api_token_revoke/10""#));
+    assert!(html.contains("btn btn-danger btn-white btn-round btn-sm"));
+    assert!(html.contains(r#"class="sub-nav-tabs""#));
+    assert!(html.contains(r#"href="/account_page""#));
+    assert!(!html.contains("style="));
 }
 
 #[test]

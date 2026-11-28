@@ -140,7 +140,7 @@ pub fn render_signup_disabled_page() -> Html<String> {
     render_unauthenticated_layout(
         "Registration Disabled",
         Some("User registration is currently disabled."),
-        r#"<div class="login-box"><div class="login-body" style="text-align:center;"><p>User registration is currently disabled.</p><p style="margin-top:14px;"><a href="/login" class="btn btn-secondary">Back to Login</a></p></div></div>"#,
+        r#"<div class="login-box"><div class="login-body text-center"><p>User registration is currently disabled.</p><p class="mt-3.5"><a href="/login" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back to Login</a></p></div></div>"#,
     )
 }
 
@@ -148,22 +148,22 @@ pub fn render_signup_success_page(username: &str) -> Html<String> {
     let content = format!(
         r#"
     <div class="login-box" data-redirect-url="/my_view_page" data-redirect-seconds="5">
-        <div class="login-header" style="background-color: #629b58; color: #ffffff;">
+        <div class="login-header !bg-[#629b58] !text-white">
             <i class="fa fa-check-circle" aria-hidden="true"></i>
             <span>Registration Successful</span>
         </div>
-        <div class="login-body" style="text-align: center; padding: 24px 20px;">
-            <p style="font-size: 15px; font-weight: 600; color: #3c763d; margin-bottom: 12px;">
+        <div class="login-body text-center px-5 py-6">
+            <p class="text-[15px] font-semibold text-[#3c763d] mb-3">
                 Account created successfully!
             </p>
-            <p style="color: #555555; margin-bottom: 16px;">
+            <p class="text-gray-600 mb-4">
                 You are now logged in as <strong>{}</strong>.
             </p>
-            <p style="color: #777777; font-size: 13px; margin-bottom: 20px;">
-                You will be redirected to the dashboard in <span id="countdown" data-redirect-countdown style="font-weight: bold; color: #337ab7;">5</span> seconds...
+            <p class="text-gray-500 text-[13px] mb-5">
+                You will be redirected to the dashboard in <span id="countdown" data-redirect-countdown class="font-bold text-[#337ab7]">5</span> seconds...
             </p>
             <div>
-                <a href="/my_view_page" class="btn-login-charcoal" style="text-decoration: none;">
+                <a href="/my_view_page" class="btn-login-charcoal no-underline inline-block">
                     Go to Dashboard Now &rarr;
                 </a>
             </div>
@@ -209,42 +209,46 @@ pub fn render_account_page(ctx: &AuthContext, flash: Option<&str>) -> Html<Strin
 
     let content = format!(
         r#"
-        <div class="panel">
-            <div class="panel-header">Edit Account</div>
-            <div class="panel-body">
+        <div class="widget-box widget-color-blue2">
+            <div class="widget-header">
+                <h4 class="widget-title"><i class="fa fa-user" aria-hidden="true"></i> Edit Account</h4>
+            </div>
+            <div class="widget-body">
                 <form method="POST" action="/account_update">
-                    <table class="form-table">
-                        <tr>
-                            <td class="label-col">Username</td>
-                            <td class="input-col"><input type="text" value="{}" disabled /></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Real Name</td>
-                            <td class="input-col"><input type="text" name="realname" value="{}" required /></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Email</td>
-                            <td class="input-col"><input type="email" name="email" value="{}" /></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Current Password</td>
-                            <td class="input-col"><input type="password" name="current_password" placeholder="Required if changing password" /></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Password</td>
-                            <td class="input-col"><input type="password" name="password" placeholder="Leave blank to keep unchanged" /></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Confirm Password</td>
-                            <td class="input-col"><input type="password" name="password_confirm" placeholder="Confirm new password" /></td>
-                        </tr>
-                        <tr>
-                            <td class="label-col">Access Level</td>
-                            <td class="input-col"><strong>{}</strong></td>
-                        </tr>
-                    </table>
-                    <div style="margin-top: 14px;">
-                        <button type="submit" class="btn">Update User</button>
+                    <div class="table-responsive">
+                        <table class="form-table">
+                            <tr>
+                                <td class="label-col">Username</td>
+                                <td class="input-col"><input type="text" value="{}" disabled /></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Real Name</td>
+                                <td class="input-col"><input type="text" name="realname" value="{}" required /></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Email</td>
+                                <td class="input-col"><input type="email" name="email" value="{}" /></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Current Password</td>
+                                <td class="input-col"><input type="password" name="current_password" placeholder="Required if changing password" /></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Password</td>
+                                <td class="input-col"><input type="password" name="password" placeholder="Leave blank to keep unchanged" /></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Confirm Password</td>
+                                <td class="input-col"><input type="password" name="password_confirm" placeholder="Confirm new password" /></td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Access Level</td>
+                                <td class="input-col"><strong>{}</strong></td>
+                            </tr>
+                        </table>
+                    </div>
+                    <div class="mt-3.5">
+                        <button type="submit" class="btn btn-primary"><i class="fa fa-save" aria-hidden="true"></i> Update User</button>
                     </div>
                 </form>
             </div>

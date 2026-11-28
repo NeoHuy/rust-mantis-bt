@@ -74,9 +74,9 @@ pub fn render_manage_proj_page(
                 <td><strong>{}</strong></td>
                 <td>{}</td>
                 <td>
-                    <form action="/manage_proj_cat_delete/{}" method="POST" style="display:inline;" data-confirm="Delete category?">
+                    <form action="/manage_proj_cat_delete/{}" method="POST" class="inline-block m-0" data-confirm="Delete category?">
                         <input type="hidden" name="project_id" value="0" />
-                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>
             </tr>"#,
@@ -148,8 +148,8 @@ pub fn render_manage_proj_page(
 
                 <form method="POST" action="/manage_proj_cat_add" class="mt-3.5 flex flex-wrap items-center gap-2">
                     <input type="hidden" name="project_id" value="0" />
-                    <input type="text" name="name" placeholder="New Global Category" required style="width:200px;" />
-                    <select name="user_id" style="width:180px;">
+                    <input type="text" name="name" placeholder="New Global Category" required class="!w-52" />
+                    <select name="user_id" class="!w-44">
                         {}
                     </select>
                     <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Category</button>
@@ -200,7 +200,7 @@ pub fn render_proj_create_page(ctx: &AuthContext) -> Html<String> {
                         <tr>
                             <td class="label-col">Inherit Global Categories</td>
                             <td class="input-col">
-                                <label><input type="checkbox" name="inherit_global" value="1" checked /> Inherit global categories</label>
+                                <label class="inline-flex items-center cursor-pointer"><input type="checkbox" name="inherit_global" value="1" checked /> Inherit global categories</label>
                             </td>
                         </tr>
                         <tr>
@@ -209,9 +209,9 @@ pub fn render_proj_create_page(ctx: &AuthContext) -> Html<String> {
                         </tr>
                     </table>
                 </div>
-                <div class="mt-3.5 flex gap-2">
+                <div class="mt-3.5 flex flex-wrap gap-2">
                     <button type="submit" class="btn btn-primary"><i class="fa fa-plus" aria-hidden="true"></i> Add Project</button>
-                    <a href="/manage_proj_page" class="btn btn-secondary">Cancel</a>
+                    <a href="/manage_proj_page" class="btn btn-white btn-round">Cancel</a>
                 </div>
             </form>
         </div>
@@ -245,8 +245,8 @@ pub fn render_proj_edit_page(
                 <td><a href="/manage_proj_edit_page/{}">{}</a></td>
                 <td>{}</td>
                 <td>
-                    <form action="/manage_proj_subproj_delete/{}/{}" method="POST" style="display:inline;" data-confirm="Remove subproject relationship?">
-                        <button type="submit" class="btn btn-danger btn-sm">Unlink</button>
+                    <form action="/manage_proj_subproj_delete/{}/{}" method="POST" class="inline-block m-0" data-confirm="Remove subproject relationship?">
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Unlink</button>
                     </form>
                 </td>
             </tr>"#,
@@ -293,23 +293,23 @@ pub fn render_proj_edit_page(
                 <td><strong>{name}</strong></td>
                 <td>{assignee}</td>
                 <td>
-                    <form action="/manage_proj_cat_delete/{cat_id}" method="POST" style="display:inline;" data-confirm="Delete category?">
+                    <form action="/manage_proj_cat_delete/{cat_id}" method="POST" class="inline-block m-0" data-confirm="Delete category?">
                         <input type="hidden" name="project_id" value="{proj_id}" />
-                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>
             </tr>
-            <tr class="{row_class} edit-row" style="background:#f9fbfd;">
-                <td colspan="3" style="padding:6px 12px;">
-                    <form method="POST" action="/manage_proj_cat_update/{cat_id}" style="display:inline-flex; align-items:center; gap:8px; margin:0; flex-wrap:wrap;">
+            <tr class="{row_class} edit-row bg-[#f9fbfd]">
+                <td colspan="3" class="px-3 py-1.5">
+                    <form method="POST" action="/manage_proj_cat_update/{cat_id}" class="inline-flex flex-wrap items-center gap-2 m-0">
                         <input type="hidden" name="project_id" value="{proj_id}" />
-                        <span style="font-size:12px; color:#555; font-weight:600;">Edit:</span>
-                        <input type="text" name="name" value="{name}" required style="width:180px;" placeholder="Category Name" />
-                        <label style="font-size:12px; color:#555; margin-left:4px;">Assign To:</label>
-                        <select name="user_id" style="width:160px;">
+                        <span class="text-xs text-gray-600 font-semibold">Edit:</span>
+                        <input type="text" name="name" value="{name}" required class="!w-44" placeholder="Category Name" />
+                        <label class="text-xs text-gray-600 ml-1">Assign To:</label>
+                        <select name="user_id" class="!w-40">
                             {cat_user_opts}
                         </select>
-                        <button type="submit" class="btn btn-sm">Update Category</button>
+                        <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-save" aria-hidden="true"></i> Update Category</button>
                     </form>
                 </td>
             </tr>"#,
@@ -348,23 +348,23 @@ pub fn render_proj_edit_page(
                 <td>{rel_badge}</td>
                 <td>{obs_badge}</td>
                 <td>
-                    <form action="/manage_proj_ver_delete/{ver_id}" method="POST" style="display:inline;" data-confirm="Delete version?">
+                    <form action="/manage_proj_ver_delete/{ver_id}" method="POST" class="inline-block m-0" data-confirm="Delete version?">
                         <input type="hidden" name="project_id" value="{proj_id}" />
-                        <button type="submit" class="btn btn-danger btn-sm">Delete</button>
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete</button>
                     </form>
                 </td>
             </tr>
-            <tr class="{row_class} edit-row" style="background:#f9fbfd;">
-                <td colspan="6" style="padding:6px 12px;">
-                    <form method="POST" action="/manage_proj_ver_update/{ver_id}" style="display:inline-flex; align-items:center; gap:8px; margin:0; flex-wrap:wrap;">
+            <tr class="{row_class} edit-row bg-[#f9fbfd]">
+                <td colspan="6" class="px-3 py-1.5">
+                    <form method="POST" action="/manage_proj_ver_update/{ver_id}" class="inline-flex flex-wrap items-center gap-2 m-0">
                         <input type="hidden" name="project_id" value="{proj_id}" />
-                        <span style="font-size:12px; color:#555; font-weight:600;">Edit:</span>
-                        <input type="text" name="version" value="{version}" required style="width:140px;" placeholder="Version" />
-                        <input type="text" name="description" value="{desc}" placeholder="Description" style="width:200px;" />
-                        <input type="date" name="date_order" value="{date_str}" style="width:130px;" title="Date Order" />
-                        <label style="display:flex; align-items:center; gap:4px; font-size:12px;"><input type="checkbox" name="released" value="1" {rel_checked} /> Released</label>
-                        <label style="display:flex; align-items:center; gap:4px; font-size:12px;"><input type="checkbox" name="obsolete" value="1" {obs_checked} /> Obsolete</label>
-                        <button type="submit" class="btn btn-sm">Update Version</button>
+                        <span class="text-xs text-gray-600 font-semibold">Edit:</span>
+                        <input type="text" name="version" value="{version}" required class="!w-36" placeholder="Version" />
+                        <input type="text" name="description" value="{desc}" placeholder="Description" class="!w-48" />
+                        <input type="date" name="date_order" value="{date_str}" class="!w-32" title="Date Order" />
+                        <label class="flex items-center gap-1 text-xs cursor-pointer"><input type="checkbox" name="released" value="1" {rel_checked} /> Released</label>
+                        <label class="flex items-center gap-1 text-xs cursor-pointer"><input type="checkbox" name="obsolete" value="1" {obs_checked} /> Obsolete</label>
+                        <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-save" aria-hidden="true"></i> Update Version</button>
                     </form>
                 </td>
             </tr>"#,
@@ -397,8 +397,8 @@ pub fn render_proj_edit_page(
                 <td>{}</td>
                 <td>{} ({})</td>
                 <td>
-                    <form action="/manage_proj_user_remove/{}/{}" method="POST" style="display:inline;" data-confirm="Remove user from project?">
-                        <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+                    <form action="/manage_proj_user_remove/{}/{}" method="POST" class="inline-block m-0" data-confirm="Remove user from project?">
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Remove</button>
                     </form>
                 </td>
             </tr>"#,
@@ -458,7 +458,7 @@ pub fn render_proj_edit_page(
                             <tr>
                                 <td class="label-col">Enabled</td>
                                 <td class="input-col">
-                                    <label><input type="checkbox" name="enabled" value="1" {} /> Enabled</label>
+                                    <label class="inline-flex items-center cursor-pointer"><input type="checkbox" name="enabled" value="1" {} /> Enabled</label>
                                 </td>
                             </tr>
                             <tr>
@@ -473,7 +473,7 @@ pub fn render_proj_edit_page(
                         <tr>
                             <td class="label-col">Inherit Global Categories</td>
                             <td class="input-col">
-                                <label><input type="checkbox" name="inherit_global" value="1" {} /> Inherit global categories</label>
+                                <label class="inline-flex items-center cursor-pointer"><input type="checkbox" name="inherit_global" value="1" {} /> Inherit global categories</label>
                             </td>
                         </tr>
                         <tr>
@@ -482,14 +482,14 @@ pub fn render_proj_edit_page(
                         </tr>
                     </table>
                     </div>
-                    <div class="mt-3.5 flex gap-2">
+                    <div class="mt-3.5 flex flex-wrap gap-2">
                         <button type="submit" class="btn btn-primary"><i class="fa fa-save" aria-hidden="true"></i> Update Project</button>
-                        <a href="/manage_proj_page" class="btn btn-secondary">Back to Projects</a>
+                        <a href="/manage_proj_page" class="btn btn-white btn-round">Back to Projects</a>
                     </div>
                 </form>
-                <div style="margin-top: 12px; border-top: 1px solid #e0e6ed; padding-top: 12px;">
-                    <form action="/manage_proj_delete/{}" method="POST" style="display:inline;" data-confirm="Are you sure you want to delete this project? All associated data will be removed.">
-                        <button type="submit" class="btn btn-danger"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Project</button>
+                <div class="mt-3 pt-3 border-t border-[#e0e6ed]">
+                    <form action="/manage_proj_delete/{}" method="POST" class="inline-block m-0" data-confirm="Are you sure you want to delete this project? All associated data will be removed.">
+                        <button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Delete Project</button>
                     </form>
                 </div>
             </div>
@@ -516,7 +516,7 @@ pub fn render_proj_edit_page(
                 </div>
 
                 <form method="POST" action="/manage_proj_subproj_add/{}" class="mt-3.5 flex flex-wrap items-center gap-2">
-                    <select name="child_id" required style="width:250px;">
+                    <select name="child_id" required class="!w-64">
                         <option value="">- Select Subproject to Link -</option>
                         {}
                     </select>
@@ -550,8 +550,8 @@ pub fn render_proj_edit_page(
 
                 <form method="POST" action="/manage_proj_cat_add" class="mt-3.5 flex flex-wrap items-center gap-2">
                     <input type="hidden" name="project_id" value="{}" />
-                    <input type="text" name="name" placeholder="New Category Name" required style="width:200px;" />
-                    <select name="user_id" style="width:180px;">
+                    <input type="text" name="name" placeholder="New Category Name" required class="!w-52" />
+                    <select name="user_id" class="!w-44">
                         <option value="0">- None -</option>
                         {}
                     </select>
@@ -584,11 +584,11 @@ pub fn render_proj_edit_page(
                 </div>
 
                 <form method="POST" action="/manage_proj_ver_add/{}" class="mt-3.5 flex flex-wrap items-center gap-2">
-                    <input type="text" name="version" placeholder="Version (e.g. 1.0.0)" required style="width:160px;" />
-                    <input type="text" name="description" placeholder="Description" style="width:220px;" />
-                    <input type="date" name="date_order" style="width:140px;" placeholder="YYYY-MM-DD" title="Date Order" />
-                    <label class="flex items-center"><input type="checkbox" name="released" value="1" /> Released</label>
-                    <label class="flex items-center"><input type="checkbox" name="obsolete" value="1" /> Obsolete</label>
+                    <input type="text" name="version" placeholder="Version (e.g. 1.0.0)" required class="!w-40" />
+                    <input type="text" name="description" placeholder="Description" class="!w-56" />
+                    <input type="date" name="date_order" class="!w-36" placeholder="YYYY-MM-DD" title="Date Order" />
+                    <label class="flex items-center cursor-pointer"><input type="checkbox" name="released" value="1" /> Released</label>
+                    <label class="flex items-center cursor-pointer"><input type="checkbox" name="obsolete" value="1" /> Obsolete</label>
                     <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-plus" aria-hidden="true"></i> Add Version</button>
                 </form>
             </div>
@@ -615,11 +615,11 @@ pub fn render_proj_edit_page(
                 </div>
 
                 <form method="POST" action="/manage_proj_user_add/{}" class="mt-3.5 flex flex-wrap items-center gap-2">
-                    <select name="user_id" required style="width:220px;">
+                    <select name="user_id" required class="!w-56">
                         <option value="">- Select User -</option>
                         {}
                     </select>
-                    <select name="access_level" required style="width:160px;">
+                    <select name="access_level" required class="!w-40">
                         <option value="10">viewer (10)</option>
                         <option value="25" selected>reporter (25)</option>
                         <option value="40">updater (40)</option>
@@ -682,7 +682,7 @@ pub fn render_proj_edit_page(
 pub fn render_proj_create_error(ctx: &AuthContext, err: &str) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to create project: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_proj_create_page" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_proj_create_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err)
     );
     (
@@ -698,7 +698,7 @@ pub fn render_proj_update_error(
 ) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to update project: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_proj_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_proj_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err),
         id
     );
@@ -711,7 +711,7 @@ pub fn render_proj_update_error(
 pub fn render_proj_delete_error(ctx: &AuthContext, err: &str) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to delete project: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_proj_page" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_proj_page" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err)
     );
     (
@@ -723,7 +723,7 @@ pub fn render_proj_delete_error(ctx: &AuthContext, err: &str) -> (StatusCode, Ht
 pub fn render_subproj_error(ctx: &AuthContext, id: i64, err: &str) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to modify subproject: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_proj_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_proj_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err),
         id
     );
@@ -740,7 +740,7 @@ pub fn render_category_error(
 ) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to process category: {}</p>
-        <p style="margin-top:12px;"><a href="{}" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err),
         target_url
     );
@@ -757,7 +757,7 @@ pub fn render_version_error(
 ) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to process version: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_proj_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_proj_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err),
         project_id
     );
@@ -770,7 +770,7 @@ pub fn render_version_error(
 pub fn render_proj_user_error(ctx: &AuthContext, id: i64, err: &str) -> (StatusCode, Html<String>) {
     let content = format!(
         r#"<p>Failed to process project user: {}</p>
-        <p style="margin-top:12px;"><a href="/manage_proj_edit_page/{}" class="btn btn-secondary">Back</a></p>"#,
+        <p class="mt-3"><a href="/manage_proj_edit_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-arrow-left" aria-hidden="true"></i> Back</a></p>"#,
         html_escape(err),
         id
     );

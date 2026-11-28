@@ -89,3 +89,17 @@ fn test_require_admin_guard() {
     };
     assert!(require_admin(&admin_ctx).is_none());
 }
+
+#[test]
+fn test_normalize_user_prefix() {
+    assert_eq!(normalize_user_prefix(None), "");
+    assert_eq!(normalize_user_prefix(Some("")), "");
+    assert_eq!(normalize_user_prefix(Some("   ")), "");
+    assert_eq!(normalize_user_prefix(Some("all")), "");
+    assert_eq!(normalize_user_prefix(Some("ALL")), "");
+    assert_eq!(normalize_user_prefix(Some("!")), "");
+    assert_eq!(normalize_user_prefix(Some("Ab")), "A");
+    assert_eq!(normalize_user_prefix(Some(" z ")), "Z");
+    assert_eq!(normalize_user_prefix(Some("0-9")), "0-9");
+    assert_eq!(normalize_user_prefix(Some("5")), "0-9");
+}

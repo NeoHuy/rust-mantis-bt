@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "provider": "claude",
+  "model": "",
+  "max_review_rounds": 5,
+  "include_nits": true,
+  "timeout_seconds": 150,
+  "max_diff_chars": 60000,
+  "custom_command": [],
+  "ignore_patterns": [
+    "Cargo.lock",
+    "package-lock.json",
+    "target/*",
+    "node_modules/*",
+    ".git/*",
+    "__pycache__/*",
+    "*.pyc",
+    "*.min.js",
+    "*.min.css",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.ico",
+    "*.svg",
+    "*.woff*",
+    "*.pdf",
+    "*.db",
+    "*.db-shm",
+    "*.db-wal"
+  ],
+  "extra_instructions": "Respect project guidelines in AGENTS.md (parameterized SQL with rusqlite::params![...], HTML escaping with views::html_escape, no .unwrap()/.expect() in production controller/MCP paths, access-level guards, MVC separation)."
+}

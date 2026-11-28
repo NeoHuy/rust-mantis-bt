@@ -1,0 +1,31 @@
+{
+  "ai-code-review": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python3 ./scripts/ai_code_review.py session-start",
+        "timeout": 10
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ./scripts/ai_code_review.py track",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 ./scripts/ai_code_review.py review",
+        "timeout": 180
+      }
+    ]
+  }
+}

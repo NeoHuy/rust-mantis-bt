@@ -134,6 +134,8 @@ This document captures a direct side-by-side browser comparison between upstream
 
 ## 4. 100% UI/UX Parity Architecture & 4-Milestone Implementation Plan
 
+> **Status Update:** **UI Phase 1** (`UI-M1..UI-M4`, PRs `#48`–`#52`) and **UI Phase 2** (`UI-P2-M1..UI-P2-M3`, PRs `#57`–`#59`: strict CSP `script-src 'self'`, zero inline JS, full Tailwind CSS v4 + Font Awesome 4.7 parity across Account, Manage, Jira, and Phase 3 views) have been completed, verified via live browser QA on Desktop (`1280x900`) and Mobile (`390x844`), and merged into `develop`.
+
 ### 4.1. Architectural Decisions
 - **Modern Frontend Stack (Zero Bootstrap / Zero jQuery / Zero Ace JS):** Do **not** bundle Bootstrap 3.4.1, jQuery 2.2.4, or Ace JS (`ace.js` v1.4 requires jQuery). Achieve visual parity with MantisBT 2.28.4's `.skin-3` theme using:
   - **Tailwind CSS v4 (Compiled Offline into Committed CSS):** Define `@import "tailwindcss";`, `@source "../../src/views";`, and `@theme` MantisBT color/layout tokens in `assets/css/input.css`, compiled locally via `npm run build:css` (`npx @tailwindcss/cli -i assets/css/input.css -o assets/css/tailwind.css --minify`, with `node_modules/` in `.gitignore`) into `assets/css/tailwind.css`. Committing the compiled `assets/css/tailwind.css` preserves zero-Node.js builds in CI (`.github/workflows/rust.yml`) and `Dockerfile` (`COPY assets ./assets`).

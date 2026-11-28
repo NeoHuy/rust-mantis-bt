@@ -13,7 +13,7 @@ use crate::models::{
 use crate::views::layout::render_layout;
 use crate::views::{
     format_date, format_timestamp, html_escape, render_status_badge, render_status_legend,
-    status_color, xml_escape,
+    xml_escape,
 };
 use axum::response::Html;
 use std::collections::{HashMap, HashSet};
@@ -192,9 +192,9 @@ pub fn render_bug_history_html(
         };
         history_html.push_str(&format!(
             r#"<tr>
-                <td style="width:150px; white-space:nowrap;">{}</td>
-                <td style="width:150px;">{}</td>
-                <td style="width:180px;">{}</td>
+                <td class="w-[150px] whitespace-nowrap">{}</td>
+                <td class="w-[150px]">{}</td>
+                <td class="w-[180px]">{}</td>
                 <td>{}</td>
             </tr>"#,
             format_timestamp(h.date_modified),
@@ -301,11 +301,14 @@ pub fn render_priority_icon(priority: i32) -> String {
 }
 
 pub fn render_status_square(status: i32) -> String {
-    let color = status_color(status);
     let label = status_label(status);
+    let swatch_cls = match status {
+        10 | 20 | 30 | 40 | 50 | 80 | 90 => format!("status-swatch-{}", status),
+        _ => "status-swatch-10".to_string(),
+    };
     format!(
-        r#"<i class="fa fa-square fa-status-box" style="color:{};" title="{}" aria-hidden="true"></i>"#,
-        color,
+        r#"<i class="fa fa-square fa-status-box {}" title="{}" aria-hidden="true"></i>"#,
+        swatch_cls,
         html_escape(label)
     )
 }
@@ -435,7 +438,7 @@ pub fn render_my_view_box_with_meta(
                 <h4 class="widget-title lighter">
                     <i class="fa {}" aria-hidden="true"></i>
                     <a href="{}" class="text-white hover:text-white hover:underline">{}</a>
-                    <span class="badge" style="background:rgba(0,0,0,0.22); color:#ffffff;">{}</span>
+                    <span class="badge badge-toolbar-count">{}</span>
                 </h4>
                 <div class="widget-toolbar">
                     <div class="widget-menu">
@@ -777,7 +780,11 @@ pub fn render_my_view_config_page(
                 </td>
                 <td class="text-xs text-gray-600">{desc}</td>
                 <td class="text-center">
-                    <input type="number" name="order_{key}" value="{order}" min="1" max="99" class="!w-20 text-center text-xs">
+                    <div class="inline-flex items-center gap-1 justify-center">
+                        <input type="number" name="order_{key}" value="{order}" min="1" max="99" class="!w-16 text-center text-xs" aria-label="Order for {label}">
+                        <button type="button" class="btn btn-white btn-round btn-sm" data-move-box="up" title="Move Up" aria-label="Move {label} up"><i class="fa fa-arrow-up" aria-hidden="true"></i></button>
+                        <button type="button" class="btn btn-white btn-round btn-sm" data-move-box="down" title="Move Down" aria-label="Move {label} down"><i class="fa fa-arrow-down" aria-hidden="true"></i></button>
+                    </div>
                 </td>
             </tr>"#,
             row_cls = row_cls,
@@ -808,13 +815,13 @@ pub fn render_my_view_config_page(
             <div class="widget-body">
                 <form method="POST" action="/my_view_config_update">
                     <div class="table-responsive">
-                        <table class="data-table">
+                        <table id="my-view-config-table" class="data-table">
                             <thead>
                                 <tr>
                                     <th class="w-16 text-center">Visible</th>
                                     <th>Box</th>
                                     <th>Description</th>
-                                    <th class="w-28 text-center">Order</th>
+                                    <th class="w-40 text-center">Order</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -832,7 +839,7 @@ pub fn render_my_view_config_page(
                         <button type="submit" class="btn btn-primary btn-sm">
                             <i class="fa fa-save" aria-hidden="true"></i> Save My View Layout
                         </button>
-                        <a href="/my_view_page" class="btn btn-secondary btn-sm">Cancel</a>
+                        <a href="/my_view_page" class="btn btn-white btn-round btn-sm">Cancel</a>
                     </div>
                 </form>
                 <div class="mt-4 pt-3 border-t border-gray-200">
@@ -1331,13 +1338,13 @@ fn render_buglist_data_cell(
                 ""
             };
             let sticky_badge = if b.sticky == 1 {
-                r#" <span class="badge" style="background:#e0a800; color:#fff; font-size:10px; font-weight:bold; padding:2px 4px; border-radius:3px;">[Sticky]</span>"#
+                r#" <span class="badge badge-sticky">[Sticky]</span>"#
             } else {
                 ""
             };
             let jira_badge = if let Some(jl) = jira_links.get(&b.id) {
                 format!(
-                    r#" <a href="{}" target="_blank" class="badge" style="background:#0052cc; color:#fff; font-size:10px; text-decoration:none;">Jira: {}</a>"#,
+                    r#" <a href="{}" target="_blank" class="badge badge-jira">Jira: {}</a>"#,
                     html_escape(&jl.jira_url),
                     html_escape(&jl.jira_key)
                 )
@@ -2126,7 +2133,7 @@ pub fn render_view_all_bug_page(
             });
         let delete_btn = if can_del {
             format!(
-                r#"<form method="POST" action="/filter_delete/{}" style="display:inline; margin-left:2px;"><button type="submit" class="btn btn-danger btn-sm" data-confirm="Delete filter?" title="Delete filter">Delete</button></form>"#,
+                r#"<form method="POST" action="/filter_delete/{}" class="inline-form ml-0.5"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm" data-confirm="Delete filter?" title="Delete filter">Delete</button></form>"#,
                 sf.id
             )
         } else {
@@ -2237,7 +2244,7 @@ pub fn render_view_all_bug_page(
     let active_filter_count = count_active_filters(filter, &allowed_cf_ids);
     let active_filter_badge = if active_filter_count > 0 {
         format!(
-            r#"<span class="badge" style="background:#f89406; color:#ffffff;">Active ({})</span>"#,
+            r#"<span class="badge badge-filter-active">Active ({})</span>"#,
             active_filter_count
         )
     } else {
@@ -2368,109 +2375,133 @@ pub fn render_view_all_bug_page(
                     <input type="hidden" name="dir" value="{}">
                     <input type="hidden" name="per_page" value="{}">
                     {}
-                    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3 pb-3 border-b border-gray-200">
-                        <div class="filter-cell">
-                            <span class="filter-label">Reporter</span>
-                            <select name="reporter_id" multiple size="4" class="text-xs">{}</select>
+                    <div class="mb-3 pb-3 border-b border-gray-200">
+                        <div class="filter-section-title">
+                            <i class="fa fa-users" aria-hidden="true"></i> People &amp; Status
                         </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Assigned To</span>
-                            <select name="handler_id" multiple size="4" class="text-xs">{}</select>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                            <div class="filter-cell">
+                                <span class="filter-label">Reporter</span>
+                                <select name="reporter_id" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Assigned To</span>
+                                <select name="handler_id" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Monitored By</span>
+                                <select name="monitored_by" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Note Author</span>
+                                <select name="note_user_id" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Status</span>
+                                <select name="status" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Hide Status</span>
+                                <select name="hide_status" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Resolution</span>
+                                <select name="resolution" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Match Type</span>
+                                <select name="match_type" class="text-xs" aria-label="Match Type">
+                                    <option value="0" {}>MATCH ALL (AND)</option>
+                                    <option value="1" {}>MATCH ANY (OR)</option>
+                                </select>
+                            </div>
                         </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Monitored By</span>
-                            <select name="monitored_by" multiple size="4" class="text-xs">{}</select>
+                    </div>
+                    <div class="mb-3 pb-3 border-b border-gray-200">
+                        <div class="filter-section-title">
+                            <i class="fa fa-tags" aria-hidden="true"></i> Classification &amp; Versions
                         </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Note Author</span>
-                            <select name="note_user_id" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Category</span>
-                            <select name="category_id" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Severity</span>
-                            <select name="severity" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Priority</span>
-                            <select name="priority" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Status</span>
-                            <select name="status" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Hide Status</span>
-                            <select name="hide_status" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Resolution</span>
-                            <select name="resolution" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Reproducibility</span>
-                            <select name="reproducibility" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Tag</span>
-                            <select name="tag_id" multiple size="4" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Product Version</span>
-                            <select name="version" multiple size="3" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Target Version</span>
-                            <select name="target_version" multiple size="3" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Fixed in Version</span>
-                            <select name="fixed_in_version" multiple size="3" class="text-xs">{}</select>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">View Status / Sticky</span>
-                            <div class="flex flex-col gap-1">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                            <div class="filter-cell">
+                                <span class="filter-label">Category</span>
+                                <select name="category_id" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Severity</span>
+                                <select name="severity" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Priority</span>
+                                <select name="priority" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Reproducibility</span>
+                                <select name="reproducibility" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">View Status</span>
                                 <select name="view_state" class="text-xs" aria-label="View Status">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Sticky</span>
                                 <select name="sticky" class="text-xs" aria-label="Sticky">{}</select>
                             </div>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Date Submitted (From / To)</span>
-                            <div class="flex flex-col gap-1">
-                                <input type="date" name="date_submitted_from" value="{}" class="text-xs" aria-label="Date submitted from">
-                                <input type="date" name="date_submitted_to" value="{}" class="text-xs" aria-label="Date submitted to">
+                            <div class="filter-cell">
+                                <span class="filter-label">Version</span>
+                                <select name="version" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Target Version</span>
+                                <select name="target_version" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Fixed in Version</span>
+                                <select name="fixed_in_version" multiple size="4" class="text-xs">{}</select>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Tag</span>
+                                <select name="tag_id" multiple size="4" class="text-xs">{}</select>
                             </div>
                         </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Last Updated (From / To)</span>
-                            <div class="flex flex-col gap-1">
-                                <input type="date" name="last_updated_from" value="{}" class="text-xs" aria-label="Last updated from">
-                                <input type="date" name="last_updated_to" value="{}" class="text-xs" aria-label="Last updated to">
-                            </div>
-                        </div>
-                        <div class="filter-cell">
-                            <span class="filter-label">Relationship</span>
-                            <div class="flex flex-col gap-1">
-                                <select name="relationship_type" class="text-xs" aria-label="Relationship type">{}</select>
-                                <input type="number" min="1" name="relationship_bug_id" value="{}" placeholder="Target Issue ID" class="text-xs">
-                            </div>
-                        </div>
-                        {}
                     </div>
-                    <div class="flex flex-wrap gap-2 items-center">
-                        <label class="inline-flex items-center gap-1.5 font-semibold text-xs text-gray-700">Match Type:
-                            <select name="match_type" class="!w-auto text-xs">
-                                <option value="0" {}>All Criteria (AND)</option>
-                                <option value="1" {}>Any Criterion (OR)</option>
-                            </select>
-                        </label>
-                        <label class="inline-flex items-center gap-1.5 font-semibold text-xs text-gray-700">Search:
-                            <input type="text" name="q" value="{}" placeholder="Search summary, description, id..." class="!w-60">
-                        </label>
-                        <button type="submit" class="btn btn-primary btn-sm">Apply Filter</button>
-                        <a class="btn btn-white btn-round btn-sm" href="/view_all_bug_page">Reset Filter</a>
+                    <div class="mb-3 pb-3 border-b border-gray-200">
+                        <div class="filter-section-title">
+                            <i class="fa fa-calendar" aria-hidden="true"></i> Dates, Relationships &amp; Custom Fields
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                            <div class="filter-cell">
+                                <span class="filter-label">Date Submitted (From / To)</span>
+                                <div class="flex flex-col gap-1">
+                                    <input type="date" name="date_submitted_from" value="{}" class="text-xs" aria-label="Date submitted from">
+                                    <input type="date" name="date_submitted_to" value="{}" class="text-xs" aria-label="Date submitted to">
+                                </div>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Last Updated (From / To)</span>
+                                <div class="flex flex-col gap-1">
+                                    <input type="date" name="last_updated_from" value="{}" class="text-xs" aria-label="Last updated from">
+                                    <input type="date" name="last_updated_to" value="{}" class="text-xs" aria-label="Last updated to">
+                                </div>
+                            </div>
+                            <div class="filter-cell">
+                                <span class="filter-label">Relationship</span>
+                                <div class="flex flex-col gap-1">
+                                    <select name="relationship_type" class="text-xs" aria-label="Relationship type">{}</select>
+                                    <input type="number" min="1" name="relationship_bug_id" value="{}" placeholder="Target Issue #" class="text-xs">
+                                </div>
+                            </div>
+                            {}
+                        </div>
+                    </div>
+                    <div class="flex flex-wrap gap-2 items-center justify-between">
+                        <div class="flex flex-wrap gap-2 items-center">
+                            <label class="inline-flex items-center gap-1.5 font-semibold text-xs text-gray-700">Search:
+                                <input type="text" name="q" value="{}" placeholder="Search summary, description, id..." class="!w-56 sm:!w-64">
+                            </label>
+                            <button type="submit" class="btn btn-primary btn-sm">Apply Filter</button>
+                            <a class="btn btn-white btn-round btn-sm" href="/view_all_bug_page">Reset Filter</a>
+                        </div>
+                        <span class="text-[11px] text-gray-500"><i class="fa fa-info-circle" aria-hidden="true"></i> Ctrl/Cmd+Click for multiple</span>
                     </div>
                 </form>
                 <div class="mt-3 pt-2 border-t border-gray-200">
@@ -2486,7 +2517,7 @@ pub fn render_view_all_bug_page(
                 <h4 class="widget-title lighter">
                     <i class="fa fa-columns" aria-hidden="true"></i>
                     Viewing Issues ({})
-                    <span class="badge" style="background:rgba(0,0,0,0.22); color:#ffffff;">{}</span>
+                    <span class="badge badge-toolbar-count">{}</span>
                 </h4>
                 <div class="widget-toolbar flex-wrap">
                     <a class="btn btn-white btn-round btn-sm" href="/account_manage_columns_page"><i class="fa fa-columns" aria-hidden="true"></i> Columns</a>
@@ -2545,15 +2576,15 @@ pub fn render_view_all_bug_page(
                                 <option value="ADD_NOTE">Add Note</option>
                                 <option value="ATTACH_TAGS">Attach Tags</option>
                             </select>
-                            <div class="bulk-input-group" data-actions="MOVE,COPY" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="MOVE,COPY">
                                 <span class="text-xs">Project:</span>
                                 <select name="target_project_id" class="!w-auto">{}</select>
                             </div>
-                            <div class="bulk-input-group" data-actions="ASSIGN" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="ASSIGN">
                                 <span class="text-xs">Assign To:</span>
                                 <select name="handler_id" class="!w-auto">{}</select>
                             </div>
-                            <div class="bulk-input-group" data-actions="UP_STATUS" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="UP_STATUS">
                                 <span class="text-xs">Status:</span>
                                 <select name="status" class="!w-auto">
                                     <option value="10">new</option>
@@ -2565,7 +2596,7 @@ pub fn render_view_all_bug_page(
                                     <option value="90">closed</option>
                                 </select>
                             </div>
-                            <div class="bulk-input-group" data-actions="RESOLVE,UP_STATUS" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="RESOLVE,UP_STATUS">
                                 <span class="text-xs">Resolution:</span>
                                 <select name="resolution" class="!w-auto">
                                     <option value="20" selected>fixed</option>
@@ -2579,7 +2610,7 @@ pub fn render_view_all_bug_page(
                                     <option value="90">won't fix</option>
                                 </select>
                             </div>
-                            <div class="bulk-input-group" data-actions="UP_PRIOR" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="UP_PRIOR">
                                 <span class="text-xs">Priority:</span>
                                 <select name="priority" class="!w-auto">
                                     <option value="10">none</option>
@@ -2590,7 +2621,7 @@ pub fn render_view_all_bug_page(
                                     <option value="60">immediate</option>
                                 </select>
                             </div>
-                            <div class="bulk-input-group" data-actions="UP_SEV" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="UP_SEV">
                                 <span class="text-xs">Severity:</span>
                                 <select name="severity" class="!w-auto">
                                     <option value="10">feature</option>
@@ -2603,33 +2634,33 @@ pub fn render_view_all_bug_page(
                                     <option value="80">block</option>
                                 </select>
                             </div>
-                            <div class="bulk-input-group" data-actions="UP_CATEGORY" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="UP_CATEGORY">
                                 <span class="text-xs">Category:</span>
                                 <select name="category_id" class="!w-auto">{}</select>
                             </div>
-                            <div class="bulk-input-group" data-actions="UP_TARGET_VERSION" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="UP_TARGET_VERSION">
                                 <span class="text-xs">Target Version:</span>
                                 <input type="text" name="target_version" placeholder="Version string" class="!w-[140px]">
                             </div>
-                            <div class="bulk-input-group" data-actions="UP_DUE_DATE" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="UP_DUE_DATE">
                                 <span class="text-xs">Due Date:</span>
                                 <input type="date" name="due_date" class="!w-[140px]">
                             </div>
-                            <div class="bulk-input-group" data-actions="VIEW_STATUS" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="VIEW_STATUS">
                                 <span class="text-xs">View Status:</span>
                                 <select name="view_state" class="!w-auto">
                                     <option value="10">public</option>
                                     <option value="50">private</option>
                                 </select>
                             </div>
-                            <div class="bulk-input-group" data-actions="SET_STICKY" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="SET_STICKY">
                                 <span class="text-xs">Sticky:</span>
                                 <select name="sticky" class="!w-auto">
                                     <option value="0">no</option>
                                     <option value="1">yes</option>
                                 </select>
                             </div>
-                            <div class="bulk-input-group" data-actions="ADD_NOTE" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="ADD_NOTE">
                                 <span class="text-xs">Note:</span>
                                 <input type="text" name="bugnote_text" placeholder="Enter note text..." class="!w-[200px]">
                                 <select name="note_view_state" class="!w-auto">
@@ -2637,7 +2668,7 @@ pub fn render_view_all_bug_page(
                                     <option value="50">private</option>
                                 </select>
                             </div>
-                            <div class="bulk-input-group" data-actions="ATTACH_TAGS" style="display:none; align-items:center; gap:6px;">
+                            <div class="bulk-input-group hidden items-center gap-1.5" data-actions="ATTACH_TAGS">
                                 <span class="text-xs">Tags:</span>
                                 <input type="text" name="tag_string" placeholder="Comma-separated tags" class="!w-[180px]">
                             </div>
@@ -2664,19 +2695,21 @@ pub fn render_view_all_bug_page(
         handler_opts,
         monitored_opts,
         note_user_opts,
-        cat_opts,
-        severity_opts,
-        priority_opts,
         status_opts,
         hide_status_opts,
         resolution_opts,
+        match_all_sel,
+        match_any_sel,
+        cat_opts,
+        severity_opts,
+        priority_opts,
         repro_opts,
-        tag_opts,
+        view_state_opts,
+        sticky_opts,
         version_opts,
         target_version_opts,
         fixed_version_opts,
-        view_state_opts,
-        sticky_opts,
+        tag_opts,
         html_escape(filter.date_submitted_from.as_deref().unwrap_or("")),
         html_escape(filter.date_submitted_to.as_deref().unwrap_or("")),
         html_escape(filter.last_updated_from.as_deref().unwrap_or("")),
@@ -2687,8 +2720,6 @@ pub fn render_view_all_bug_page(
             .map(|id| id.to_string())
             .unwrap_or_default(),
         custom_field_cells,
-        match_all_sel,
-        match_any_sel,
         html_escape(search_val),
         saved_filters_section,
         save_filter_form,
@@ -3102,7 +3133,7 @@ pub fn render_status_change_form(
             );
             let req_star = if is_req { " *" } else { "" };
             cf_inputs.push_str(&format!(
-                r#"<label style="margin:0; font-size:12px; font-weight:bold; color:#555;">{}{}: {}</label>"#,
+                r#"<label class="m-0 text-xs font-bold text-[#555]">{}{}: {}</label>"#,
                 html_escape(&cf.name),
                 req_star,
                 input_html
@@ -3111,10 +3142,10 @@ pub fn render_status_change_form(
     }
 
     format!(
-        r#"<form method="POST" action="/bug_change_status/{}" style="display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap;">
-            <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Status: <select name="new_status" title="Status" style="width:auto; font-weight:normal;">{}</select></label>
-            <label style="margin:0; font-size:12px; font-weight:bold; color:#555;">Resolution: <select name="resolution" title="Resolution" style="width:auto; font-weight:normal;">{}</select></label>
-            <input type="text" name="note" placeholder="Optional status note" style="width:150px;">
+        r#"<form method="POST" action="/bug_change_status/{}" class="inline-flex gap-1.5 items-center flex-wrap">
+            <label class="m-0 text-xs font-bold text-[#555]">Status: <select name="new_status" title="Status" class="!w-auto font-normal">{}</select></label>
+            <label class="m-0 text-xs font-bold text-[#555]">Resolution: <select name="resolution" title="Resolution" class="!w-auto font-normal">{}</select></label>
+            <input type="text" name="note" placeholder="Optional status note" class="!w-[150px]">
             {}
             <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-exchange" aria-hidden="true"></i> Change Status</button>
         </form>"#,
@@ -3137,9 +3168,9 @@ pub fn render_dropzone_html(id_suffix: &str, prompt: &str) -> String {
 pub fn render_upload_form_html(bug_id: i64) -> String {
     let dropzone = render_dropzone_html("view", "Drag and drop files here to attach, or");
     format!(
-        r#"<form method="POST" action="/bug_file_add/{}" enctype="multipart/form-data" style="margin-top:10px;">
+        r#"<form method="POST" action="/bug_file_add/{}" enctype="multipart/form-data" class="mt-2.5">
             {}
-            <div style="margin-top:8px;">
+            <div class="mt-2">
                 <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-upload" aria-hidden="true"></i> Upload Files</button>
             </div>
         </form>"#,
@@ -3163,7 +3194,7 @@ pub fn render_monitors_html(monitors: &[User], bug_id: i64) -> String {
             html_escape(&m.username)
         };
         let remove_btn = format!(
-            r#"<form method="POST" action="/bug_monitor_delete/{}" style="display:inline;">
+            r#"<form method="POST" action="/bug_monitor_delete/{}" class="inline-form">
                 <input type="hidden" name="user_id" value="{}">
                 <button type="submit" class="btn btn-danger btn-white btn-round btn-sm" title="Remove monitor" aria-label="Remove {}"><i class="fa fa-times" aria-hidden="true"></i></button>
             </form>"#,
@@ -3182,8 +3213,8 @@ pub fn render_monitors_html(monitors: &[User], bug_id: i64) -> String {
 
 pub fn render_monitor_form_html(bug_id: i64) -> String {
     format!(
-        r#"<form method="POST" action="/bug_monitor_add/{}" style="margin-top:10px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <input type="text" name="username" placeholder="Username" style="max-width:200px;" required>
+        r#"<form method="POST" action="/bug_monitor_add/{}" class="mt-2.5 flex gap-2 items-center flex-wrap">
+            <input type="text" name="username" placeholder="Username" class="!max-w-[200px]" required>
             <button type="submit" class="btn btn-white btn-round btn-sm"><i class="fa fa-user-plus" aria-hidden="true"></i> Add Monitor</button>
         </form>"#,
         bug_id
@@ -3198,9 +3229,9 @@ pub fn render_file_preview_html(
 ) -> String {
     if is_safe_image {
         format!(
-            r#"<div style="margin-top:6px;">
+            r#"<div class="mt-1.5">
                 <a href="/file/bug/{}/{}">
-                    <img src="/file/bug/{}/{}?inline=1" alt="{}" style="max-width:150px; max-height:150px; object-fit:contain; border:1px solid #ddd; border-radius:4px; display:block;">
+                    <img src="/file/bug/{}/{}?inline=1" alt="{}" class="file-preview-img">
                 </a>
             </div>"#,
             file_id,
@@ -3211,9 +3242,9 @@ pub fn render_file_preview_html(
         )
     } else if let Some(text) = text_content {
         format!(
-            r#"<details style="margin-top:6px;">
-                <summary style="cursor:pointer; color:#0052cc; font-size:12px;">Preview</summary>
-                <pre style="background:#f8f9fa; border:1px solid #e9ecef; border-radius:4px; padding:8px; margin-top:4px; max-height:200px; overflow:auto; font-size:12px; font-family:monospace; white-space:pre-wrap; word-break:break-all;">{}</pre>
+            r#"<details class="mt-1.5">
+                <summary class="cursor-pointer text-[#0052cc] text-xs">Preview</summary>
+                <pre class="file-preview-pre">{}</pre>
             </details>"#,
             html_escape(text)
         )
@@ -3224,7 +3255,7 @@ pub fn render_file_preview_html(
 
 pub fn render_reminder_badge(note_type: i32) -> &'static str {
     if note_type == 1 {
-        r#" <span class="badge" style="background:#17a2b8; color:#fff; font-size:10px; font-weight:bold; padding:2px 5px; border-radius:3px;">Reminder</span>"#
+        r#" <span class="badge badge-reminder">Reminder</span>"#
     } else {
         ""
     }
@@ -3232,14 +3263,12 @@ pub fn render_reminder_badge(note_type: i32) -> &'static str {
 
 fn priority_icon_html(priority: i32) -> &'static str {
     match priority {
-        60 => {
-            r#"<i class="fa fa-exclamation-circle" style="color:#d15b47;" aria-hidden="true"></i> "#
-        }
-        50 => r#"<i class="fa fa-arrow-up" style="color:#d15b47;" aria-hidden="true"></i> "#,
-        40 => r#"<i class="fa fa-chevron-up" style="color:#e67e22;" aria-hidden="true"></i> "#,
-        30 => r#"<i class="fa fa-minus" style="color:#555555;" aria-hidden="true"></i> "#,
-        20 => r#"<i class="fa fa-chevron-down" style="color:#3a87ad;" aria-hidden="true"></i> "#,
-        10 => r#"<i class="fa fa-circle-o" style="color:#888888;" aria-hidden="true"></i> "#,
+        60 => r#"<i class="fa fa-exclamation-circle prio-immediate" aria-hidden="true"></i> "#,
+        50 => r#"<i class="fa fa-arrow-up prio-urgent" aria-hidden="true"></i> "#,
+        40 => r#"<i class="fa fa-chevron-up prio-high" aria-hidden="true"></i> "#,
+        30 => r#"<i class="fa fa-minus prio-normal" aria-hidden="true"></i> "#,
+        20 => r#"<i class="fa fa-chevron-down prio-low" aria-hidden="true"></i> "#,
+        10 => r#"<i class="fa fa-circle-o prio-none" aria-hidden="true"></i> "#,
         _ => "",
     }
 }
@@ -3252,7 +3281,7 @@ fn render_formatted_block(
         crate::views::formatting::format_text(raw, format_ctx)
     } else {
         format!(
-            r#"<div style="white-space:pre-wrap;">{}</div>"#,
+            r#"<div class="whitespace-pre-wrap">{}</div>"#,
             html_escape(raw)
         )
     }
@@ -4030,7 +4059,7 @@ pub fn render_update_bug_page(
                         </div>
                     </div>
                     <div class="widget-toolbox toolbox-split">
-                        <div style="display:flex; gap:8px; align-items:center;">
+                        <div class="flex gap-2 items-center">
                             <button type="submit" class="btn btn-primary btn-white btn-round"><i class="fa fa-check" aria-hidden="true"></i> Update Information</button>
                             <a href="/view_bug_page/{}" class="btn btn-white btn-round">Back To Issue</a>
                         </div>
@@ -4429,12 +4458,12 @@ pub fn render_bugnote_edit_page(
                             <table class="form-table form-table-left">
                                 <tr>
                                     <th class="category"><span class="required">*</span> <label for="note">Bugnote</label></th>
-                                    <td class="input-col"><textarea id="note" name="note" rows="8" style="width:100%;" required>{}</textarea></td>
+                                    <td class="input-col"><textarea id="note" name="note" rows="8" class="w-full" required>{}</textarea></td>
                                 </tr>
                             </table>
                         </div>
                     </div>
-                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                    <div class="widget-toolbox flex gap-2 items-center">
                         <button type="submit" class="btn btn-primary btn-white btn-round"><i class="fa fa-check" aria-hidden="true"></i> Update Information</button>
                         <a href="/view_bug_page/{}" class="btn btn-white btn-round">Cancel</a>
                     </div>
@@ -4503,16 +4532,16 @@ pub fn render_bug_reminder_page(
                                 <tr>
                                     <th class="category"><span class="required">*</span> <label for="to">Recipient(s)</label></th>
                                     <td class="input-col">
-                                        <select id="to" name="to" multiple size="8" style="min-width:280px; width:100%;" required>
+                                        <select id="to" name="to" multiple size="8" class="min-w-[280px] w-full" required>
                                             {}
                                         </select>
-                                        <span style="font-size:11px; color:#666; display:block; margin-top:4px;">Hold Ctrl/Cmd to select multiple recipients.</span>
+                                        <span class="text-[11px] text-[#666] block mt-1">Hold Ctrl/Cmd to select multiple recipients.</span>
                                     </td>
                                 </tr>
                                 <tr>
                                     <th class="category"><span class="required">*</span> <label for="body">Reminder Message</label></th>
                                     <td class="input-col">
-                                        <textarea id="body" name="body" rows="6" style="width:100%;" required placeholder="Enter reminder message here..."></textarea>
+                                        <textarea id="body" name="body" rows="6" class="w-full" required placeholder="Enter reminder message here..."></textarea>
                                     </td>
                                 </tr>
                                 <tr>
@@ -4528,7 +4557,7 @@ pub fn render_bug_reminder_page(
                                 <tr>
                                     <th class="category"><label for="view_state">View Status</label></th>
                                     <td class="input-col">
-                                        <select id="view_state" name="view_state" style="width:auto;">
+                                        <select id="view_state" name="view_state" class="!w-auto">
                                             <option value="10" selected>public</option>
                                             <option value="50">private</option>
                                         </select>
@@ -4547,7 +4576,7 @@ pub fn render_bug_reminder_page(
                             </table>
                         </div>
                     </div>
-                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                    <div class="widget-toolbox flex gap-2 items-center">
                         <button type="submit" class="btn btn-primary btn-white btn-round"><i class="fa fa-bell" aria-hidden="true"></i> Send Reminder</button>
                         <a href="/view_bug_page/{}" class="btn btn-white btn-round">Cancel</a>
                     </div>
@@ -4613,7 +4642,7 @@ pub fn render_bug_revision_view_page(
 
             let drop_btn = if can_drop {
                 format!(
-                    r#"<td style="width:140px;"><form method="POST" action="/bug_revision_drop/{}" style="display:inline;" data-confirm="Are you sure you want to drop this revision?"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Drop Revision</button></form></td>"#,
+                    r#"<td class="w-[140px]"><form method="POST" action="/bug_revision_drop/{}" class="inline-form" data-confirm="Are you sure you want to drop this revision?"><button type="submit" class="btn btn-danger btn-white btn-round btn-sm"><i class="fa fa-trash-o" aria-hidden="true"></i> Drop Revision</button></form></td>"#,
                     r.id
                 )
             } else {
@@ -4622,10 +4651,10 @@ pub fn render_bug_revision_view_page(
 
             table.push_str(&format!(
                 r#"<tr>
-                    <td style="width:160px; white-space:nowrap;">{}</td>
-                    <td style="width:140px;">{}</td>
-                    <td style="width:160px;"><span class="badge badge-info">{}</span></td>
-                    <td style="white-space:pre-wrap; word-break:break-word;">{}</td>
+                    <td class="w-[160px] whitespace-nowrap">{}</td>
+                    <td class="w-[140px]">{}</td>
+                    <td class="w-[160px]"><span class="badge badge-info">{}</span></td>
+                    <td class="whitespace-pre-wrap break-words">{}</td>
                     {}
                 </tr>"#,
                 format_timestamp(r.timestamp),
@@ -4664,7 +4693,7 @@ pub fn render_bug_revision_view_page(
 
 pub fn render_conflict_page(ctx: &AuthContext, bug_id: i64, message: &str) -> Html<String> {
     let content = format!(
-        r#"<div class="flash-error" style="margin-bottom:16px;"><strong>Conflict:</strong> {}</div>
+        r#"<div class="flash-error mb-4"><strong>Conflict:</strong> {}</div>
         <div class="widget-box widget-color-blue2">
             <div class="widget-header widget-header-small">
                 <h4 class="widget-title lighter">
@@ -4675,7 +4704,7 @@ pub fn render_conflict_page(ctx: &AuthContext, bug_id: i64, message: &str) -> Ht
             <div class="widget-body">
                 <p>This issue has been modified by another user or session since you loaded the update page. Please reload the issue to review the latest changes and re-apply your updates.</p>
             </div>
-            <div class="widget-toolbox" style="display:flex; gap:8px; flex-wrap:wrap;">
+            <div class="widget-toolbox flex gap-2 flex-wrap">
                 <a href="/view_bug_page/{}" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-refresh" aria-hidden="true"></i> Reload Issue Details</a>
                 <a href="/update_bug_page/{}" class="btn btn-white btn-round btn-sm"><i class="fa fa-pencil" aria-hidden="true"></i> Return to Edit Page</a>
             </div>
@@ -4742,7 +4771,7 @@ pub fn render_bug_clone_page(
                                 <tr>
                                     <th class="category"><span class="required">*</span> <label for="target_project_id">Target Project</label></th>
                                     <td class="input-col">
-                                        <select id="target_project_id" name="target_project_id" style="max-width:320px;" required>
+                                        <select id="target_project_id" name="target_project_id" class="!max-w-[320px]" required>
                                             {}
                                         </select>
                                     </td>
@@ -4758,7 +4787,7 @@ pub fn render_bug_clone_page(
                                 <tr>
                                     <th class="category">Copy Options</th>
                                     <td class="input-col">
-                                        <div style="display:flex; flex-direction:column; gap:6px;">
+                                        <div class="flex flex-col gap-1.5">
                                             <label class="inline-label">
                                                 <input type="checkbox" name="copy_relationships" value="1" checked> Copy Relationships
                                             </label>
@@ -4771,7 +4800,7 @@ pub fn render_bug_clone_page(
                             </table>
                         </div>
                     </div>
-                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                    <div class="widget-toolbox flex gap-2 items-center">
                         <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-clone" aria-hidden="true"></i> Clone Issue</button>
                         <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}">Cancel</a>
                     </div>
@@ -4847,10 +4876,10 @@ pub fn render_bug_move_page(
                                 <tr>
                                     <th class="category"><span class="required">*</span> <label for="target_project_id">Target Project</label></th>
                                     <td class="input-col">
-                                        <select id="target_project_id" name="target_project_id" style="max-width:320px;" required>
+                                        <select id="target_project_id" name="target_project_id" class="!max-w-[320px]" required>
                                             {}
                                         </select>
-                                        <div style="margin-top:6px; color:#666; font-size:12px;">
+                                        <div class="mt-1.5 text-[#666] text-xs">
                                             If the issue's current category is not available in the target project, it will be automatically reset to the target project's default category.
                                         </div>
                                     </td>
@@ -4862,7 +4891,7 @@ pub fn render_bug_move_page(
                             </table>
                         </div>
                     </div>
-                    <div class="widget-toolbox" style="display:flex; gap:8px; align-items:center;">
+                    <div class="widget-toolbox flex gap-2 items-center">
                         <button type="submit" class="btn btn-primary btn-white btn-round btn-sm"><i class="fa fa-arrows" aria-hidden="true"></i> Move Issue</button>
                         <a class="btn btn-white btn-round btn-sm" href="/view_bug_page/{}">Cancel</a>
                     </div>
@@ -5221,13 +5250,9 @@ pub fn render_word_export_doc(
                 )
             };
 
-            let page_break = if idx > 0 {
-                r#" style="page-break-before: always;""#
-            } else {
-                ""
-            };
+            let page_break = if idx > 0 { r#" print-page-break"# } else { "" };
             blocks.push_str(&format!(
-                r#"<div class="issue-block"{page_break}>
+                r#"<div class="issue-block{page_break}">
 <h2>#{bug_id:07}: {summary}</h2>
 <table class="meta-table">
 <tr><th class="lbl">Project</th><td>{project}</td><th class="lbl">Category</th><td>{category}</td></tr>

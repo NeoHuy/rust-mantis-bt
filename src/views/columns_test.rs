@@ -62,6 +62,13 @@ fn test_render_manage_columns_page_contexts_and_no_nested_forms() {
     );
 
     assert!(html.contains("Manage Columns"));
+    assert!(html.contains(r#"class="sub-nav-tabs""#));
+    assert!(html.contains(r#"href="/account_page""#));
+    assert!(html.contains(r#"href="/account_manage_columns_page" class="active""#));
+    assert!(html.contains(r#"data-append-col="summary""#));
+    assert!(html.contains(r#"data-append-col="custom_field_7""#));
+    assert!(html.contains(r#"data-reset-cols-target="view_issues_columns""#));
+    assert!(html.contains(r#"data-default-cols=""#));
     assert!(html.contains(r#"name="view_issues_columns""#));
     assert!(html.contains(r#"name="print_issues_columns""#));
     assert!(html.contains(r#"name="csv_columns""#));
@@ -70,6 +77,8 @@ fn test_render_manage_columns_page_contexts_and_no_nested_forms() {
     assert!(html.contains("Environment"));
     assert!(html.contains(r#"action="/account_manage_columns_update""#));
     assert!(html.contains(r#"action="/account_manage_columns_reset""#));
+    assert!(!html.contains("<script>"));
+    assert!(!html.contains("onclick="));
     assert_no_nested_forms(&html);
 }
 

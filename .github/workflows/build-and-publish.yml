@@ -6,18 +6,25 @@ name: Build and Publish Container Image
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - '.gitignore'
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Release git tag (e.g. v1.4.0)'
+        required: false
+        type: string
+        default: ''
+      commit_sha:
+        description: 'Commit SHA to checkout and build'
+        required: false
+        type: string
+        default: ''
+      is_prerelease:
+        description: 'Whether the release is a prerelease'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,9 +34,17 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: ${{ github.workflow }}-test-${{ inputs.commit_sha || github.ref }}
+      cancel-in-progress: ${{ inputs.release_tag == '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+          persist-credentials: false
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -56,15 +71,66 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run Tests
-        run: cargo test --verbose
+        run: cargo test --locked --verbose
 
   build-and-publish:
     name: Build & Push Docker Image
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: ${{ github.workflow }}-docker-${{ inputs.commit_sha || github.ref }}
+      cancel-in-progress: ${{ inputs.release_tag == '' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Resolve release context
+        id: release_ctx
+        env:
+          INPUT_TAG: ${{ inputs.release_tag }}
+          INPUT_PRERELEASE: ${{ inputs.is_prerelease }}
+          TARGET_SHA: ${{ inputs.commit_sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          release_tag="$INPUT_TAG"
+          is_prerelease="$INPUT_PRERELEASE"
+          if [ -z "$release_tag" ] && [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            release_tag="$REF_NAME"
+            if [[ "$release_tag" == *-* ]]; then
+              is_prerelease="true"
+            else
+              is_prerelease="false"
+            fi
+          fi
+
+          semver_tag=""
+          if [ -n "$release_tag" ] && [[ "$release_tag" != *,* ]]; then
+            semver_tag="$release_tag"
+          fi
+
+          push_latest="false"
+          if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "$is_prerelease" != "true" ]; then
+            push_latest="true"
+          fi
+
+          short_sha="${TARGET_SHA:0:7}"
+          long_sha="$TARGET_SHA"
+
+          {
+            echo "semver_tag=$semver_tag"
+            echo "is_prerelease=$is_prerelease"
+            echo "push_latest=$push_latest"
+            echo "short_sha=$short_sha"
+            echo "long_sha=$long_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set lower case repository name for GHCR
         run: |
@@ -88,11 +154,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ env.IMAGE_REPOSITORY }}
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,format=short,prefix=
-            type=sha,format=long,prefix=
-            type=ref,event=tag
+            type=raw,value=latest,enable=${{ steps.release_ctx.outputs.push_latest == 'true' }}
+            type=raw,value=${{ steps.release_ctx.outputs.short_sha }},enable=${{ steps.release_ctx.outputs.short_sha != '' }}
+            type=raw,value=${{ steps.release_ctx.outputs.long_sha }},enable=${{ steps.release_ctx.outputs.long_sha != '' }}
+            type=semver,pattern=v{{version}},value=${{ steps.release_ctx.outputs.semver_tag }},enable=${{ steps.release_ctx.outputs.semver_tag != '' }}
+            type=semver,pattern={{version}},value=${{ steps.release_ctx.outputs.semver_tag }},enable=${{ steps.release_ctx.outputs.semver_tag != '' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.release_ctx.outputs.semver_tag }},enable=${{ steps.release_ctx.outputs.semver_tag != '' && steps.release_ctx.outputs.is_prerelease != 'true' }}
+            type=ref,event=tag,enable=${{ inputs.release_tag == '' }}
 
       - name: Build and push multi-arch Docker image (ARM64 & AMD64)
         uses: docker/build-push-action@v5

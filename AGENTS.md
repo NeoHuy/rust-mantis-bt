@@ -66,6 +66,11 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test
   ```
+- **Automated Release Flow:**
+  - When preparing a release PR (`develop` → `main`), bump `[package].version` in `Cargo.toml` (strict SemVer 2.0.0 `X.Y.Z` or `X.Y.Z-prerelease`, without `+build` metadata) and update `Cargo.lock`.
+  - `.github/workflows/release.yml` owns all Docker image builds on `main` pushes (while `.github/workflows/rust.yml` runs CI checks and `.github/workflows/build-and-publish.yml` handles `workflow_call` plus manual `v*` tag pushes).
+  - Release pipeline uses a draft-release → test/publish-image (`cargo test --locked` + multi-arch GHCR `vX.Y.Z`, `X.Y.Z`, `X.Y`, and `:latest` for non-prereleases) → publish-release lifecycle.
+  - Stable versions compare only against existing stable tags (so a hotfix like `1.4.1` is not blocked by `v2.0.0-rc.1`); versions `<=` the highest matching tag are skipped (with a warning when lower) rather than failing, and prerelease code never updates `:latest`.
 - **PR Content Structure:**
   - **Summary:** Concise explanation of the problem solved.
   - **Key Changes:** Grouped by architectural layer (Model, View, Controller, DB, Integration).

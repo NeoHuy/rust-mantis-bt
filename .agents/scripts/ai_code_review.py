@@ -464,13 +464,13 @@ def _read_text_preview_and_hash(
     return text, hasher.hexdigest()
 
 
-def collect_git_changes(
+def collect_git_snapshot(
     git_root: Path, ignore_patterns: list[str], baseline_head: str = ""
-) -> tuple[str, str, str]:
-    """Collect (summary, diff_bundle, diff_hash) for non-ignored git changes."""
+) -> tuple[str, str, str, str, str]:
+    """Collect (summary, diff_bundle, diff_hash, current_head, dirty_hash) from one snapshot."""
     status_res = run_git(git_root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])
     if not status_res or status_res.returncode != 0:
-        return "", "", ""
+        return "", "", "", "", ""
 
     tracked, untracked = _parse_porcelain_z(status_res.stdout)
     kept_tracked = [p for p in tracked if not is_ignored(p, ignore_patterns)]
@@ -490,9 +490,10 @@ def collect_git_changes(
             ]
 
     if not kept_tracked and not kept_untracked and not kept_committed:
-        return "", "", ""
+        return "", "", "", current_head, ""
 
     parts: list[str] = []
+    dirty_parts: list[str] = []
     summary_lines: list[str] = []
     untracked_hashes: dict[str, str] = {}
 
@@ -522,11 +523,15 @@ def collect_git_changes(
 
         staged_res = run_git(git_root, ["diff", "--staged", "--", *kept_tracked])
         if staged_res and staged_res.returncode == 0 and staged_res.stdout.strip():
-            parts.append("### Staged Changes\n```diff\n" + staged_res.stdout.strip() + "\n```")
+            block = "### Staged Changes\n```diff\n" + staged_res.stdout.strip() + "\n```"
+            parts.append(block)
+            dirty_parts.append(block)
 
         unstaged_res = run_git(git_root, ["diff", "--", *kept_tracked])
         if unstaged_res and unstaged_res.returncode == 0 and unstaged_res.stdout.strip():
-            parts.append("### Unstaged Changes\n```diff\n" + unstaged_res.stdout.strip() + "\n```")
+            block = "### Unstaged Changes\n```diff\n" + unstaged_res.stdout.strip() + "\n```"
+            parts.append(block)
+            dirty_parts.append(block)
 
     if kept_untracked:
         summary_lines.append("Untracked files:\n" + "\n".join(f"  + {p}" for p in kept_untracked))
@@ -535,11 +540,28 @@ def collect_git_changes(
             if target.is_file():
                 preview, file_hash = _read_text_preview_and_hash(target, git_root)
                 untracked_hashes[rel] = file_hash
-                parts.append(f"### New File: {rel}\n```\n{preview}\n```")
+                block = f"### New File: {rel}\n```\n{preview}\n```"
+                parts.append(block)
+                dirty_parts.append(block)
 
     bundle = "\n\n".join(parts).strip()
     if not bundle:
-        return "", "", ""
+        return "", "", "", current_head, ""
+
+    dirty_bundle = "\n\n".join(dirty_parts).strip()
+    dirty_hash = ""
+    if dirty_bundle:
+        dirty_input = json.dumps(
+            {
+                "committed_head": "",
+                "committed": [],
+                "tracked": sorted(kept_tracked),
+                "untracked": untracked_hashes,
+                "bundle": dirty_bundle,
+            },
+            sort_keys=True,
+        )
+        dirty_hash = hashlib.sha256(dirty_input.encode("utf-8")).hexdigest()
 
     summary = "\n".join(summary_lines).strip()
     hash_input = json.dumps(
@@ -553,6 +575,16 @@ def collect_git_changes(
         sort_keys=True,
     )
     diff_hash = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()
+    return summary, bundle, diff_hash, current_head, dirty_hash
+
+
+def collect_git_changes(
+    git_root: Path, ignore_patterns: list[str], baseline_head: str = ""
+) -> tuple[str, str, str]:
+    """Collect (summary, diff_bundle, diff_hash) for non-ignored git changes."""
+    summary, bundle, diff_hash, _, _ = collect_git_snapshot(
+        git_root, ignore_patterns, baseline_head=baseline_head
+    )
     return summary, bundle, diff_hash
 
 
@@ -991,27 +1023,19 @@ def handle_track(
 def _sync_baseline_after_review(
     state: dict[str, Any],
     git_root: Path | None,
-    ignore_patterns: list[str],
+    reviewed_head: str,
+    reviewed_dirty_hash: str,
     current_hash: str,
 ) -> None:
-    """Advance baseline only if the working tree did not change during review."""
+    """Advance baseline strictly to the exact snapshot that was reviewed (zero TOCTOU)."""
     if not git_root:
         state["last_reviewed_diff_hash"] = current_hash
         state["baseline_diff_hash"] = current_hash
         return
-    _, _, live_hash = collect_git_changes(
-        git_root, ignore_patterns, baseline_head=state.get("baseline_head", "")
-    )
-    if live_hash != current_hash:
-        state["last_reviewed_diff_hash"] = current_hash
-        return
-    new_head = get_git_head(git_root)
-    state["baseline_head"] = new_head
-    _, _, synced_hash = collect_git_changes(
-        git_root, ignore_patterns, baseline_head=new_head
-    )
-    state["baseline_diff_hash"] = synced_hash
-    state["last_reviewed_diff_hash"] = synced_hash
+    if reviewed_head:
+        state["baseline_head"] = reviewed_head
+    state["baseline_diff_hash"] = reviewed_dirty_hash
+    state["last_reviewed_diff_hash"] = reviewed_dirty_hash
 
 
 def handle_review(
@@ -1027,11 +1051,15 @@ def handle_review(
 
     cwd = resolve_cwd(payload)
     git_root = get_git_root(cwd)
+    reviewed_head = ""
+    reviewed_dirty_hash = ""
     if git_root:
-        summary, bundle, current_hash = collect_git_changes(
-            git_root,
-            config["ignore_patterns"],
-            baseline_head=state.get("baseline_head", ""),
+        summary, bundle, current_hash, reviewed_head, reviewed_dirty_hash = (
+            collect_git_snapshot(
+                git_root,
+                config["ignore_patterns"],
+                baseline_head=state.get("baseline_head", ""),
+            )
         )
     else:
         summary, bundle, current_hash = collect_tracked_file_changes(
@@ -1069,7 +1097,7 @@ def handle_review(
         if state.get("last_verdict") == "NEEDS_FIX":
             if state["turn_rounds"] >= max_rounds:
                 _sync_baseline_after_review(
-                    state, git_root, config["ignore_patterns"], current_hash
+                    state, git_root, reviewed_head, reviewed_dirty_hash, current_hash
                 )
                 state["last_verdict"] = "CAPPED"
                 state["last_reason"] = ""
@@ -1095,7 +1123,7 @@ def handle_review(
 
     if state["turn_rounds"] >= max_rounds:
         _sync_baseline_after_review(
-            state, git_root, config["ignore_patterns"], current_hash
+            state, git_root, reviewed_head, reviewed_dirty_hash, current_hash
         )
         state["last_verdict"] = "CAPPED"
         state["last_reason"] = ""
@@ -1173,7 +1201,7 @@ def handle_review(
         return allow_response(runtime, "review")
 
     _sync_baseline_after_review(
-        state, git_root, config["ignore_patterns"], current_hash
+        state, git_root, reviewed_head, reviewed_dirty_hash, current_hash
     )
     state["last_verdict"] = "PASS"
     state["last_reason"] = ""

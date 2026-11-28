@@ -12,9 +12,9 @@ on:
 # Deny-by-default permissions baseline; each job grants only what it needs.
 permissions: {}
 
-# GitHub keeps at most one pending run per concurrency group when
-# cancel-in-progress is false; intermediate queued runs are dropped, which is
-# safe because the surviving run evaluates the latest Cargo.toml on main.
+# Serialize all main pushes in order. GitHub keeps at most one pending run per
+# group when cancel-in-progress is false; intermediate queued runs are dropped,
+# which is safe because the surviving run builds and evaluates the latest main.
 concurrency:
   group: auto-release-${{ github.ref }}
   cancel-in-progress: false
@@ -27,7 +27,6 @@ jobs:
       contents: read
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
-      should_publish_image: ${{ steps.check.outputs.should_publish_image }}
       tag: ${{ steps.check.outputs.tag }}
       is_prerelease: ${{ steps.check.outputs.prerelease }}
       commit_sha: ${{ github.sha }}
@@ -38,15 +37,12 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check Cargo.toml version and changed paths
+      - name: Check Cargo.toml version against existing tags
         id: check
         shell: python3 {0}
         env:
           GH_TOKEN: ${{ github.token }}
-          BEFORE_SHA: ${{ github.event.before }}
-          CURRENT_SHA: ${{ github.sha }}
         run: |
-          import json
           import os
           import re
           import subprocess
@@ -138,35 +134,6 @@ jobs:
                       return c
               return (len(pre_a) > len(pre_b)) - (len(pre_a) < len(pre_b))
 
-          def is_ignored_path(path: str) -> bool:
-              return path.startswith("docs/") or path.endswith(".md") or path == ".gitignore"
-
-          def compute_should_publish_image(repo: str, should_release: bool) -> str:
-              if should_release:
-                  return "true"
-              before = os.environ.get("BEFORE_SHA", "").strip()
-              current = os.environ.get("CURRENT_SHA", "").strip()
-              if not before or set(before) == {"0"} or not current:
-                  return "true"
-              try:
-                  raw = subprocess.check_output(
-                      ["gh", "api", f"repos/{repo}/compare/{before}...{current}", "--jq", ".files[].filename"],
-                      text=True,
-                      stderr=subprocess.PIPE,
-                  )
-              except subprocess.CalledProcessError as exc:
-                  print(
-                      f"::warning::Could not compare {before}...{current} ({exc.stderr.strip()}); running image build.",
-                  )
-                  return "true"
-              changed = [line.strip() for line in raw.splitlines() if line.strip()]
-              if not changed:
-                  return "true"
-              if any(not is_ignored_path(p) for p in changed):
-                  return "true"
-              print("Only docs/markdown/.gitignore changed and no new release; skipping Docker image build.")
-              return "false"
-
           version = read_cargo_version()
           parsed_cargo = parse_strict_semver(version)
           if parsed_cargo is None:
@@ -177,7 +144,7 @@ jobs:
               sys.exit(1)
 
           tag = f"v{version}"
-          is_prerelease = "true" if parsed_cargo[3] else "false"
+          is_prerelease = bool(parsed_cargo[3])
 
           repo = os.environ["GITHUB_REPOSITORY"]
           tags_raw = subprocess.check_output(
@@ -197,6 +164,10 @@ jobs:
                   parsed = parse_tag_semver(t)
                   if parsed is None:
                       continue
+                  # Stable versions only compare against stable tags so a hotfix (e.g. 1.4.1)
+                  # is not blocked by an active prerelease tag (e.g. v2.0.0-rc.1).
+                  if not is_prerelease and parsed[3]:
+                      continue
                   if highest_ver is None or cmp_semver(parsed, highest_ver) > 0:
                       highest_ver = parsed
                       highest_tag_name = t
@@ -215,14 +186,14 @@ jobs:
                       should_release = False
 
               if should_release:
-                  print(f"Ready to release {tag} (prerelease={is_prerelease}, previous highest={highest_tag_name}).")
+                  print(
+                      f"Ready to release {tag} (prerelease={is_prerelease}, previous highest={highest_tag_name})."
+                  )
 
-          should_publish_image = compute_should_publish_image(repo, should_release)
           write_output({
               "should_release": "true" if should_release else "false",
-              "should_publish_image": should_publish_image,
               "tag": tag,
-              "prerelease": is_prerelease,
+              "prerelease": "true" if is_prerelease else "false",
           })
 
   prepare-release:
@@ -244,37 +215,47 @@ jobs:
           IS_PRERELEASE: ${{ needs.check.outputs.is_prerelease }}
           TARGET_SHA: ${{ needs.check.outputs.commit_sha }}
         run: |
-          import json
           import os
           import subprocess
-          import sys
 
           repo = os.environ["GITHUB_REPOSITORY"]
           tag = os.environ["RELEASE_TAG"]
           is_prerelease = os.environ["IS_PRERELEASE"] == "true"
           target_sha = os.environ["TARGET_SHA"]
 
-          releases_raw = subprocess.check_output(
-              ["gh", "api", "--paginate", f"repos/{repo}/releases"],
+          drafts_raw = subprocess.check_output(
+              [
+                  "gh",
+                  "api",
+                  "--paginate",
+                  f"repos/{repo}/releases?per_page=100",
+                  "--jq",
+                  ".[] | select(.draft == true) | [.id, .tag_name, .target_commitish] | @tsv",
+              ],
               text=True,
           )
-          releases = json.loads(releases_raw)
 
-          for rel in releases:
-              if rel.get("tag_name") == tag and rel.get("draft"):
-                  existing_sha = rel.get("target_commitish", "")
-                  if existing_sha == target_sha:
-                      release_id = str(rel["id"])
-                      print(f"Reusing existing draft release {release_id} for {tag} at {target_sha}.")
-                      with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-                          f.write(f"release_id={release_id}\n")
-                      sys.exit(0)
-                  print(
-                      f"ERROR: A draft release for '{tag}' already exists targeting commit '{existing_sha}', "
-                      f"not '{target_sha}'. Delete or publish it before releasing a different commit.",
-                      file=sys.stderr,
-                  )
-                  sys.exit(1)
+          for line in drafts_raw.splitlines():
+              if not line.strip():
+                  continue
+              parts = line.split("\t")
+              if len(parts) < 3:
+                  continue
+              existing_id, existing_tag, existing_sha = parts[0], parts[1], parts[2]
+              if existing_tag != tag:
+                  continue
+              if existing_sha == target_sha:
+                  print(f"Reusing existing draft release {existing_id} for {tag} at {target_sha}.")
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+                      f.write(f"release_id={existing_id}\n")
+                  raise SystemExit(0)
+              print(
+                  f"::warning::Replacing stale draft release {existing_id} for '{tag}' "
+                  f"(old target {existing_sha}, new target {target_sha})."
+              )
+              subprocess.check_call(
+                  ["gh", "api", "-X", "DELETE", f"repos/{repo}/releases/{existing_id}"]
+              )
 
           created_id = subprocess.check_output(
               [
@@ -310,8 +291,7 @@ jobs:
     if: >-
       !cancelled() &&
       needs.check.result == 'success' &&
-      (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') &&
-      needs.check.outputs.should_publish_image == 'true'
+      (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped')
     permissions:
       contents: read
       packages: write
@@ -319,7 +299,7 @@ jobs:
     with:
       release_tag: ${{ needs.check.outputs.should_release == 'true' && needs.check.outputs.tag || '' }}
       commit_sha: ${{ needs.check.outputs.commit_sha }}
-      is_prerelease: ${{ needs.check.outputs.should_release == 'true' && needs.check.outputs.is_prerelease == 'true' }}
+      is_prerelease: ${{ needs.check.outputs.is_prerelease == 'true' }}
 
   publish-release:
     name: Publish GitHub Release & Tag
@@ -339,22 +319,3 @@ jobs:
           RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
         run: |
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" -F draft=false
-
-  cleanup-draft:
-    name: Clean Up Failed Draft Release
-    needs: [check, prepare-release, publish-image]
-    if: >-
-      !cancelled() &&
-      needs.check.outputs.should_release == 'true' &&
-      needs.prepare-release.result == 'success' &&
-      needs.publish-image.result == 'failure'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Delete failed draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_ID: ${{ needs.prepare-release.outputs.release_id }}
-        run: |
-          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}"

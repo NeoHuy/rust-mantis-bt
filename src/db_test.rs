@@ -502,6 +502,45 @@ fn test_version_crud_and_ordering() {
 }
 
 #[test]
+fn test_version_date_order_and_backward_compatibility() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db.create_project("OrderProj", 10, 10, "", true).unwrap();
+
+    // 1. Backward-compatible add_version uses current timestamp (date_order > 0)
+    let v1 = db
+        .add_version(pid, "1.0.0", "Release 1", true, false)
+        .unwrap();
+    let ver1 = db.get_version_by_id(v1).unwrap().unwrap();
+    assert!(ver1.date_order > 0);
+
+    // 2. add_version_with_order with custom date_order
+    let custom_order = 1700000000;
+    let v2 = db
+        .add_version_with_order(pid, "2.0.0", "Release 2", false, false, Some(custom_order))
+        .unwrap();
+    let ver2 = db.get_version_by_id(v2).unwrap().unwrap();
+    assert_eq!(ver2.date_order, custom_order);
+
+    // 3. Backward-compatible update_version preserves existing date_order
+    assert!(db
+        .update_version(v2, "2.0.0-rc2", "Updated RC", false, false)
+        .is_ok());
+    let ver2_after = db.get_version_by_id(v2).unwrap().unwrap();
+    assert_eq!(ver2_after.version, "2.0.0-rc2");
+    assert_eq!(ver2_after.date_order, custom_order);
+
+    // 4. update_version_with_order updates date_order
+    let new_order = 1800000000;
+    assert!(db
+        .update_version_with_order(v2, "2.0.0-final", "Final", true, false, Some(new_order))
+        .is_ok());
+    let ver2_final = db.get_version_by_id(v2).unwrap().unwrap();
+    assert_eq!(ver2_final.version, "2.0.0-final");
+    assert_eq!(ver2_final.date_order, new_order);
+    assert_eq!(ver2_final.released, 1);
+}
+
+#[test]
 fn test_bug_schema_bootstrap_and_crud() {
     let db = Db::open_in_memory().unwrap();
     let proj_id = db.create_project("TestProj", 10, 10, "", true).unwrap();
@@ -809,7 +848,7 @@ fn test_tags_custom_fields_filters_search_and_monitors() {
 
     // 3. Monitors
     db.add_bug_monitor(b2, uid).unwrap();
-    assert_eq!(db.list_bug_monitors(b2).unwrap().len(), 1);
+    assert_eq!(db.list_bug_monitor_users(b2).unwrap().len(), 1);
 
     // 4. Full-text Search & Filtering
     let by_kw = db
@@ -974,6 +1013,29 @@ fn test_email_queue_time_tracking_and_news() {
     // Developer (55) sees both public and private news
     let dev_news = db.list_news(proj_id, 55).unwrap();
     assert_eq!(dev_news.len(), 2);
+
+    // Test get_news and update_news
+    let item = db.get_news(n_pub).unwrap().unwrap();
+    assert_eq!(item.headline, "v1.0 Released");
+    assert_eq!(item.body, "Release notes here");
+    assert_eq!(item.announcement, 1);
+    assert_eq!(item.view_state, 10);
+
+    let old_modified = item.last_modified;
+    assert!(db
+        .update_news(n_pub, "v1.0.1 Released", "Updated patch notes", 10, 0)
+        .is_ok());
+    let updated = db.get_news(n_pub).unwrap().unwrap();
+    assert_eq!(updated.headline, "v1.0.1 Released");
+    assert_eq!(updated.body, "Updated patch notes");
+    assert_eq!(updated.announcement, 0);
+    assert!(updated.last_modified >= old_modified);
+
+    // Empty headline or body fails
+    assert!(db.update_news(n_pub, "   ", "body", 10, 0).is_err());
+    assert!(db.update_news(n_pub, "head", "   ", 10, 0).is_err());
+    assert!(db.update_news(99999, "head", "body", 10, 0).is_err());
+    assert!(db.get_news(99999).unwrap().is_none());
 }
 
 #[test]
@@ -2321,4 +2383,3146 @@ fn test_email_templates_and_notification_full_coverage() {
     db.delete_queued_email(email_id).unwrap();
     let remaining = db.list_queued_emails().unwrap();
     assert_eq!(remaining.len(), 0);
+}
+
+#[test]
+fn test_db_bug_update_fields_and_history() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let pid = db
+        .create_project("BugUpdateProj", 10, 10, "Test project", true)
+        .unwrap();
+
+    let bug_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            0,
+            "Initial summary",
+            "Initial description",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "1.0",
+            "Linux",
+            "6.8",
+            "x86_64",
+            10,
+        )
+        .unwrap();
+
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.build, "");
+    assert_eq!(bug.due_date, 0);
+    assert_eq!(bug.sticky, 0);
+    assert_eq!(bug.os, "Linux");
+    assert_eq!(bug.os_build, "6.8");
+    assert_eq!(bug.platform, "x86_64");
+
+    // Update build, due_date, sticky, os, os_build, platform
+    let update = BugUpdate {
+        os: Some("macOS".to_string()),
+        os_build: Some("14.5".to_string()),
+        platform: Some("arm64".to_string()),
+        build: Some("build-101".to_string()),
+        due_date: Some(1750000000),
+        sticky: Some(1),
+        ..Default::default()
+    };
+
+    let changes = db.update_bug_fields(bug_id, admin.id, update).unwrap();
+    assert_eq!(changes.len(), 6);
+
+    let updated = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(updated.os, "macOS");
+    assert_eq!(updated.os_build, "14.5");
+    assert_eq!(updated.platform, "arm64");
+    assert_eq!(updated.build, "build-101");
+    assert_eq!(updated.due_date, 1750000000);
+    assert_eq!(updated.sticky, 1);
+
+    // Verify history records
+    let history = db.list_bug_history(bug_id).unwrap();
+    let field_names: Vec<&str> = history.iter().map(|h| h.field_name.as_str()).collect();
+    assert!(field_names.contains(&"os"));
+    assert!(field_names.contains(&"os_build"));
+    assert!(field_names.contains(&"platform"));
+    assert!(field_names.contains(&"build"));
+    assert!(field_names.contains(&"due_date"));
+    assert!(field_names.contains(&"sticky"));
+
+    let sticky_hist = history.iter().find(|h| h.field_name == "sticky").unwrap();
+    assert_eq!(sticky_hist.old_value, "0");
+    assert_eq!(sticky_hist.new_value, "1");
+
+    let due_hist = history.iter().find(|h| h.field_name == "due_date").unwrap();
+    assert_eq!(due_hist.old_value, "0");
+    assert_eq!(due_hist.new_value, "1750000000");
+}
+
+#[test]
+fn test_db_category_default_assignee() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let pid = db
+        .create_project("CatAssignProj", 10, 10, "Test project", true)
+        .unwrap();
+
+    // 1. Create developer user (access 55)
+    let dev_id = db
+        .create_user("dev1", "Dev One", "dev1@example.com", "pw", 55, true, false)
+        .unwrap();
+
+    // 2. Create category with user_id = dev_id
+    let cat_id = db.add_category(pid, "Backend", dev_id).unwrap();
+
+    // 3. Create bug with this category -> auto assigned to dev_id with status 50
+    let bug_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            cat_id,
+            "Auto assigned bug",
+            "Description",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(bug.handler_id, dev_id);
+    assert_eq!(bug.status, 50); // Assigned
+
+    // 4. Category with reporter user (access 25 < 55) -> not auto-assigned
+    let rep_id = db
+        .create_user(
+            "rep1",
+            "Reporter One",
+            "rep1@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let cat2_id = db.add_category(pid, "Frontend", rep_id).unwrap();
+    let bug2_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            cat2_id,
+            "Unassigned bug (reporter)",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let bug2 = db.get_bug(bug2_id).unwrap().unwrap();
+    assert_eq!(bug2.handler_id, 0);
+    assert_eq!(bug2.status, 10); // New
+
+    // 5. Category with disabled user (enabled = 0) -> not auto-assigned
+    let dis_dev_id = db
+        .create_user(
+            "dev_dis",
+            "Disabled Dev",
+            "dis@example.com",
+            "pw",
+            55,
+            false,
+            false,
+        )
+        .unwrap();
+    let cat3_id = db.add_category(pid, "DevOps", dis_dev_id).unwrap();
+    let bug3_id = db
+        .create_bug(
+            pid,
+            admin.id,
+            cat3_id,
+            "Unassigned bug (disabled)",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let bug3 = db.get_bug(bug3_id).unwrap().unwrap();
+    assert_eq!(bug3.handler_id, 0);
+    assert_eq!(bug3.status, 10);
+}
+
+#[test]
+fn test_db_project_access_min_enforcement() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+
+    // Create public project (view_state = 10) with access_min = 40 (Updater)
+    let pid = db
+        .create_project("RestrictedPublic", 10, 10, "Min access 40", true)
+        .unwrap();
+    db.set_project_access_min(pid, 40).unwrap();
+
+    // Create user with access_level 25 (Reporter)
+    let rep_id = db
+        .create_user("rep_user", "", "rep@example.com", "pw", 25, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+
+    // Create user with access_level 40 (Updater)
+    let upd_id = db
+        .create_user("upd_user", "", "upd@example.com", "pw", 40, true, false)
+        .unwrap();
+    let upd = db.get_user_by_id(upd_id).unwrap().unwrap();
+
+    // Reporter (< access_min) gets effective access 0
+    assert_eq!(db.effective_access_level(&rep, pid).unwrap(), 0);
+
+    // Updater (>= access_min) gets effective access 40
+    assert_eq!(db.effective_access_level(&upd, pid).unwrap(), 40);
+
+    // Admin always gets 90
+    assert_eq!(db.effective_access_level(&admin, pid).unwrap(), 90);
+
+    // Explicit override in mantis_project_user_list_table grants access to Reporter
+    db.set_project_user(pid, rep_id, 55).unwrap();
+    assert_eq!(db.effective_access_level(&rep, pid).unwrap(), 55);
+}
+
+#[test]
+fn test_db_subproject_descendants_and_bug_rollup() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+
+    // Root project A
+    let proj_a = db.create_project("ProjectA", 10, 10, "Root", true).unwrap();
+    // Subproject B (child of A)
+    let proj_b = db
+        .create_project("ProjectB", 10, 10, "Child of A", true)
+        .unwrap();
+    // Subproject C (child of B)
+    let proj_c = db
+        .create_project("ProjectC", 10, 10, "Child of B", true)
+        .unwrap();
+
+    db.add_subproject(proj_a, proj_b, true).unwrap();
+    db.add_subproject(proj_b, proj_c, true).unwrap();
+
+    let descendants = db.list_project_descendant_ids(proj_a).unwrap();
+    assert_eq!(descendants, vec![proj_a, proj_b, proj_c]);
+
+    // Create bugs in A, B, C
+    let bug_a = db
+        .create_bug(
+            proj_a, admin.id, 0, "Bug in A", "Desc A", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+    let bug_b = db
+        .create_bug(
+            proj_b, admin.id, 0, "Bug in B", "Desc B", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+    let bug_c = db
+        .create_bug(
+            proj_c, admin.id, 0, "Bug in C", "Desc C", "", "", 30, 50, 70, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    // Filter bugs on project A -> rolls up bugs from A, B, and C
+    let filter_a = BugFilter {
+        project_id: Some(proj_a),
+        ..Default::default()
+    };
+    let results = db.filter_bugs(&filter_a, &admin).unwrap();
+    let result_ids: Vec<i64> = results.iter().map(|b| b.id).collect();
+    assert!(result_ids.contains(&bug_a));
+    assert!(result_ids.contains(&bug_b));
+    assert!(result_ids.contains(&bug_c));
+
+    // Create private subproject D (child of A, view_state = 50)
+    let proj_d = db
+        .create_project("ProjectD_Private", 10, 50, "Private child of A", true)
+        .unwrap();
+    db.add_subproject(proj_a, proj_d, true).unwrap();
+    let bug_d = db
+        .create_bug(
+            proj_d,
+            admin.id,
+            0,
+            "Bug in D Private",
+            "Desc D",
+            "",
+            "",
+            30,
+            50,
+            70,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Reporter user with no access to private project D
+    let rep_id = db
+        .create_user(
+            "rep_rollup",
+            "",
+            "rep_rollup@example.com",
+            "pw",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+
+    let rep_results = db.filter_bugs(&filter_a, &rep).unwrap();
+    let rep_result_ids: Vec<i64> = rep_results.iter().map(|b| b.id).collect();
+    assert!(rep_result_ids.contains(&bug_a));
+    assert!(rep_result_ids.contains(&bug_b));
+    assert!(rep_result_ids.contains(&bug_c));
+    assert!(!rep_result_ids.contains(&bug_d)); // Private subproject isolated!
+}
+
+#[test]
+fn test_tag_usage_counts_and_helpers() {
+    let db = Db::open_in_memory().unwrap();
+    let uid = db
+        .create_user("tagadmin", "Admin", "a@t.com", "pass", 90, true, false)
+        .unwrap();
+    let pid = db.create_project("TagProj", 10, 10, "", true).unwrap();
+    let b1 = db
+        .create_bug(
+            pid, uid, 1, "Bug 1", "Desc", "", "", 10, 10, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug(
+            pid, uid, 1, "Bug 2", "Desc", "", "", 10, 10, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    let t1 = db.create_tag(uid, "alpha", "Alpha tag").unwrap();
+    let t2 = db.create_tag(uid, "beta", "Beta tag").unwrap();
+
+    db.attach_tag_to_bug(b1, t1, uid).unwrap();
+    db.attach_tag_to_bug(b2, t1, uid).unwrap();
+
+    let counts = db.list_tags_with_counts().unwrap();
+    assert_eq!(counts.len(), 2);
+    let alpha = counts.iter().find(|(t, _)| t.name == "alpha").unwrap();
+    assert_eq!(alpha.1, 2);
+    let beta = counts.iter().find(|(t, _)| t.name == "beta").unwrap();
+    assert_eq!(beta.1, 0);
+
+    let (t1_fetched, t1_count) = db.get_tag_with_count_by_id(t1).unwrap().unwrap();
+    assert_eq!(t1_fetched.name, "alpha");
+    assert_eq!(t1_count, 2);
+
+    let (t2_fetched, t2_count) = db.get_tag_with_count_by_id(t2).unwrap().unwrap();
+    assert_eq!(t2_fetched.name, "beta");
+    assert_eq!(t2_count, 0);
+
+    assert!(db.get_tag_with_count_by_id(9999).unwrap().is_none());
+}
+
+#[test]
+fn test_custom_field_regex_validation_in_db() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db.create_project("RegexpProj", 10, 10, "", true).unwrap();
+    let uid = db
+        .create_user(
+            "admin_reg",
+            "Admin Reg",
+            "ar@example.com",
+            "pass",
+            90,
+            true,
+            false,
+        )
+        .unwrap();
+
+    // 1. Invalid regex rejected on create_custom_field_full
+    let create_err = db
+        .create_custom_field_full(
+            "InvalidCF",
+            0,
+            "",
+            "",
+            "[unclosed-regex",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap_err();
+    assert!(
+        create_err.contains("Invalid regular expression"),
+        "Expected invalid regex error on create, got: {}",
+        create_err
+    );
+
+    // 2. Valid regex succeeds on create
+    let cf_id = db
+        .create_custom_field_full(
+            "ProductSKU",
+            0,
+            "",
+            "",
+            r"^[0-9]{4}-[A-Z]{2}$",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_id, pid, 1).unwrap();
+
+    // 3. Invalid regex rejected on update_custom_field_full
+    let update_err = db
+        .update_custom_field_full(
+            cf_id,
+            "ProductSKU",
+            0,
+            "",
+            "",
+            "(?P<broken",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap_err();
+    assert!(
+        update_err.contains("Invalid regular expression"),
+        "Expected invalid regex error on update, got: {}",
+        update_err
+    );
+
+    // 4. Create bug and verify set_custom_field_value regex enforcement
+    let bid = db
+        .create_bug(
+            pid,
+            uid,
+            1,
+            "SKU Bug",
+            "Testing SKU regex",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Non-matching value fails
+    let val_err = db
+        .set_custom_field_value(cf_id, bid, uid, "123-abc")
+        .unwrap_err();
+    assert!(
+        val_err.contains("does not match required pattern"),
+        "Expected pattern mismatch, got: {}",
+        val_err
+    );
+
+    // Matching value succeeds
+    db.set_custom_field_value(cf_id, bid, uid, "2024-XY")
+        .unwrap();
+    let cf_vals = db.get_custom_field_values_for_bug(bid).unwrap();
+    assert_eq!(cf_vals.len(), 1);
+    assert_eq!(cf_vals[0].value, "2024-XY");
+
+    // Empty value clears field without regex error
+    db.set_custom_field_value(cf_id, bid, uid, "").unwrap();
+    let cf_vals_cleared = db.get_custom_field_values_for_bug(bid).unwrap();
+    assert_eq!(cf_vals_cleared.len(), 1);
+    assert_eq!(cf_vals_cleared[0].value, "");
+}
+
+#[test]
+fn test_revisions_and_bugnote_edits_db() {
+    let db = Db::open_in_memory().unwrap();
+    // Test idempotent migration
+    assert!(db.migrate().is_ok());
+
+    let uid = db
+        .create_user("revuser", "Rev User", "r@u.com", "pass", 90, true, false)
+        .unwrap();
+    let pid = db.create_project("RevProj", 10, 10, "", true).unwrap();
+    let bug_id = db
+        .create_bug(
+            pid,
+            uid,
+            1,
+            "Rev Bug",
+            "Initial Desc",
+            "Initial Steps",
+            "Initial AddInfo",
+            10,
+            10,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // 1. Verify no revisions initially
+    let revs0 = db.list_bug_revisions(bug_id, None).unwrap();
+    assert!(revs0.is_empty());
+
+    // 2. Update description, steps, and additional_info
+    let update_fields = BugUpdate {
+        description: Some("Updated Desc".to_string()),
+        steps_to_reproduce: Some("Updated Steps".to_string()),
+        additional_information: Some("Updated AddInfo".to_string()),
+        ..Default::default()
+    };
+    let hist = db.update_bug_fields(bug_id, uid, update_fields).unwrap();
+    assert_eq!(hist.len(), 3);
+
+    // Verify 3 revisions created with previous values
+    let revs = db.list_bug_revisions(bug_id, None).unwrap();
+    assert_eq!(revs.len(), 3);
+
+    let desc_rev = revs
+        .iter()
+        .find(|r| r.rev_type == RevisionType::Description as i32)
+        .unwrap();
+    assert_eq!(desc_rev.value, "Initial Desc");
+    assert_eq!(desc_rev.bugnote_id, 0);
+    assert_eq!(desc_rev.bug_id, bug_id);
+
+    let steps_rev = revs
+        .iter()
+        .find(|r| r.rev_type == RevisionType::StepsToReproduce as i32)
+        .unwrap();
+    assert_eq!(steps_rev.value, "Initial Steps");
+    assert_eq!(steps_rev.bugnote_id, 0);
+
+    let info_rev = revs
+        .iter()
+        .find(|r| r.rev_type == RevisionType::AdditionalInfo as i32)
+        .unwrap();
+    assert_eq!(info_rev.value, "Initial AddInfo");
+    assert_eq!(info_rev.bugnote_id, 0);
+
+    // 3. Test get_bug_revision_by_id
+    let fetched = db.get_bug_revision_by_id(desc_rev.id).unwrap().unwrap();
+    assert_eq!(fetched.id, desc_rev.id);
+    assert_eq!(fetched.value, "Initial Desc");
+
+    // 4. Test bugnote edits and revision
+    let note_id = db.add_bugnote(bug_id, uid, "Initial Note", 10).unwrap();
+
+    // Reject empty note edit
+    assert!(db.update_bugnote(note_id, uid, "   ").is_err());
+
+    // Valid note edit
+    assert!(db.update_bugnote(note_id, uid, "Updated Note").is_ok());
+
+    let updated_note = db.get_bugnote_by_id(note_id).unwrap().unwrap();
+    assert_eq!(updated_note.note, "Updated Note");
+
+    // Check bugnote revisions via list_bug_revisions with bugnote_id filter
+    let note_revs = db.list_bug_revisions(bug_id, Some(note_id)).unwrap();
+    assert_eq!(note_revs.len(), 1);
+    assert_eq!(note_revs[0].bugnote_id, note_id);
+    assert_eq!(note_revs[0].rev_type, RevisionType::Bugnote as i32);
+    assert_eq!(note_revs[0].value, "Initial Note");
+
+    // Total revisions for bug is now 4
+    let all_revs = db.list_bug_revisions(bug_id, None).unwrap();
+    assert_eq!(all_revs.len(), 4);
+
+    // 5. Test set_bugnote_view_state
+    assert!(db.set_bugnote_view_state(note_id, uid, 99).is_err()); // invalid
+    assert!(db.set_bugnote_view_state(note_id, uid, 50).is_ok()); // private
+    let note_priv = db.get_bugnote_by_id(note_id).unwrap().unwrap();
+    assert_eq!(note_priv.view_state, 50);
+
+    assert!(db.set_bugnote_view_state(note_id, uid, 10).is_ok()); // public
+    let note_pub = db.get_bugnote_by_id(note_id).unwrap().unwrap();
+    assert_eq!(note_pub.view_state, 10);
+
+    // 6. Test drop_bug_revision
+    assert!(db.drop_bug_revision(desc_rev.id).is_ok());
+    assert!(db.get_bug_revision_by_id(desc_rev.id).unwrap().is_none());
+    let revs_after_drop = db.list_bug_revisions(bug_id, None).unwrap();
+    assert_eq!(revs_after_drop.len(), 3);
+
+    // 7. Test delete_bugnote cleans up revisions for that note
+    assert!(db.delete_bugnote(note_id).is_ok());
+    let note_revs_after_delete = db.list_bug_revisions(bug_id, Some(note_id)).unwrap();
+    assert!(note_revs_after_delete.is_empty());
+
+    // 8. Test optimistic locking via expected_last_updated in update_bug_fields
+    let cur_bug = db.get_bug(bug_id).unwrap().unwrap();
+    let stale_update = BugUpdate {
+        summary: Some("Stale update".to_string()),
+        expected_last_updated: Some(cur_bug.last_updated - 100),
+        ..Default::default()
+    };
+    let err = db.update_bug_fields(bug_id, uid, stale_update).unwrap_err();
+    assert!(err.starts_with("CONFLICT:"));
+
+    let valid_update = BugUpdate {
+        summary: Some("Valid update".to_string()),
+        expected_last_updated: Some(cur_bug.last_updated),
+        ..Default::default()
+    };
+    assert!(db.update_bug_fields(bug_id, uid, valid_update).is_ok());
+
+    // 9. Test delete_bug cleans up all remaining revisions
+    assert!(db.delete_bug(bug_id).is_ok());
+    let revs_after_del = db.list_bug_revisions(bug_id, None).unwrap();
+    assert!(revs_after_del.is_empty());
+}
+
+#[test]
+fn test_clone_bug_comprehensive() {
+    let db = Db::open_in_memory().unwrap();
+    let p1 = db.create_project("Project 1", 10, 10, "", true).unwrap();
+    let p2 = db.create_project("Project 2", 10, 10, "", false).unwrap();
+    let u1 = db
+        .create_user("rep1", "Reporter 1", "r1@test.com", "pw", 25, true, false)
+        .unwrap();
+    let u2 = db
+        .create_user("rep2", "Reporter 2", "r2@test.com", "pw", 25, true, false)
+        .unwrap();
+
+    // Create custom category in p1 and p2
+    let c1 = db.add_category(p1, "P1 Special", 0).unwrap();
+    let c2 = db.add_category(p2, "P2 Special", 0).unwrap();
+
+    // Create custom field linked to p1 and p2
+    let cf1 = db
+        .create_custom_field("Shared CF", 0, "", "", "", 0, 100, false, false, true, true)
+        .unwrap();
+    db.link_custom_field_to_project(cf1, p1, 1).unwrap();
+    db.link_custom_field_to_project(cf1, p2, 1).unwrap();
+
+    // Custom field only linked to p1
+    let cf2 = db
+        .create_custom_field(
+            "P1 Only CF",
+            0,
+            "",
+            "",
+            "",
+            0,
+            100,
+            false,
+            false,
+            true,
+            true,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf2, p1, 2).unwrap();
+
+    // Create source bug in p1
+    let source_id = db
+        .create_bug(
+            p1,
+            u1,
+            c1,
+            "Original Summary",
+            "Detailed Description",
+            "Step 1, Step 2",
+            "Additional Info",
+            40,
+            60,
+            20,
+            "1.0.0",
+            "macOS",
+            "23A344",
+            "arm64",
+            10,
+        )
+        .unwrap();
+
+    // Set additional fields on source bug
+    db.update_bug_fields(
+        source_id,
+        u1,
+        BugUpdate {
+            target_version: Some("1.1.0".to_string()),
+            fixed_in_version: Some("1.0.1".to_string()),
+            build: Some("Build-99".to_string()),
+            due_date: Some(1700000000),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Set custom field values on source bug
+    db.set_custom_field_value(cf1, source_id, u1, "Shared Value")
+        .unwrap();
+    db.set_custom_field_value(cf2, source_id, u1, "P1 Exclusive")
+        .unwrap();
+
+    // Add tags to source bug
+    let tag1 = db.create_tag(u1, "v2-feature", "").unwrap();
+    db.attach_tag_to_bug(source_id, tag1, u1).unwrap();
+
+    // Add relationships to source bug
+    let other_bug = db
+        .create_bug(
+            p1,
+            u1,
+            c1,
+            "Other Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bug_relationship(source_id, other_bug, 0).unwrap(); // RelatedTo
+
+    let dup_bug = db
+        .create_bug(
+            p1,
+            u1,
+            c1,
+            "Duplicate Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    // dup_bug is duplicate of source_id
+    db.add_bug_relationship(dup_bug, source_id, 1).unwrap();
+
+    // Add attachments to source bug: 1 blob and 1 disk file
+    let blob_file_id = db
+        .add_bug_file(
+            source_id,
+            u1,
+            "blob.txt",
+            "text/plain",
+            b"blob data".to_vec(),
+            "",
+        )
+        .unwrap();
+    assert!(blob_file_id > 0);
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("mantis_test_upload_{}", rand::random::<u64>()));
+    let disk_file_id = db
+        .add_bug_file(
+            source_id,
+            u1,
+            "disk.txt",
+            "text/plain",
+            b"disk file content".to_vec(),
+            temp_dir.to_str().unwrap(),
+        )
+        .unwrap();
+    assert!(disk_file_id > 0);
+
+    // 1. Clone within same project (p1)
+    let cloned_same = db
+        .clone_bug(source_id, u2, p1, true, true, temp_dir.to_str().unwrap())
+        .unwrap();
+    assert_ne!(source_id, cloned_same);
+
+    let full_clone = db.get_bug_full(cloned_same).unwrap().unwrap();
+    assert_eq!(full_clone.bug.project_id, p1);
+    assert_eq!(full_clone.bug.reporter_id, u2);
+    assert_eq!(full_clone.bug.category_id, c1);
+    assert_eq!(full_clone.bug.summary, "Original Summary");
+    assert_eq!(full_clone.description, "Detailed Description");
+    assert_eq!(full_clone.steps_to_reproduce, "Step 1, Step 2");
+    assert_eq!(full_clone.additional_information, "Additional Info");
+    assert_eq!(full_clone.bug.priority, 40);
+    assert_eq!(full_clone.bug.severity, 60);
+    assert_eq!(full_clone.bug.reproducibility, 20);
+    assert_eq!(full_clone.bug.os, "macOS");
+    assert_eq!(full_clone.bug.os_build, "23A344");
+    assert_eq!(full_clone.bug.platform, "arm64");
+    assert_eq!(full_clone.bug.version, "1.0.0");
+    assert_eq!(full_clone.bug.target_version, "1.1.0");
+    assert_eq!(full_clone.bug.fixed_in_version, "1.0.1");
+    assert_eq!(full_clone.bug.build, "Build-99");
+    assert_eq!(full_clone.bug.due_date, 1700000000);
+    assert_eq!(full_clone.bug.view_state, 10);
+    assert_eq!(full_clone.bug.status, 10);
+
+    // Verify custom fields copied (both cf1 and cf2 exist in p1)
+    let cf_vals_same = db.get_custom_field_values_for_bug(cloned_same).unwrap();
+    assert!(cf_vals_same
+        .iter()
+        .any(|v| v.field_id == cf1 && v.value == "Shared Value"));
+    assert!(cf_vals_same
+        .iter()
+        .any(|v| v.field_id == cf2 && v.value == "P1 Exclusive"));
+
+    // Verify tags copied
+    let tags_same = db.list_bug_tags(cloned_same).unwrap();
+    assert!(tags_same.iter().any(|t| t.tag_id == tag1));
+
+    // Verify relationships: RelatedTo source_id + copied relationship to other_bug
+    let rels_same = db.list_bug_relationships(cloned_same).unwrap();
+    assert!(rels_same
+        .iter()
+        .any(|r| r.destination_bug_id == source_id && r.relationship_type == 0));
+    assert!(rels_same
+        .iter()
+        .any(|r| r.destination_bug_id == other_bug && r.relationship_type == 0));
+
+    // Verify third issue (other_bug) is completely unchanged:
+    // It has no relationship row pointing at cloned_same, and its duplicate_id is 0
+    let other_rels = db.list_bug_relationships(other_bug).unwrap();
+    assert!(!other_rels
+        .iter()
+        .any(|r| r.destination_bug_id == cloned_same || r.source_bug_id == cloned_same));
+    let other_bug_full = db.get_bug(other_bug).unwrap().unwrap();
+    assert_eq!(other_bug_full.duplicate_id, 0);
+
+    // Verify dup_bug relationships and duplicate_id are completely unchanged:
+    // It has only 1 relationship pointing to source_id, not cloned_same
+    let dup_rels = db.list_bug_relationships(dup_bug).unwrap();
+    assert_eq!(dup_rels.len(), 1);
+    assert_eq!(dup_rels[0].destination_bug_id, source_id);
+    assert_eq!(dup_rels[0].relationship_type, 1);
+    let dup_bug_full = db.get_bug(dup_bug).unwrap().unwrap();
+    assert_eq!(dup_bug_full.duplicate_id, source_id);
+
+    // Verify attachments copied separately
+    let files_same = db.list_bug_files(cloned_same).unwrap();
+    assert_eq!(files_same.len(), 2);
+    let disk_clone_file = files_same
+        .iter()
+        .find(|f| f.filename == "disk.txt")
+        .unwrap();
+    let src_disk_file = db.get_bug_file_meta(disk_file_id).unwrap().unwrap();
+    assert_ne!(disk_clone_file.diskfile, src_disk_file.diskfile);
+
+    // Deleting file on cloned bug does NOT affect source bug file!
+    db.delete_bug_file(disk_clone_file.id, temp_dir.to_str().unwrap())
+        .unwrap();
+    assert!(db.get_bug_file_meta(disk_clone_file.id).unwrap().is_none());
+    assert!(db.get_bug_file_meta(disk_file_id).unwrap().is_some());
+    let src_content = db
+        .get_bug_file(disk_file_id, temp_dir.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(src_content.1, b"disk file content");
+
+    // 2. Clone to different project (p2):
+    // Category c1 is NOT effective in p2, should fall back to c2
+    // cf2 is NOT linked to p2, so only cf1 should be copied
+    let cloned_p2 = db
+        .clone_bug(source_id, u2, p2, false, false, temp_dir.to_str().unwrap())
+        .unwrap();
+    let full_p2 = db.get_bug_full(cloned_p2).unwrap().unwrap();
+    assert_eq!(full_p2.bug.project_id, p2);
+    assert_eq!(full_p2.bug.category_id, c2); // fell back to c2!
+
+    let cf_vals_p2 = db.get_custom_field_values_for_bug(cloned_p2).unwrap();
+    assert!(cf_vals_p2
+        .iter()
+        .any(|v| v.field_id == cf1 && v.value == "Shared Value"));
+    assert!(!cf_vals_p2.iter().any(|v| v.field_id == cf2)); // cf2 not linked to p2
+
+    // Since copy_relationships = false, only the automatic RelatedTo source is present
+    let rels_p2 = db.list_bug_relationships(cloned_p2).unwrap();
+    assert_eq!(rels_p2.len(), 1);
+    assert_eq!(rels_p2[0].destination_bug_id, source_id);
+    assert_eq!(rels_p2[0].relationship_type, 0);
+
+    // History check
+    let hist_new = db.list_bug_history(cloned_p2).unwrap();
+    assert!(hist_new.iter().any(|h| h.type_ == 1)); // new bug
+    assert!(hist_new
+        .iter()
+        .any(|h| h.type_ == 21 && h.new_value == source_id.to_string())); // created_from
+
+    let hist_src = db.list_bug_history(source_id).unwrap();
+    assert!(hist_src
+        .iter()
+        .any(|h| h.type_ == 20 && h.new_value == cloned_p2.to_string())); // cloned_to
+
+    // Clean up temp dir
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_move_bug_success_and_category_fallback() {
+    let db = Db::open_in_memory().unwrap();
+    let p1 = db.create_project("Source Proj", 10, 10, "", true).unwrap();
+    let p2 = db.create_project("Target Proj", 10, 10, "", false).unwrap();
+    let p_disabled = db
+        .create_project("Disabled Proj", 10, 10, "", true)
+        .unwrap();
+    db.update_project(p_disabled, "Disabled Proj", 10, false, 10, "", true)
+        .unwrap();
+    let u = db
+        .create_user("dev", "Developer", "d@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let c1 = db.add_category(p1, "Source Category", 0).unwrap();
+    let c2 = db.add_category(p2, "Target Category", 0).unwrap();
+
+    let bug_id = db
+        .create_bug(
+            p1,
+            u,
+            c1,
+            "Move Test Bug",
+            "Description",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Fails on non-existent project
+    assert!(db.move_bug(bug_id, u, 9999).is_err());
+    // Fails on disabled project
+    assert!(db.move_bug(bug_id, u, p_disabled).is_err());
+
+    // Move to p2: c1 is not valid in p2 -> falls back to c2
+    db.move_bug(bug_id, u, p2).unwrap();
+
+    let moved_bug = db.get_bug(bug_id).unwrap().unwrap();
+    assert_eq!(moved_bug.project_id, p2);
+    assert_eq!(moved_bug.category_id, c2);
+
+    let history = db.list_bug_history(bug_id).unwrap();
+    assert!(history.iter().any(|h| h.field_name == "project_id"
+        && h.old_value == p1.to_string()
+        && h.new_value == p2.to_string()));
+    assert!(history.iter().any(|h| h.field_name == "category_id"
+        && h.old_value == c1.to_string()
+        && h.new_value == c2.to_string()));
+
+    // Move when already in target project is a no-op Ok(())
+    assert!(db.move_bug(bug_id, u, p2).is_ok());
+}
+
+#[test]
+fn test_clone_bug_outgoing_duplicate_relationship() {
+    let db = Db::open_in_memory().unwrap();
+    let p = db.create_project("Test Proj", 10, 10, "", true).unwrap();
+    let u = db
+        .create_user("dev", "Dev", "d@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let parent_bug = db
+        .create_bug(
+            p,
+            u,
+            1,
+            "Parent Bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let dup_source = db
+        .create_bug(
+            p,
+            u,
+            1,
+            "Dup Source",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // dup_source is duplicate_of parent_bug
+    db.add_bug_relationship(dup_source, parent_bug, 1).unwrap();
+    assert_eq!(
+        db.get_bug(dup_source).unwrap().unwrap().duplicate_id,
+        parent_bug
+    );
+
+    // Clone dup_source
+    let cloned = db.clone_bug(dup_source, u, p, true, false, "").unwrap();
+
+    // Verify cloned issue inherits duplicate_of relationship to parent_bug (matching MantisBT relationship_copy_all)
+    let cloned_bug = db.get_bug(cloned).unwrap().unwrap();
+    assert_eq!(cloned_bug.duplicate_id, parent_bug);
+
+    let cloned_rels = db.list_bug_relationships(cloned).unwrap();
+    assert!(cloned_rels
+        .iter()
+        .any(|r| r.destination_bug_id == parent_bug && r.relationship_type == 1));
+
+    // Verify parent_bug has reciprocal has_duplicate relationship pointing to cloned
+    let parent_rels = db.list_bug_relationships(parent_bug).unwrap();
+    assert!(parent_rels
+        .iter()
+        .any(|r| r.destination_bug_id == cloned && r.relationship_type == 2));
+}
+
+#[test]
+fn test_clone_bug_cleanup_guard_removes_partial_writes_on_failure() {
+    let db = Db::open_in_memory().unwrap();
+    let p = db
+        .create_project("Disk Cleanup Proj", 10, 10, "", true)
+        .unwrap();
+    let u = db
+        .create_user("dev_disk", "Dev Disk", "dd@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mantis_test_cleanup_guard_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    let temp_dir_str = temp_dir.to_str().unwrap();
+
+    let bug_id = db
+        .create_bug(
+            p,
+            u,
+            0,
+            "Bug with disk attachments",
+            "desc",
+            "",
+            "",
+            50,
+            10,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Add first attachment with file on disk
+    let file1_bytes = b"First attachment content";
+    let _f1_id = db
+        .add_bug_file(
+            bug_id,
+            u,
+            "file1.txt",
+            "text/plain",
+            file1_bytes.to_vec(),
+            temp_dir_str,
+        )
+        .unwrap();
+
+    // Add second attachment with file on disk
+    let file2_bytes = b"Second attachment content";
+    let _f2_id = db
+        .add_bug_file(
+            bug_id,
+            u,
+            "file2.txt",
+            "text/plain",
+            file2_bytes.to_vec(),
+            temp_dir_str,
+        )
+        .unwrap();
+
+    // Now find the disk path of attachment 2 and delete it from disk to trigger read failure during clone
+    let files = db.list_bug_files(bug_id).unwrap();
+    assert_eq!(files.len(), 2);
+    let disk_file1 = temp_dir.join(&files[0].diskfile);
+    let disk_file2 = temp_dir.join(&files[1].diskfile);
+    assert!(disk_file2.exists());
+    std::fs::remove_file(&disk_file2).unwrap();
+    assert!(!disk_file2.exists());
+
+    // Call clone_bug with copy_files = true
+    let clone_res = db.clone_bug(bug_id, u, p, false, true, temp_dir_str);
+    assert!(
+        clone_res.is_err(),
+        "Clone should fail due to missing attachment file on disk"
+    );
+
+    // Verify cleanup guard removed the copied file for attachment 1
+    // The only remaining file in temp_dir should be the original file1.txt
+    let remaining_files: Vec<_> = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(
+        remaining_files.len(),
+        1,
+        "Only original file1 should remain; cloned partial files must be cleaned up"
+    );
+    assert_eq!(remaining_files[0].path(), disk_file1);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_list_bug_monitor_users_ordering() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("Monitors Project", 10, 10, "", true)
+        .unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let bid = db
+        .create_bug(
+            pid,
+            admin.id,
+            1,
+            "Issue for monitors",
+            "Details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let u_charlie = db
+        .create_user(
+            "charlie",
+            "Charlie User",
+            "charlie@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let u_alice = db
+        .create_user(
+            "alice",
+            "Alice User",
+            "alice@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let u_bob = db
+        .create_user(
+            "bob",
+            "Bob User",
+            "bob@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    db.add_bug_monitor(bid, u_charlie).unwrap();
+    db.add_bug_monitor(bid, u_alice).unwrap();
+    db.add_bug_monitor(bid, u_bob).unwrap();
+
+    let monitors = db.list_bug_monitor_users(bid).unwrap();
+    assert_eq!(monitors.len(), 3);
+    assert_eq!(monitors[0].username, "alice");
+    assert_eq!(monitors[1].username, "bob");
+    assert_eq!(monitors[2].username, "charlie");
+}
+
+#[test]
+fn test_add_and_remove_bug_monitor_with_actor_records_history() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("History Monitor Project", 10, 10, "", true)
+        .unwrap();
+    let actor_id = db
+        .create_user(
+            "lead_dev",
+            "Lead Dev",
+            "lead@example.com",
+            "password",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let target_id = db
+        .create_user(
+            "target_user",
+            "Target User",
+            "target@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let bid = db
+        .create_bug(
+            pid,
+            actor_id,
+            1,
+            "History Bug",
+            "Details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // 1. Add monitor with actor
+    db.add_bug_monitor_with_actor(bid, target_id, actor_id)
+        .unwrap();
+
+    let monitors = db.list_bug_monitor_users(bid).unwrap();
+    assert_eq!(monitors.len(), 1);
+    assert_eq!(monitors[0].id, target_id);
+
+    // Verify history entry type 12 (monitor_added)
+    let history = db.list_bug_history(bid).unwrap();
+    let add_entry = history.iter().find(|h| h.field_name == "monitor_added");
+    assert!(add_entry.is_some(), "Expected monitor_added history entry");
+    let add_entry = add_entry.unwrap();
+    assert_eq!(add_entry.user_id, actor_id);
+    assert_eq!(add_entry.new_value, "target_user");
+    assert_eq!(add_entry.old_value, "");
+    assert_eq!(add_entry.type_, 12);
+
+    // 2. Remove monitor with actor
+    db.remove_bug_monitor_with_actor(bid, target_id, actor_id)
+        .unwrap();
+
+    let monitors_after = db.list_bug_monitor_users(bid).unwrap();
+    assert!(monitors_after.is_empty());
+
+    // Verify history entry type 13 (monitor_removed / BUG_UNMONITOR)
+    let history_after = db.list_bug_history(bid).unwrap();
+    let remove_entry = history_after
+        .iter()
+        .find(|h| h.field_name == "monitor_removed");
+    assert!(
+        remove_entry.is_some(),
+        "Expected monitor_removed history entry"
+    );
+    let remove_entry = remove_entry.unwrap();
+    assert_eq!(remove_entry.user_id, actor_id);
+    assert_eq!(remove_entry.old_value, "target_user");
+    assert_eq!(remove_entry.type_, 13);
+}
+
+#[test]
+fn test_notify_users_only_emails_target_recipients() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("Notify Users Project", 10, 10, "", true)
+        .unwrap();
+
+    let reporter_id = db
+        .create_user(
+            "issue_reporter",
+            "Reporter User",
+            "reporter@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let handler_id = db
+        .create_user(
+            "issue_handler",
+            "Handler User",
+            "handler@example.com",
+            "password",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let monitor_id = db
+        .create_user(
+            "issue_monitor",
+            "Monitor User",
+            "monitor@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+    let target_id = db
+        .create_user(
+            "target_recipient",
+            "Target Recipient",
+            "target@example.com",
+            "password",
+            25,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let bid = db
+        .create_bug(
+            pid,
+            reporter_id,
+            1,
+            "Targeted Notification Bug",
+            "Details",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Assign handler and add monitor
+    db.assign_bug(bid, handler_id, reporter_id).unwrap();
+    db.add_bug_monitor(bid, monitor_id).unwrap();
+
+    // Clear any previous queued emails from creation/assignment
+    let conn = db.conn();
+    conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+
+    // Now call notify_users strictly targeting target_id
+    db.notify_users(
+        &conn,
+        bid,
+        &[target_id],
+        10,
+        "Reminder Subject",
+        "Reminder Body",
+    );
+
+    // Verify: ONLY target@example.com received an email
+    let mut stmt = conn
+        .prepare("SELECT email FROM mantis_email_table ORDER BY email ASC")
+        .unwrap();
+    let emails: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .flatten()
+        .collect();
+
+    assert_eq!(emails, vec!["target@example.com".to_string()]);
+}
+
+#[test]
+fn test_add_bugnote_with_type() {
+    let db = Db::open_in_memory().unwrap();
+    let pid = db
+        .create_project("Bugnote Type Project", 10, 10, "", true)
+        .unwrap();
+    let uid = db
+        .create_user(
+            "note_user",
+            "Note User",
+            "note@example.com",
+            "password",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let bid = db
+        .create_bug(
+            pid,
+            uid,
+            1,
+            "Bugnote Type Bug",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let n1 = db
+        .add_bugnote_with_type(bid, uid, "Standard Note", 10, 0, 0)
+        .unwrap();
+    let n2 = db
+        .add_bugnote_with_type(bid, uid, "Reminder Note", 10, 0, 1)
+        .unwrap();
+
+    let notes = db.list_bugnotes(bid, 90).unwrap();
+    assert_eq!(notes.len(), 2);
+    let note1 = notes.iter().find(|n| n.id == n1).unwrap();
+    let note2 = notes.iter().find(|n| n.id == n2).unwrap();
+
+    assert_eq!(note1.note_type, 0);
+    assert_eq!(note2.note_type, 1);
+}
+
+#[test]
+fn test_get_bugs_by_ids() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("BatchBugProj", 10, 10, "", true).unwrap();
+    let uid = db
+        .create_user("batch_user", "Batch", "b@x.com", "pw", 25, true, false)
+        .unwrap();
+
+    // 1. Empty slice returns empty map
+    let empty_res = db.get_bugs_by_ids(&[]).unwrap();
+    assert!(empty_res.is_empty());
+
+    // 2. Non-existent IDs return empty map
+    let non_existent = db.get_bugs_by_ids(&[9999, 10000]).unwrap();
+    assert!(non_existent.is_empty());
+
+    // 3. Create bugs
+    let bug1_id = db
+        .create_bug(
+            proj_id,
+            uid,
+            1,
+            "Bug 1 Summary",
+            "Desc 1",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let bug2_id = db
+        .create_bug(
+            proj_id,
+            uid,
+            1,
+            "Bug 2 Summary",
+            "Desc 2",
+            "",
+            "",
+            40,
+            60,
+            20,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Query mix of valid and non-existent IDs
+    let map = db.get_bugs_by_ids(&[bug1_id, bug2_id, 99999]).unwrap();
+    assert_eq!(map.len(), 2);
+    assert!(map.contains_key(&bug1_id));
+    assert!(map.contains_key(&bug2_id));
+
+    let b1 = &map[&bug1_id];
+    assert_eq!(b1.id, bug1_id);
+    assert_eq!(b1.project_id, proj_id);
+    assert_eq!(b1.summary, "Bug 1 Summary");
+    assert_eq!(b1.priority, 30);
+    assert_eq!(b1.severity, 50);
+
+    let b2 = &map[&bug2_id];
+    assert_eq!(b2.id, bug2_id);
+    assert_eq!(b2.project_id, proj_id);
+    assert_eq!(b2.summary, "Bug 2 Summary");
+    assert_eq!(b2.priority, 40);
+    assert_eq!(b2.severity, 60);
+}
+
+#[test]
+fn test_get_bugnotes_by_ids() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("BatchNoteProj", 10, 10, "", true)
+        .unwrap();
+    let uid = db
+        .create_user("note_user", "Note", "n@x.com", "pw", 25, true, false)
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id, uid, 1, "Note Bug", "Desc", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+
+    // 1. Empty slice returns empty map
+    assert!(db.get_bugnotes_by_ids(&[]).unwrap().is_empty());
+
+    // 2. Non-existent IDs return empty map
+    assert!(db.get_bugnotes_by_ids(&[8888, 9999]).unwrap().is_empty());
+
+    // 3. Create notes
+    let n1_id = db.add_bugnote(bug_id, uid, "First test note", 10).unwrap();
+    let n2_id = db
+        .add_bugnote(bug_id, uid, "Second private note", 50)
+        .unwrap();
+
+    let map = db.get_bugnotes_by_ids(&[n1_id, n2_id, 77777]).unwrap();
+    assert_eq!(map.len(), 2);
+    assert!(map.contains_key(&n1_id));
+    assert!(map.contains_key(&n2_id));
+
+    let note1 = &map[&n1_id];
+    assert_eq!(note1.id, n1_id);
+    assert_eq!(note1.bug_id, bug_id);
+    assert_eq!(note1.reporter_id, uid);
+    assert_eq!(note1.view_state, 10);
+    assert_eq!(note1.note, "First test note");
+
+    let note2 = &map[&n2_id];
+    assert_eq!(note2.id, n2_id);
+    assert_eq!(note2.bug_id, bug_id);
+    assert_eq!(note2.reporter_id, uid);
+    assert_eq!(note2.view_state, 50);
+    assert_eq!(note2.note, "Second private note");
+}
+
+#[test]
+fn test_set_plugin_enabled_admin() {
+    let db = Db::open_in_memory().unwrap();
+
+    // 1. Non-existent plugin fails
+    let err_not_found = db
+        .set_plugin_enabled_admin("NoSuchPlugin", false)
+        .unwrap_err();
+    assert!(err_not_found.contains("Plugin 'NoSuchPlugin' not found"));
+
+    // 2. Create another protected plugin not in TOGGLEABLE_CORE_PLUGINS
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO mantis_plugin_table (basename, enabled, protected, priority) VALUES ('OtherProtected', 1, 1, 10)",
+            [],
+        ).unwrap();
+    }
+    let err_protected = db
+        .set_plugin_enabled_admin("OtherProtected", false)
+        .unwrap_err();
+    assert!(err_protected.contains("Protected plugin 'OtherProtected' cannot be disabled"));
+
+    // 3. MantisCoreFormatting is in TOGGLEABLE_CORE_PLUGINS: can be toggled
+    assert!(db.is_plugin_enabled("MantisCoreFormatting"));
+    db.set_plugin_enabled_admin("MantisCoreFormatting", false)
+        .unwrap();
+    assert!(!db.is_plugin_enabled("MantisCoreFormatting"));
+
+    // Re-enable
+    db.set_plugin_enabled_admin("MantisCoreFormatting", true)
+        .unwrap();
+    assert!(db.is_plugin_enabled("MantisCoreFormatting"));
+}
+
+#[test]
+fn test_notify_bug_mentions() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("MentionProj", 10, 10, "", true).unwrap();
+    let actor_id = db
+        .create_user("actor", "Actor", "actor@x.com", "pw", 55, true, false)
+        .unwrap();
+    let _dev_id = db
+        .create_user("dev_alice", "Alice", "alice@x.com", "pw", 55, true, false)
+        .unwrap();
+    let _rep_id = db
+        .create_user("rep_bob", "Bob", "bob@x.com", "pw", 25, true, false)
+        .unwrap();
+    let disabled_id = db
+        .create_user(
+            "charlie",
+            "Charlie",
+            "charlie@x.com",
+            "pw",
+            25,
+            false,
+            false,
+        )
+        .unwrap();
+    assert!(disabled_id > 0);
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            actor_id,
+            1,
+            "Mention Issue",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Clear any notification emails created during bug creation
+    {
+        let conn = db.conn();
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    // 1. Public mention of dev_alice, rep_bob, actor himself, and non-existent user
+    let mentions = vec![
+        "dev_alice".to_string(),
+        "rep_bob".to_string(),
+        "actor".to_string(), // Self mention should be ignored
+        "non_existent".to_string(),
+        "charlie".to_string(),   // Disabled user should be ignored
+        "DEV_ALICE".to_string(), // Case-insensitive duplicate should be deduplicated
+    ];
+
+    db.notify_bug_mentions(
+        bug_id,
+        actor_id,
+        &mentions,
+        false,
+        "Public note referencing team",
+    )
+    .unwrap();
+
+    let queued = db.list_queued_emails().unwrap();
+    assert_eq!(
+        queued.len(),
+        2,
+        "Should only enqueue 2 emails: dev_alice and rep_bob"
+    );
+    let recipients: Vec<String> = queued.iter().map(|e| e.email.clone()).collect();
+    assert!(recipients.contains(&"alice@x.com".to_string()));
+    assert!(recipients.contains(&"bob@x.com".to_string()));
+    assert!(!recipients.contains(&"actor@x.com".to_string()));
+    assert!(!recipients.contains(&"charlie@x.com".to_string()));
+
+    // Verify email subject & body
+    let alice_email = queued.iter().find(|e| e.email == "alice@x.com").unwrap();
+    assert!(alice_email
+        .subject
+        .contains("Mentioned by actor: Mention Issue"));
+    assert!(alice_email.body.contains("You were mentioned by actor"));
+    assert!(alice_email.body.contains("Public note referencing team"));
+
+    // 2. Clear emails and test private note mentions
+    // For a private note, reporter (rep_bob with access 25 < 55) should NOT be notified
+    {
+        let conn = db.conn();
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    let private_mentions = vec!["dev_alice".to_string(), "rep_bob".to_string()];
+    db.notify_bug_mentions(
+        bug_id,
+        actor_id,
+        &private_mentions,
+        true, // is_private_note = true
+        "Confidential security note",
+    )
+    .unwrap();
+
+    let queued_private = db.list_queued_emails().unwrap();
+    assert_eq!(
+        queued_private.len(),
+        1,
+        "Only developer with access >= 55 should be notified of private notes"
+    );
+    assert_eq!(queued_private[0].email, "alice@x.com");
+}
+
+#[test]
+fn test_add_bugnote_mention_deduplication() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("DedupProj", 10, 10, "", true).unwrap();
+    let rep_alice = db
+        .create_user("alice", "Alice", "alice@test.com", "pw", 25, true, false)
+        .unwrap();
+    let handler_bob = db
+        .create_user("bob", "Bob", "bob@test.com", "pw", 55, true, false)
+        .unwrap();
+    let actor = db
+        .create_user(
+            "charlie",
+            "Charlie",
+            "charlie@test.com",
+            "pw",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            rep_alice,
+            1,
+            "Issue for dedup testing",
+            "Description",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Assign bob as handler
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_bug_table SET handler_id = ?1 WHERE id = ?2",
+            rusqlite::params![handler_bob, bug_id],
+        )
+        .unwrap();
+        // Clear creation emails
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    // Charlie adds a bugnote mentioning Bob (@bob)
+    let note_text = "Please check this @bob";
+    let mentions = vec!["bob".to_string()];
+
+    // Add note with mentions excluded from standard note notification
+    db.add_bugnote_with_time_and_mentions(bug_id, actor, note_text, 10, 0, &mentions)
+        .unwrap();
+
+    // Notify mentions
+    db.notify_bug_mentions(bug_id, actor, &mentions, false, note_text)
+        .unwrap();
+
+    let queued = db.list_queued_emails().unwrap();
+    // Alice (reporter) gets "Note added by charlie"
+    // Bob (handler, mentioned) gets "Mentioned by charlie"
+    // Bob MUST NOT receive a second duplicate "Note added" email!
+    assert_eq!(
+        queued.len(),
+        2,
+        "Total queued emails must be exactly 2 (no duplicate email for mentioned handler)"
+    );
+
+    let bob_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "bob@test.com")
+        .collect();
+    assert_eq!(
+        bob_emails.len(),
+        1,
+        "Mentioned handler bob should receive exactly 1 email"
+    );
+    assert!(
+        bob_emails[0].subject.contains("Mentioned by charlie"),
+        "Bob should receive the mention email"
+    );
+
+    let alice_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "alice@test.com")
+        .collect();
+    assert_eq!(
+        alice_emails.len(),
+        1,
+        "Reporter alice should receive the standard note notification"
+    );
+    assert!(
+        alice_emails[0].subject.contains("Note added by charlie"),
+        "Alice should receive the note notification"
+    );
+}
+
+#[test]
+fn test_chunked_batch_lookups_over_200_ids() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db.create_project("ChunkProj", 10, 10, "", true).unwrap();
+    let uid = db
+        .create_user("chunker", "Chunker", "chunk@x.com", "pw", 55, true, false)
+        .unwrap();
+
+    let mut bug_ids = Vec::with_capacity(250);
+    for idx in 0..250 {
+        let bid = db
+            .create_bug(
+                proj_id,
+                uid,
+                1,
+                &format!("Chunk bug {}", idx),
+                "desc",
+                "",
+                "",
+                30,
+                50,
+                10,
+                "",
+                "",
+                "",
+                "",
+                10,
+            )
+            .unwrap();
+        bug_ids.push(bid);
+    }
+
+    let bugs_map = db.get_bugs_by_ids(&bug_ids).unwrap();
+    assert_eq!(bugs_map.len(), 250);
+    assert_eq!(bugs_map[&bug_ids[0]].summary, "Chunk bug 0");
+    assert_eq!(bugs_map[&bug_ids[249]].summary, "Chunk bug 249");
+
+    let target_bug = bug_ids[0];
+    let mut note_ids = Vec::with_capacity(230);
+    for idx in 0..230 {
+        let nid = db
+            .add_bugnote(target_bug, uid, &format!("Chunk note {}", idx), 10)
+            .unwrap();
+        note_ids.push(nid);
+    }
+
+    let notes_map = db.get_bugnotes_by_ids(&note_ids).unwrap();
+    assert_eq!(notes_map.len(), 230);
+    assert_eq!(notes_map[&note_ids[0]].note, "Chunk note 0");
+    assert_eq!(notes_map[&note_ids[229]].note, "Chunk note 229");
+}
+
+#[test]
+fn test_change_bug_status_note_mentions_and_exclude_dedup() {
+    let db = Db::open_in_memory().unwrap();
+    let proj_id = db
+        .create_project("StatusMentionProj", 10, 10, "", true)
+        .unwrap();
+    let rep_id = db
+        .create_user("rep_u", "Rep", "rep@test.com", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev_u", "Dev", "dev@test.com", "pw", 55, true, false)
+        .unwrap();
+    let actor_id = db
+        .create_user("actor_u", "Actor", "actor@test.com", "pw", 55, true, false)
+        .unwrap();
+    let _observer_id = db
+        .create_user("obs_u", "Observer", "obs@test.com", "pw", 25, true, false)
+        .unwrap();
+
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            rep_id,
+            1,
+            "Status mention bug",
+            "Desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_bug_table SET handler_id = ?1 WHERE id = ?2",
+            rusqlite::params![dev_id, bug_id],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM mantis_email_table", []).unwrap();
+    }
+
+    // Resolving with a note mentioning @dev_u (handler) and @obs_u (non-subscriber):
+    // - dev_u should receive ONLY 1 email ("Mentioned by actor_u"), NOT a duplicate status email.
+    // - obs_u should receive 1 mention email.
+    // - rep_u should receive 1 standard status-changed email.
+    db.change_bug_status(
+        bug_id,
+        actor_id,
+        80,
+        20,
+        Some("Fixed; please verify @dev_u and @obs_u"),
+    )
+    .unwrap();
+
+    let queued = db.list_queued_emails().unwrap();
+    assert_eq!(queued.len(), 3, "Expected exactly 3 emails: rep, dev, obs");
+
+    let dev_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "dev@test.com")
+        .collect();
+    assert_eq!(dev_emails.len(), 1);
+    assert!(dev_emails[0].subject.contains("Mentioned by actor_u"));
+    assert!(dev_emails[0].body.contains("[Status changed to resolved]"));
+    assert!(dev_emails[0].body.contains("Fixed; please verify @dev_u"));
+
+    let obs_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "obs@test.com")
+        .collect();
+    assert_eq!(obs_emails.len(), 1);
+    assert!(obs_emails[0].subject.contains("Mentioned by actor_u"));
+    assert!(obs_emails[0].body.contains("[Status changed to resolved]"));
+
+    let rep_emails: Vec<_> = queued
+        .iter()
+        .filter(|e| e.email == "rep@test.com")
+        .collect();
+    assert_eq!(rep_emails.len(), 1);
+    assert!(rep_emails[0].subject.contains("Status changed to resolved"));
+
+    // Also test change_bug_status_with_exclude (used when REST PATCH notifies description mentions + changes status)
+    db.flush_email_queue().unwrap();
+    db.change_bug_status_with_exclude(bug_id, actor_id, 90, 20, None, &["rep_u".to_string()])
+        .unwrap();
+    let queued2 = db.list_queued_emails().unwrap();
+    assert_eq!(queued2.len(), 1);
+    assert_eq!(queued2[0].email, "dev@test.com");
+}
+
+#[test]
+fn test_timeline_events_rbac_isolation_and_note_counts() {
+    let db = Db::open_in_memory().unwrap();
+    let pub_proj = db.create_project("Public Proj", 10, 10, "", true).unwrap();
+    let priv_proj = db.create_project("Private Proj", 10, 50, "", true).unwrap();
+
+    let rep_id = db
+        .create_user("rep_tl", "Reporter", "rep@tl.test", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev_tl", "Developer", "dev@tl.test", "pw", 55, true, false)
+        .unwrap();
+
+    let rep_user = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev_user = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    // Public bug in public project created by dev
+    let pub_bug = db
+        .create_bug(
+            pub_proj,
+            dev_id,
+            1,
+            "Public Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Private bug in public project created by dev
+    let priv_bug = db
+        .create_bug(
+            pub_proj,
+            dev_id,
+            1,
+            "Private Issue",
+            "secret",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            50,
+        )
+        .unwrap();
+
+    // Public bug inside private project (rep_user is NOT a member of priv_proj!)
+    let priv_proj_bug = db
+        .create_bug(
+            priv_proj,
+            dev_id,
+            1,
+            "Hidden Project Issue",
+            "secret",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Public note (with time_tracking=30) and private note (with time_tracking=45) on pub_bug
+    let pub_note_id = db
+        .add_bugnote_with_time(pub_bug, rep_id, "Public comment", 10, 30)
+        .unwrap();
+    let priv_note_id = db
+        .add_bugnote_with_time(pub_bug, dev_id, "Private dev comment", 50, 45)
+        .unwrap();
+
+    // Update both notes and toggle view_state on public note (then toggle back to public)
+    db.update_bugnote(pub_note_id, rep_id, "Public comment edited")
+        .unwrap();
+    db.update_bugnote(priv_note_id, dev_id, "Private dev comment edited")
+        .unwrap();
+    db.set_bugnote_view_state(pub_note_id, dev_id, 50).unwrap();
+    db.set_bugnote_view_state(pub_note_id, dev_id, 10).unwrap();
+
+    // Timeline for rep_user across All Projects (None):
+    // - Sees pub_bug creation, public bugnote_added, and public bugnote_updated
+    // - Must NOT see priv_bug, priv_proj_bug, private bugnote_added, private bugnote_updated, bugnote_view_state, or private time_tracking
+    let rep_events = db.list_timeline_events(&rep_user, None, 50).unwrap();
+    assert!(rep_events
+        .iter()
+        .any(|e| e.bug_id == pub_bug && e.type_ == 1 && e.field_name.is_empty()));
+    assert!(rep_events
+        .iter()
+        .any(|e| e.bug_id == pub_bug && e.field_name == "bugnote_added"));
+    assert_eq!(
+        rep_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_added")
+            .count(),
+        1,
+        "Reporter must only see 1 public bugnote_added event"
+    );
+    assert_eq!(
+        rep_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_updated")
+            .count(),
+        1,
+        "Reporter must only see 1 public bugnote_updated event"
+    );
+    assert!(
+        !rep_events
+            .iter()
+            .any(|e| e.field_name == "bugnote_view_state"),
+        "Reporter must not see bugnote_view_state events"
+    );
+    assert!(
+        rep_events
+            .iter()
+            .any(|e| e.bug_id == pub_bug && e.field_name == "time_tracking" && e.new_value == "30"),
+        "Reporter must see time_tracking event from public note"
+    );
+    assert!(
+        !rep_events
+            .iter()
+            .any(|e| e.field_name == "time_tracking" && e.new_value == "45"),
+        "Reporter must not see time_tracking events from private notes"
+    );
+    assert!(
+        !rep_events.iter().any(|e| e.bug_id == priv_bug),
+        "Reporter must not see private issue events"
+    );
+    assert!(
+        !rep_events.iter().any(|e| e.bug_id == priv_proj_bug),
+        "Reporter must not see private project issue events"
+    );
+
+    // Scoped to priv_proj: rep_user gets empty timeline
+    assert!(db
+        .list_timeline_events(&rep_user, Some(priv_proj), 50)
+        .unwrap()
+        .is_empty());
+
+    // Timeline for dev_user (global access 55, no membership in priv_proj -> still cannot see priv_proj, CAN see priv_bug & private note in pub_proj)
+    let dev_events = db
+        .list_timeline_events(&dev_user, Some(pub_proj), 50)
+        .unwrap();
+    assert!(dev_events.iter().any(|e| e.bug_id == priv_bug));
+    assert_eq!(
+        dev_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_added")
+            .count(),
+        2,
+        "Developer must see both public and private bugnote_added events"
+    );
+    assert_eq!(
+        dev_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_updated")
+            .count(),
+        2,
+        "Developer must see both public and private bugnote_updated events"
+    );
+    assert_eq!(
+        dev_events
+            .iter()
+            .filter(|e| e.bug_id == pub_bug && e.field_name == "bugnote_view_state")
+            .count(),
+        2,
+        "Developer must see bugnote_view_state events"
+    );
+    assert!(
+        dev_events
+            .iter()
+            .any(|e| e.bug_id == pub_bug && e.field_name == "time_tracking" && e.new_value == "45"),
+        "Developer must see time_tracking event on private note"
+    );
+
+    // Subproject scoping: parent pub_proj includes visible child subproject events, excludes non-member private subproject
+    let sub_pub = db.create_project("Sub Public", 10, 10, "", true).unwrap();
+    let sub_priv = db.create_project("Sub Private", 10, 50, "", true).unwrap();
+    db.add_subproject(pub_proj, sub_pub, true).unwrap();
+    db.add_subproject(pub_proj, sub_priv, true).unwrap();
+
+    let sub_pub_bug = db
+        .create_bug(
+            sub_pub,
+            dev_id,
+            1,
+            "Subproject Public Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let sub_priv_bug = db
+        .create_bug(
+            sub_priv,
+            dev_id,
+            1,
+            "Subproject Private Issue",
+            "desc",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    let scoped_rep_events = db
+        .list_timeline_events(&rep_user, Some(pub_proj), 50)
+        .unwrap();
+    assert!(scoped_rep_events.iter().any(|e| e.bug_id == sub_pub_bug));
+    assert!(!scoped_rep_events.iter().any(|e| e.bug_id == sub_priv_bug));
+
+    // Verify batch note counts respect private note visibility
+    let mut rep_levels = HashMap::new();
+    rep_levels.insert(pub_bug, 25);
+    let (rep_notes, _) = db
+        .get_bug_note_and_file_counts(&[pub_bug], &rep_levels)
+        .unwrap();
+    assert_eq!(rep_notes.get(&pub_bug).copied(), Some(1));
+
+    let mut dev_levels = HashMap::new();
+    dev_levels.insert(pub_bug, 55);
+    let (dev_notes, _) = db
+        .get_bug_note_and_file_counts(&[pub_bug], &dev_levels)
+        .unwrap();
+    assert_eq!(dev_notes.get(&pub_bug).copied(), Some(2));
+}
+
+#[test]
+fn test_project_access_queries_match_effective_access_on_disabled_and_private_projects() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let rep_id = db
+        .create_user("rep_sql", "Rep", "rep_sql@test.com", "pw", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("dev_sql", "Dev", "dev_sql@test.com", "pw", 55, true, false)
+        .unwrap();
+
+    // Disabled project: admin still gets 90, project-override dev gets 0
+    let dis_proj = db.create_project("DisabledProj", 10, 10, "", true).unwrap();
+    db.update_project(dis_proj, "DisabledProj", 10, false, 10, "", true)
+        .unwrap();
+    db.set_project_user(dis_proj, dev_id, 55).unwrap();
+    let dis_assignable = db.list_assignable_users_for_project(dis_proj, 55).unwrap();
+    assert!(dis_assignable.iter().any(|u| u.id == admin.id));
+    assert!(!dis_assignable.iter().any(|u| u.id == dev_id));
+    let dis_map = db.list_project_user_access_map(dis_proj).unwrap();
+    assert_eq!(dis_map.get(&admin.id).copied(), Some(90));
+    assert_eq!(dis_map.get(&dev_id).copied(), Some(0));
+
+    // Private project: non-member dev gets 0, explicitly added rep gets 25
+    let priv_proj = db.create_project("PrivateProj", 10, 50, "", true).unwrap();
+    db.set_project_user(priv_proj, rep_id, 25).unwrap();
+    let priv_assignable = db.list_assignable_users_for_project(priv_proj, 55).unwrap();
+    assert!(priv_assignable.iter().any(|u| u.id == admin.id));
+    assert!(!priv_assignable.iter().any(|u| u.id == dev_id));
+    assert!(!priv_assignable.iter().any(|u| u.id == rep_id));
+    let priv_map = db.list_project_user_access_map(priv_proj).unwrap();
+    assert_eq!(priv_map.get(&admin.id).copied(), Some(90));
+    assert_eq!(priv_map.get(&dev_id).copied(), Some(0));
+    assert_eq!(priv_map.get(&rep_id).copied(), Some(25));
+}
+
+#[test]
+fn test_ui_m4_db_helpers_prefix_ancestors_and_overview_stats() {
+    let db = Db::open_in_memory().unwrap();
+    db.create_user("alice", "Alice", "a@x.com", "pw", 25, true, false)
+        .unwrap();
+    db.create_user("bob", "Bob", "b@x.com", "pw", 25, true, false)
+        .unwrap();
+    db.create_user("99bot", "Bot", "99@x.com", "pw", 25, true, false)
+        .unwrap();
+
+    let a_users = db.list_users_filtered(None, false, Some("A")).unwrap();
+    assert!(a_users.iter().any(|u| u.username == "alice"));
+    assert!(!a_users.iter().any(|u| u.username == "bob"));
+
+    let num_users = db.list_users_filtered(None, false, Some("0-9")).unwrap();
+    assert_eq!(num_users.len(), 1);
+    assert_eq!(num_users[0].username, "99bot");
+
+    let gp = db.create_project("GP", 10, 10, "", true).unwrap();
+    let p = db.create_project("P", 10, 10, "", true).unwrap();
+    let c = db.create_project("C", 10, 10, "", true).unwrap();
+    db.add_subproject(gp, p, true).unwrap();
+    db.add_subproject(p, c, true).unwrap();
+
+    let ancestors = db.list_project_ancestor_ids(c).unwrap();
+    assert!(ancestors.contains(&gp));
+    assert!(ancestors.contains(&p));
+    assert!(!ancestors.contains(&c));
+
+    let stats = db.get_site_overview_stats().unwrap();
+    assert_eq!(stats.projects_count, 3);
+    assert!(stats.users_count >= 4);
+}
+
+#[test]
+fn test_phase3_advanced_filtering_and_columns_config() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let rep_id = db
+        .create_user("adv_rep", "Rep", "ar@x.com", "pw", 25, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev_id = db
+        .create_user("adv_dev", "Dev", "ad@x.com", "pw", 55, true, false)
+        .unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    let proj_id = db
+        .create_project("AdvFilterProj", 10, 10, "", true)
+        .unwrap();
+    let cf_pub = db
+        .create_custom_field_full(
+            "Browser",
+            3,
+            "Chrome|Firefox",
+            "",
+            "",
+            10,
+            25,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    let cf_secret = db
+        .create_custom_field_full(
+            "InternalCode",
+            0,
+            "",
+            "",
+            "",
+            70,
+            70,
+            0,
+            0,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    db.link_custom_field_to_project(cf_pub, proj_id, 1).unwrap();
+    db.link_custom_field_to_project(cf_secret, proj_id, 2)
+        .unwrap();
+
+    let b1 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            rep_id,
+            1,
+            "Issue One Chrome",
+            "d1",
+            "",
+            "",
+            40,
+            60,
+            10,
+            "v1.0",
+            "Linux",
+            "6.1",
+            "x86_64",
+            10,
+            &[],
+            crate::db::BugCreateExtras {
+                target_version: "v2.0",
+                build: "b1",
+                due_date: 0,
+                handler_id: Some(dev_id),
+            },
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            dev_id,
+            1,
+            "Issue Two Firefox",
+            "d2",
+            "",
+            "",
+            20,
+            20,
+            30,
+            "v1.1",
+            "macOS",
+            "15",
+            "arm64",
+            50, // private bug!
+            &[],
+            crate::db::BugCreateExtras {
+                target_version: "v2.1",
+                build: "b2",
+                due_date: 0,
+                handler_id: None,
+            },
+        )
+        .unwrap();
+    let b3 = db
+        .create_bug_full_with_mentions(
+            proj_id,
+            rep_id,
+            1,
+            "Issue Three Fixed",
+            "d3",
+            "",
+            "",
+            50,
+            50,
+            10,
+            "v1.0",
+            "Windows",
+            "11",
+            "x64",
+            10,
+            &[],
+            crate::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+
+    db.change_bug_status(b3, dev_id, 80, 20, None).unwrap();
+    db.update_bug_fields(
+        b3,
+        dev_id,
+        crate::models::BugUpdate {
+            fixed_in_version: Some("v1.0.1".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_custom_field_value(cf_pub, b1, admin.id, "Chrome")
+        .unwrap();
+    db.set_custom_field_value(cf_pub, b3, admin.id, "Firefox")
+        .unwrap();
+    db.set_custom_field_value(cf_secret, b1, admin.id, "TOPSECRET")
+        .unwrap();
+    db.add_bugnote(b1, dev_id, "Public dev note", 10).unwrap();
+    db.add_bugnote(b3, dev_id, "Secret dev note", 50).unwrap();
+    db.add_bug_relationship(b1, b3, 3).unwrap(); // b1 blocks b3
+    db.add_bug_relationship(b1, b2, 0).unwrap(); // b1 related to private b2
+
+    // 1. Multi-select priority + MATCH ANY
+    let mut f_any = BugFilter {
+        project_id: Some(proj_id),
+        match_type: crate::models::FILTER_MATCH_ANY,
+        priorities: vec![40, 50],
+        ..Default::default()
+    };
+    let res_any = db.filter_bugs(&f_any, &rep).unwrap();
+    assert_eq!(res_any.len(), 2);
+
+    // 2. Version, Target Version, Fixed in Version, Resolution, Reproducibility, ViewState
+    let f_ver = BugFilter {
+        project_id: Some(proj_id),
+        versions: vec!["v1.0".to_string()],
+        resolutions: vec![20],
+        fixed_in_versions: vec!["v1.0.1".to_string()],
+        ..Default::default()
+    };
+    let res_ver = db.filter_bugs(&f_ver, &rep).unwrap();
+    assert_eq!(res_ver.iter().map(|b| b.id).collect::<Vec<_>>(), vec![b3]);
+
+    // 3. Date range filtering (update timestamps explicitly)
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE mantis_bug_table SET date_submitted = 1704067200, last_updated = 1704067200 WHERE id = ?1",
+            rusqlite::params![b1],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE mantis_bug_table SET date_submitted = 1735689600, last_updated = 1735689600 WHERE id = ?1",
+            rusqlite::params![b3],
+        )
+        .unwrap();
+    }
+    let f_date = BugFilter {
+        project_id: Some(proj_id),
+        date_submitted_from: Some("2024-01-01".to_string()),
+        date_submitted_to: Some("2024-01-02".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_date, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+
+    // 4. Note author RBAC: rep cannot match b3 via dev_id's private note, only b1 (public note)
+    let f_note = BugFilter {
+        project_id: Some(proj_id),
+        note_user_ids: vec![dev_id],
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_note, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+    assert_eq!(db.filter_bugs(&f_note, &dev).unwrap().len(), 2);
+
+    // 5. Relationship filter RBAC: rep querying relationship with private b2 gets 0 results
+    let f_rel_priv = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(-1),
+        relationship_bug_id: Some(b2),
+        ..Default::default()
+    };
+    assert!(db.filter_bugs(&f_rel_priv, &rep).unwrap().is_empty());
+    assert_eq!(db.filter_bugs(&f_rel_priv, &dev).unwrap().len(), 1);
+
+    // 6. Custom field filter + access_level_r oracle guard
+    f_any.match_type = 0;
+    f_any.priorities.clear();
+    f_any
+        .custom_fields
+        .insert(cf_pub, vec!["Chrome".to_string()]);
+    assert_eq!(
+        db.filter_bugs(&f_any, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+
+    let mut f_secret = BugFilter {
+        project_id: Some(proj_id),
+        ..Default::default()
+    };
+    f_secret
+        .custom_fields
+        .insert(cf_secret, vec!["TOPSECRET".to_string()]);
+    assert!(db.filter_bugs(&f_secret, &rep).unwrap().is_empty());
+    assert_eq!(db.filter_bugs(&f_secret, &admin).unwrap().len(), 1);
+
+    // 7. Per-context column config & custom field permission filtering
+    db.set_user_columns(
+        &admin,
+        proj_id,
+        crate::models::ColumnContext::View,
+        &[
+            "id".to_string(),
+            format!("custom_field_{}", cf_pub),
+            format!("custom_field_{}", cf_secret),
+            "summary".to_string(),
+        ],
+    )
+    .unwrap();
+    let admin_cols = db
+        .get_user_columns(&admin, proj_id, crate::models::ColumnContext::View)
+        .unwrap();
+    assert_eq!(admin_cols.len(), 4);
+    assert!(db
+        .set_user_columns(
+            &rep,
+            proj_id,
+            crate::models::ColumnContext::View,
+            &["id".to_string(), format!("custom_field_{}", cf_secret)],
+        )
+        .is_err());
+
+    // 8. M3: Bidirectional relationship filtering (Blocks/BlockedBy & -1)
+    let f_blocks_b3 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(3), // Blocks
+        relationship_bug_id: Some(b3),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_blocks_b3, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b1]
+    );
+    let f_blocked_by_b1 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(4), // BlockedBy
+        relationship_bug_id: Some(b1),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_blocked_by_b1, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b3]
+    );
+    let f_any_rel_b1 = BugFilter {
+        project_id: Some(proj_id),
+        relationship_type: Some(-1),
+        relationship_bug_id: Some(b1),
+        ..Default::default()
+    };
+    assert_eq!(
+        db.filter_bugs(&f_any_rel_b1, &rep)
+            .unwrap()
+            .iter()
+            .map(|b| b.id)
+            .collect::<Vec<_>>(),
+        vec![b3]
+    );
+
+    // 9. C1: Per-bug access_level_r check in get_bugs_custom_field_values_map across projects
+    let proj_elev = db.create_project("ElevatedProj", 10, 10, "", true).unwrap();
+    db.set_project_user(proj_elev, rep_id, 70).unwrap();
+    db.link_custom_field_to_project(cf_secret, proj_elev, 1)
+        .unwrap();
+    let cat_elev = db.list_effective_categories(proj_elev).unwrap()[0].id;
+    let b_elev = db
+        .create_bug_full_with_mentions(
+            proj_elev,
+            rep_id,
+            cat_elev,
+            "Elev bug",
+            "Desc",
+            "",
+            "",
+            40,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+            &[],
+            crate::db::BugCreateExtras::default(),
+        )
+        .unwrap();
+    db.set_custom_field_value(cf_secret, b_elev, admin.id, "ELEVATED_SECRET")
+        .unwrap();
+    let mut requested_cf = HashSet::new();
+    requested_cf.insert(cf_secret);
+    let bug_b1_rec = db.get_bug(b1).unwrap().unwrap();
+    let bug_elev_rec = db.get_bug(b_elev).unwrap().unwrap();
+    let rep_cf_vals = db
+        .get_bugs_custom_field_values_map(&rep, &[bug_b1_rec, bug_elev_rec], &requested_cf)
+        .unwrap();
+    assert_eq!(
+        rep_cf_vals.get(&(b_elev, cf_secret)).map(String::as_str),
+        Some("ELEVATED_SECRET")
+    );
+    assert!(!rep_cf_vals.contains_key(&(b1, cf_secret)));
+
+    // 10. M2 + Minor #3: Manager cannot list other users' private filters; columns fall back to project 0
+    let rep_priv_fid = db
+        .save_filter(
+            rep_id,
+            proj_id,
+            false,
+            "Only Rep Private",
+            &BugFilter::default(),
+        )
+        .unwrap();
+    let mgr_manageable = db.list_manageable_filters(&dev, proj_id).unwrap();
+    assert!(!mgr_manageable.iter().any(|sf| sf.id == rep_priv_fid));
+    assert!(db
+        .save_filter(
+            rep_id,
+            proj_id,
+            false,
+            &"x".repeat(65),
+            &BugFilter::default()
+        )
+        .is_err());
+
+    db.set_user_columns(
+        &rep,
+        0,
+        crate::models::ColumnContext::View,
+        &["id".to_string(), "summary".to_string()],
+    )
+    .unwrap();
+    let fallback_cols = db
+        .get_user_columns(&rep, proj_id, crate::models::ColumnContext::View)
+        .unwrap();
+    assert_eq!(fallback_cols, vec!["id", "summary"]);
+}
+
+#[test]
+fn test_list_accessible_news_rbac_isolation() {
+    let db = Db::open_in_memory().unwrap();
+    let pub_proj = db.create_project("NewsPubProj", 10, 10, "", true).unwrap();
+    let priv_proj = db.create_project("NewsPrivProj", 10, 50, "", true).unwrap();
+    let disabled_proj = db
+        .create_project("NewsDisabledProj", 10, 10, "", true)
+        .unwrap();
+    db.update_project(disabled_proj, "NewsDisabledProj", 10, false, 10, "", true)
+        .unwrap();
+
+    let rep_id = db
+        .create_user("news_rep", "News Rep", "nr@x.com", "pass", 25, true, false)
+        .unwrap();
+    let dev_id = db
+        .create_user("news_dev", "News Dev", "nd@x.com", "pass", 55, true, false)
+        .unwrap();
+    let dis_rep_id = db
+        .create_user(
+            "news_dis",
+            "Disabled",
+            "ndis@x.com",
+            "pass",
+            25,
+            false,
+            false,
+        )
+        .unwrap();
+
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+    let dis_rep = db.get_user_by_id(dis_rep_id).unwrap().unwrap();
+    let admin = db.get_user_by_id(1).unwrap().unwrap();
+
+    // Give dev project-specific Viewer override (10) on priv_proj so dev can enter priv_proj
+    // as Viewer only (should NOT see view_state=50 private news there!)
+    db.set_project_user(priv_proj, dev_id, 10).unwrap();
+
+    db.create_news(0, 1, "Global Public News", "global body", true, 10)
+        .unwrap();
+    db.create_news(0, 1, "Global Private News", "dev global body", false, 50)
+        .unwrap();
+    db.create_news(pub_proj, 1, "Public Project News", "pub body", false, 10)
+        .unwrap();
+    db.create_news(
+        priv_proj,
+        1,
+        "Private Project Public News",
+        "priv pub",
+        false,
+        10,
+    )
+    .unwrap();
+    db.create_news(
+        priv_proj,
+        1,
+        "Private Project Secret News",
+        "priv sec",
+        false,
+        50,
+    )
+    .unwrap();
+    db.create_news(
+        disabled_proj,
+        1,
+        "Disabled Project News",
+        "dis body",
+        false,
+        10,
+    )
+    .unwrap();
+
+    // Disabled user sees nothing
+    assert!(db.list_accessible_news(&dis_rep, 0).unwrap().is_empty());
+
+    // Reporter sees only Global Public + Public Project News
+    let rep_headlines: Vec<String> = db
+        .list_accessible_news(&rep, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(rep_headlines.contains(&"Global Public News".to_string()));
+    assert!(rep_headlines.contains(&"Public Project News".to_string()));
+    assert!(!rep_headlines.contains(&"Global Private News".to_string()));
+    assert!(!rep_headlines.contains(&"Private Project Public News".to_string()));
+    assert!(!rep_headlines.contains(&"Private Project Secret News".to_string()));
+    assert!(!rep_headlines.contains(&"Disabled Project News".to_string()));
+
+    // Dev sees Global Private News and Private Project Public News, NOT Private Project Secret News
+    let dev_headlines: Vec<String> = db
+        .list_accessible_news(&dev, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(dev_headlines.contains(&"Global Private News".to_string()));
+    assert!(dev_headlines.contains(&"Private Project Public News".to_string()));
+    assert!(!dev_headlines.contains(&"Private Project Secret News".to_string()));
+
+    // Admin sees Private Project Secret News, still not disabled project
+    let admin_headlines: Vec<String> = db
+        .list_accessible_news(&admin, 0)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.headline)
+        .collect();
+    assert!(admin_headlines.contains(&"Private Project Secret News".to_string()));
+    assert!(!admin_headlines.contains(&"Disabled Project News".to_string()));
+    assert!(db
+        .list_accessible_news(&admin, disabled_proj)
+        .unwrap()
+        .is_empty());
+
+    // RSS-scoped token rejected by authenticate_api_token_full (REST/MCP), accepted by authenticate_api_token_with_scope
+    let (_, rss_tok) = db
+        .create_api_token_with_scope(rep_id, "rss-only", "rss")
+        .unwrap();
+    assert!(db.authenticate_api_token_full(&rss_tok).unwrap().is_none());
+    let (_, authed_user, scope) = db
+        .authenticate_api_token_with_scope(&rss_tok)
+        .unwrap()
+        .unwrap();
+    assert_eq!(authed_user.id, rep_id);
+    assert_eq!(scope, "rss");
+    assert!(db
+        .create_api_token_with_scope(rep_id, "bad-scope", "admin")
+        .is_err());
+
+    // Batched get_bugs_bugnotes_map enforces per-bug access level on private notes
+    let b1 = db
+        .create_bug(
+            pub_proj, rep_id, 0, "N1", "d", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    let b2 = db
+        .create_bug(
+            priv_proj, dev_id, 0, "N2", "d", "", "", 30, 50, 10, "", "", "", "", 10,
+        )
+        .unwrap();
+    db.add_bugnote(b1, rep_id, "Public note", 10).unwrap();
+    db.add_bugnote(b1, dev_id, "Private note b1", 50).unwrap();
+    db.add_bugnote(b2, dev_id, "Private note b2", 50).unwrap();
+    let mut eff_map = HashMap::new();
+    eff_map.insert(b1, 25); // reporter: sees public only
+    eff_map.insert(b2, 55); // developer: sees private
+    let notes_map = db.get_bugs_bugnotes_map(&[b1, b2], &eff_map).unwrap();
+    assert_eq!(notes_map[&b1].len(), 1);
+    assert_eq!(notes_map[&b1][0].note, "Public note");
+    assert_eq!(notes_map[&b2].len(), 1);
+    assert_eq!(notes_map[&b2][0].note, "Private note b2");
+}
+
+#[test]
+fn test_phase3_m3_my_view_config_commented_summary_and_billing_queries() {
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let dev_id = db
+        .create_user("m3_dev", "M3 Dev", "m3d@x.com", "pw", 55, true, false)
+        .unwrap();
+    let dev = db.get_user_by_id(dev_id).unwrap().unwrap();
+
+    // 1. My View config get / set / delete round-trip
+    let def = db.get_my_view_config(dev_id);
+    assert!(def.show_timeline);
+    assert_eq!(def.enabled_boxes().len(), 6);
+
+    let mut custom = def.clone();
+    custom.show_timeline = false;
+    for b in &mut custom.boxes {
+        if b.key == "my_comments" {
+            b.enabled = true;
+            b.order = 1;
+        } else {
+            b.order += 1;
+        }
+    }
+    db.set_my_view_config(dev_id, &custom).unwrap();
+    let reloaded = db.get_my_view_config(dev_id);
+    assert!(!reloaded.show_timeline);
+    assert_eq!(
+        reloaded.enabled_boxes()[0],
+        crate::models::MyViewBox::MyComments
+    );
+
+    db.delete_config(crate::models::MY_VIEW_CONFIG_ID, 0, dev_id)
+        .unwrap();
+    assert!(db.get_my_view_config(dev_id).show_timeline);
+
+    // 2. Projects & subprojects with private subproject RBAC isolation
+    let parent_p = db.create_project("ParentBill", 10, 10, "", true).unwrap();
+    let pub_child = db.create_project("PubChildBill", 10, 10, "", true).unwrap();
+    let priv_child = db
+        .create_project("PrivChildBill", 10, 50, "", true)
+        .unwrap();
+    db.add_subproject(parent_p, pub_child, true).unwrap();
+    db.add_subproject(parent_p, priv_child, true).unwrap();
+
+    let b_parent = db
+        .create_bug(
+            parent_p,
+            1,
+            1,
+            "Parent Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let b_pub_child = db
+        .create_bug(
+            pub_child,
+            1,
+            1,
+            "Pub Child Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    let b_priv_child = db
+        .create_bug(
+            priv_child,
+            1,
+            1,
+            "Priv Child Bug",
+            "D",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+
+    // Commented bugs + history stats
+    db.add_bugnote_with_time(b_parent, dev_id, "Dev note parent", 10, 60)
+        .unwrap();
+    db.add_bugnote_with_time(b_pub_child, dev_id, "Dev note pub child", 10, 120)
+        .unwrap();
+    db.add_bugnote_with_time(b_priv_child, admin.id, "Admin secret child", 10, 180)
+        .unwrap();
+    db.change_bug_status(b_parent, admin.id, 80, 20, Some("Fixed"))
+        .unwrap();
+
+    let commented = db.list_bugs_commented_by_user(&dev, None).unwrap();
+    let commented_ids: Vec<i64> = commented.into_iter().map(|b| b.id).collect();
+    assert!(commented_ids.contains(&b_parent));
+    assert!(commented_ids.contains(&b_pub_child));
+    assert!(!commented_ids.contains(&b_priv_child));
+
+    let (hist_counts, resolved_at) = db
+        .get_bug_history_summary_stats(&[b_parent, b_pub_child], &HashMap::new())
+        .unwrap();
+    assert!(hist_counts.get(&b_parent).copied().unwrap_or(0) >= 1);
+    assert!(resolved_at.get(&b_parent).copied().unwrap_or(0) > 0);
+
+    // Private note history is excluded for viewers < 55 and visible for >= 55
+    let hist_priv_bug = db
+        .create_bug(
+            pub_child,
+            admin.id,
+            1,
+            "Priv note activity bug",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote_with_time(hist_priv_bug, admin.id, "Hidden note", 50, 45)
+        .unwrap();
+    let mut low_map = HashMap::new();
+    low_map.insert(hist_priv_bug, 25);
+    let (low_hist, _) = db
+        .get_bug_history_summary_stats(&[hist_priv_bug], &low_map)
+        .unwrap();
+    let mut dev_map = HashMap::new();
+    dev_map.insert(hist_priv_bug, 55);
+    let (dev_hist, _) = db
+        .get_bug_history_summary_stats(&[hist_priv_bug], &dev_map)
+        .unwrap();
+    assert!(dev_hist[&hist_priv_bug] > low_hist[&hist_priv_bug]);
+
+    // 3. Billing filtered: dev with include_subprojects=true sees parent + pub_child, NOT priv_child
+    let dev_rollup = db
+        .list_time_tracking_filtered(&dev, parent_p, true, None, None)
+        .unwrap();
+    let dev_bug_ids: Vec<i64> = dev_rollup.iter().map(|e| e.bug_id).collect();
+    assert!(dev_bug_ids.contains(&b_parent));
+    assert!(dev_bug_ids.contains(&b_pub_child));
+    assert!(!dev_bug_ids.contains(&b_priv_child));
+
+    // Direct parent only (include_subprojects=false)
+    let dev_direct = db
+        .list_time_tracking_filtered(&dev, parent_p, false, None, None)
+        .unwrap();
+    assert_eq!(dev_direct.len(), 1);
+    assert_eq!(dev_direct[0].bug_id, b_parent);
+
+    // Future date window returns empty
+    let empty_future = db
+        .list_time_tracking_filtered(&admin, parent_p, true, Some(4_000_000_000), None)
+        .unwrap();
+    assert!(empty_future.is_empty());
+
+    // Private note is not visible to lower-privilege user filtering commented_by another user,
+    // while project-scoped list_bugs_commented_by_user respects project_id & subprojects.
+    let priv_note_bug = db
+        .create_bug(
+            pub_child,
+            admin.id,
+            1,
+            "Bug with admin private note",
+            "",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote_with_time(priv_note_bug, admin.id, "Secret admin note", 50, 0)
+        .unwrap();
+    let rep_id = db
+        .create_user("sub4_rep", "rep@ex.com", "Rep", "pw", 25, true, false)
+        .unwrap();
+    let rep = db.get_user_by_id(rep_id).unwrap().unwrap();
+    let rep_filtering_admin = db
+        .filter_bugs(
+            &BugFilter {
+                commented_by: Some(admin.id),
+                ..Default::default()
+            },
+            &rep,
+        )
+        .unwrap();
+    assert!(!rep_filtering_admin.iter().any(|b| b.id == priv_note_bug));
+    assert!(!rep_filtering_admin.iter().any(|b| b.id == b_priv_child));
+
+    let dev_scoped = db
+        .list_bugs_commented_by_user(&dev, Some(pub_child))
+        .unwrap();
+    assert_eq!(dev_scoped.len(), 1);
+    assert_eq!(dev_scoped[0].id, b_pub_child);
+
+    // Oversized legacy time_tracking value (> i32::MAX) does not error out list_time_tracking_filtered
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO mantis_bugnote_table (bug_id, reporter_id, bugnote_text_id, view_state, date_submitted, last_modified, note_type, note_attr, time_tracking)
+             VALUES (?1, ?2, 0, 10, 1700000000, 1700000000, 0, '', 3000000000)",
+            params![b_parent, dev_id],
+        )
+        .unwrap();
+    }
+    let big_entries = db
+        .list_time_tracking_filtered(&dev, parent_p, false, None, None)
+        .unwrap();
+    assert!(big_entries.iter().any(|e| e.minutes == i32::MAX));
+    let notes_with_big = db.list_bugnotes(b_parent, 55).unwrap();
+    assert!(notes_with_big.iter().any(|n| n.time_tracking == i32::MAX));
 }

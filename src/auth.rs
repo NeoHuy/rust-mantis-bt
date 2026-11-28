@@ -282,12 +282,7 @@ pub fn verify_password(plain: &str, stored: &str) -> bool {
         return true;
     }
 
-    let allow_plaintext = std::env::var("MANTIS_ALLOW_LEGACY_PLAINTEXT_PASSWORD")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
+    let allow_plaintext = crate::models::env_flag_enabled("MANTIS_ALLOW_LEGACY_PLAINTEXT_PASSWORD");
     if allow_plaintext && !stored.is_empty() {
         return constant_time_eq(plain.as_bytes(), stored.as_bytes());
     }
@@ -376,13 +371,7 @@ pub fn make_cookie_header_with_path(
     if let Some(age) = max_age {
         parts.push(format!("Max-Age={}", age));
     }
-    let secure = std::env::var("MANTIS_COOKIE_SECURE")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
-    if secure {
+    if crate::models::env_flag_enabled("MANTIS_COOKIE_SECURE") {
         parts.push("Secure".to_string());
     }
     parts.join("; ")

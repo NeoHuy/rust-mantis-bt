@@ -28,6 +28,12 @@ pub struct JiraParentField {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JiraUserField {
+    #[serde(rename = "accountId")]
+    pub account_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JiraFields {
     pub project: JiraProjectField,
     pub summary: String,
@@ -35,6 +41,8 @@ pub struct JiraFields {
     pub issuetype: JiraIssueTypeField,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<JiraParentField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reporter: Option<JiraUserField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,9 +140,7 @@ impl Default for JiraClient {
 }
 
 pub(crate) fn env_allow_local_jira() -> bool {
-    std::env::var("MANTIS_ALLOW_LOCAL_JIRA")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::models::env_flag_enabled("MANTIS_ALLOW_LOCAL_JIRA")
 }
 
 pub fn check_resolved_ips(
@@ -359,6 +365,7 @@ impl JiraClient {
         description: &str,
         issue_type: &str,
         epic_key: Option<&str>,
+        reporter_account_id: Option<&str>,
     ) -> Result<JiraCreateIssueResponse, JiraError> {
         validate_jira_url_with_allow_local(&config.base_url, self.allow_local)?;
         let trimmed_url = config.base_url.trim().trim_end_matches('/');
@@ -373,29 +380,39 @@ impl JiraClient {
             ));
         }
 
-        let payload = build_create_issue_payload(
-            &config.project_key,
-            summary,
-            description,
-            if issue_type.trim().is_empty() {
-                &config.default_issue_type
-            } else {
-                issue_type
-            },
-            epic_key,
-        );
-
         let url = format!("{}/rest/api/2/issue", trimmed_url);
-        let resp = self
-            .client
-            .post(&url)
-            .basic_auth(config.email.trim(), Some(config.api_token.trim()))
-            .header("Accept", "application/json")
-            .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| JiraError::NetworkError(e.to_string()))?;
+        let issue_type = if issue_type.trim().is_empty() {
+            &config.default_issue_type
+        } else {
+            issue_type
+        };
+        let mut reporter = reporter_account_id.map(str::trim).filter(|r| !r.is_empty());
+        let resp = loop {
+            let payload = build_create_issue_payload(
+                &config.project_key,
+                summary,
+                description,
+                issue_type,
+                epic_key,
+                reporter,
+            );
+            let resp = self
+                .client
+                .post(&url)
+                .basic_auth(config.email.trim(), Some(config.api_token.trim()))
+                .header("Accept", "application/json")
+                .header("Content-Type", "application/json")
+                .json(&payload)
+                .send()
+                .await
+                .map_err(|e| JiraError::NetworkError(e.to_string()))?;
+            // Reporter rejected (e.g. no Modify Reporter permission): retry once without it.
+            if reporter.is_some() && resp.status() == reqwest::StatusCode::BAD_REQUEST {
+                reporter = None;
+                continue;
+            }
+            break resp;
+        };
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
@@ -417,6 +434,70 @@ impl JiraClient {
             .map_err(|e| JiraError::NetworkError(e.to_string()))?;
 
         parse_create_issue_response(&body_text, trimmed_url)
+    }
+
+    /// Looks up a Jira accountId by email. `Ok(None)` when no matching active user (or 404).
+    pub async fn find_user_by_email(
+        &self,
+        config: &JiraResolvedConfig,
+        email: &str,
+    ) -> Result<Option<String>, JiraError> {
+        validate_jira_url_with_allow_local(&config.base_url, self.allow_local)?;
+        let trimmed_url = config.base_url.trim().trim_end_matches('/');
+        let email = email.trim();
+        if trimmed_url.is_empty() || email.is_empty() {
+            return Ok(None);
+        }
+        let resp = self
+            .client
+            .get(format!("{}/rest/api/3/user/search", trimmed_url))
+            .query(&[("query", email)])
+            .basic_auth(config.email.trim(), Some(config.api_token.trim()))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| JiraError::NetworkError(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(JiraError::AuthError(
+                "Invalid credentials or insufficient permissions on Jira".to_string(),
+            ));
+        }
+        if !status.is_success() {
+            return Err(JiraError::ApiError {
+                status: status.as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        #[derive(Deserialize)]
+        struct U {
+            #[serde(rename = "accountId")]
+            account_id: String,
+            #[serde(rename = "emailAddress", default)]
+            email_address: Option<String>,
+            #[serde(default = "default_true")]
+            active: bool,
+        }
+        fn default_true() -> bool {
+            true
+        }
+        let users: Vec<U> = resp
+            .json()
+            .await
+            .map_err(|e| JiraError::ParseError(e.to_string()))?;
+        let mut active = users.iter().filter(|u| u.active);
+        let exact = users.iter().filter(|u| u.active).find(|u| {
+            u.email_address
+                .as_deref()
+                .is_some_and(|e| e.eq_ignore_ascii_case(email))
+        });
+        // Email hidden by privacy settings: fall back to the first active result.
+        Ok(exact
+            .or_else(|| active.find(|u| u.email_address.as_deref().unwrap_or("").is_empty()))
+            .map(|u| u.account_id.clone()))
     }
 
     pub async fn get_issue(
@@ -583,6 +664,7 @@ pub fn build_create_issue_payload(
     description: &str,
     issue_type: &str,
     epic_key: Option<&str>,
+    reporter_account_id: Option<&str>,
 ) -> JiraIssueCreatePayload {
     let parent = epic_key
         .map(|k| k.trim())
@@ -600,6 +682,12 @@ pub fn build_create_issue_payload(
                 name: issue_type.trim().to_string(),
             },
             parent,
+            reporter: reporter_account_id
+                .map(str::trim)
+                .filter(|r| !r.is_empty())
+                .map(|r| JiraUserField {
+                    account_id: r.to_string(),
+                }),
         },
     }
 }

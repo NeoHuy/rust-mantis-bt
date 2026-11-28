@@ -6,6 +6,12 @@ fn test_login_form_deserialize() {
         serde_json::from_str(r#"{"username":"admin","password":"secret"}"#).unwrap();
     assert_eq!(form.username, "admin");
     assert_eq!(form.password, "secret");
+    assert_eq!(form.perm_login, None);
+
+    let form_perm: LoginForm =
+        serde_json::from_str(r#"{"username":"admin","password":"secret","perm_login":"1"}"#)
+            .unwrap();
+    assert_eq!(form_perm.perm_login.as_deref(), Some("1"));
 }
 
 #[test]
@@ -35,6 +41,7 @@ async fn test_login_submit_invalid_credentials() {
     let form = LoginForm {
         username: "nonexistent".to_string(),
         password: "wrong".to_string(),
+        perm_login: None,
     };
     let resp = login_submit(State(db), Form(form)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -43,13 +50,33 @@ async fn test_login_submit_invalid_credentials() {
 #[tokio::test]
 async fn test_login_submit_valid_credentials() {
     let db = Db::open_in_memory().unwrap();
-    let form = LoginForm {
+
+    // 1. Unchecked / omitted perm_login -> session cookie without Max-Age=
+    let form_session = LoginForm {
         username: "administrator".to_string(),
         password: "root".to_string(),
+        perm_login: None,
     };
-    let resp = login_submit(State(db), Form(form)).await;
+    let resp = login_submit(State(db.clone()), Form(form_session)).await;
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    assert!(resp.headers().contains_key(SET_COOKIE));
+    let cookie_val = resp.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
+    assert!(!cookie_val.contains("Max-Age="));
+
+    // 2. Checked perm_login -> persistent cookie with Max-Age=
+    let form_perm = LoginForm {
+        username: "administrator".to_string(),
+        password: "root".to_string(),
+        perm_login: Some("1".to_string()),
+    };
+    let resp_perm = login_submit(State(db), Form(form_perm)).await;
+    assert_eq!(resp_perm.status(), StatusCode::SEE_OTHER);
+    let cookie_perm_val = resp_perm
+        .headers()
+        .get(SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(cookie_perm_val.contains("Max-Age="));
 }
 
 #[tokio::test]
@@ -80,6 +107,7 @@ async fn test_login_submit_lockout_blocks_login_without_enumeration() {
             Form(LoginForm {
                 username: "administrator".to_string(),
                 password: "wrong".to_string(),
+                perm_login: None,
             }),
         )
         .await;
@@ -93,6 +121,7 @@ async fn test_login_submit_lockout_blocks_login_without_enumeration() {
         Form(LoginForm {
             username: "administrator".to_string(),
             password: "root".to_string(),
+            perm_login: None,
         }),
     )
     .await;
@@ -104,8 +133,50 @@ async fn test_login_submit_lockout_blocks_login_without_enumeration() {
         Form(LoginForm {
             username: "nonexistent_victim".to_string(),
             password: "any_password".to_string(),
+            perm_login: None,
         }),
     )
     .await;
     assert_eq!(resp_nonexistent.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_login_page_alias_route() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = router().with_state(db.clone());
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login_page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let user = db
+        .authenticate("administrator", "root")
+        .unwrap()
+        .expect("seed admin");
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/login_page")
+                .header(
+                    "cookie",
+                    format!("MANTIS_STRING_COOKIE={}", user.cookie_string),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert_eq!(resp.headers().get("location").unwrap(), "/my_view_page");
 }

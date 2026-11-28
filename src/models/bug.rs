@@ -235,6 +235,18 @@ impl RelationshipType {
             Self::ChildOf => "child of",
         }
     }
+
+    pub fn complement(self) -> Self {
+        match self {
+            Self::RelatedTo => Self::RelatedTo,
+            Self::DuplicateOf => Self::HasDuplicate,
+            Self::HasDuplicate => Self::DuplicateOf,
+            Self::Blocks => Self::BlockedBy,
+            Self::BlockedBy => Self::Blocks,
+            Self::ParentOf => Self::ChildOf,
+            Self::ChildOf => Self::ParentOf,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +313,22 @@ pub struct BugHistory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub id: i64,
+    pub bug_id: i64,
+    pub bug_summary: String,
+    pub bug_status: i32,
+    pub project_id: i64,
+    pub user_id: i64,
+    pub username: String,
+    pub date_modified: i64,
+    pub field_name: String,
+    pub old_value: String,
+    pub new_value: String,
+    pub type_: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BugRelationship {
     pub id: i64,
     pub source_bug_id: i64,
@@ -339,4 +367,71 @@ pub struct BugUpdate {
     pub description: Option<String>,
     pub steps_to_reproduce: Option<String>,
     pub additional_information: Option<String>,
+    pub os: Option<String>,
+    pub os_build: Option<String>,
+    pub platform: Option<String>,
+    pub build: Option<String>,
+    pub due_date: Option<i64>,
+    pub sticky: Option<i32>,
+    pub expected_last_updated: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum RevisionType {
+    Description = 1,
+    StepsToReproduce = 2,
+    AdditionalInfo = 3,
+    Bugnote = 4,
+}
+
+impl RevisionType {
+    pub fn from_i32(v: i32) -> Option<Self> {
+        match v {
+            1 => Some(Self::Description),
+            2 => Some(Self::StepsToReproduce),
+            3 => Some(Self::AdditionalInfo),
+            4 => Some(Self::Bugnote),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Description => "description",
+            Self::StepsToReproduce => "steps to reproduce",
+            Self::AdditionalInfo => "additional information",
+            Self::Bugnote => "bugnote",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Description => "Description",
+            Self::StepsToReproduce => "Steps To Reproduce",
+            Self::AdditionalInfo => "Additional Information",
+            Self::Bugnote => "Bugnote",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BugRevision {
+    pub id: i64,
+    pub bug_id: i64,
+    pub bugnote_id: i64,
+    pub user_id: i64,
+    pub timestamp: i64,
+    pub rev_type: i32,
+    pub value: String,
+}
+
+impl BugRevision {
+    pub fn revision_type(&self) -> Option<RevisionType> {
+        RevisionType::from_i32(self.rev_type)
+    }
+
+    pub fn type_label(&self) -> &'static str {
+        self.revision_type().map(|t| t.label()).unwrap_or("Unknown")
+    }
 }

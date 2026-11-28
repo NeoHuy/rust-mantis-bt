@@ -66,6 +66,11 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test
   ```
+- **Automated Release Flow:**
+  - When preparing a release PR (`develop` → `main`), bump `[package].version` in `Cargo.toml` (strict SemVer 2.0.0 `X.Y.Z` or `X.Y.Z-prerelease`, without `+build` metadata) and update `Cargo.lock`.
+  - `.github/workflows/release.yml` owns all Docker image builds on `main` pushes (while `.github/workflows/rust.yml` runs CI checks and `.github/workflows/build-and-publish.yml` handles `workflow_call` plus manual `v*` tag pushes).
+  - Release pipeline uses a draft-release → test/publish-image (`cargo test --locked` + multi-arch GHCR `vX.Y.Z`, `X.Y.Z`, `X.Y`, and `:latest` for non-prereleases) → publish-release lifecycle.
+  - Stable versions compare only against existing stable tags (so a hotfix like `1.4.1` is not blocked by `v2.0.0-rc.1`); versions `<=` the highest matching tag are skipped (with a warning when lower) rather than failing, and prerelease code never updates `:latest`.
 - **PR Content Structure:**
   - **Summary:** Concise explanation of the problem solved.
   - **Key Changes:** Grouped by architectural layer (Model, View, Controller, DB, Integration).
@@ -113,6 +118,9 @@ docs/                           # Design specifications and implementation plans
   - `MANTIS_BASE_URL`: Base URL for issue links in notification emails (`Db::resolve_base_url` in `src/db.rs`; defaults to `http://<MANTIS_ADDR>`).
   - `MANTIS_MAX_FILE_SIZE`: Maximum upload size in bytes for bug attachments (default: `5242880` = 5MB).
   - `MANTIS_UPLOAD_DIR`: Optional directory path for attachment disk storage (default: empty; attachments stored directly in database).
+  - `MANTIS_ALLOWED_FILES`: Optional comma-separated whitelist of allowed file extensions (when non-empty, only extensions in this list may be attached).
+  - `MANTIS_DISALLOWED_FILES`: Optional comma-separated blacklist of disallowed file extensions (overriding the default dangerous extension guard).
+  - `MANTIS_EXPORT_MAX_ROWS`: Maximum issue rows included in Print, Excel XML, and Word exports (default: `1000`).
 - **Security, Auth & Sessions:**
   - `MANTIS_COOKIE_SECURE`: When set to `1` or `true`, marks cookies as `Secure` and enables `Strict-Transport-Security` (HSTS: `max-age=31536000; includeSubDomains`).
   - `MANTIS_PUBLIC_ORIGIN`: Whitelisted public origin URL for CSRF validation behind reverse proxies / SSL termination (e.g. `https://mantis.example.com`).
@@ -124,7 +132,7 @@ docs/                           # Design specifications and implementation plans
 - **Integrations (Jira, SendGrid, MCP):**
   - `MANTIS_JIRA_API_TOKEN`: Optional server-side environment override for Jira API token (takes precedence over token stored in database).
   - `MANTIS_ALLOW_LOCAL_JIRA`: Opt-in flag (`1` or `true`) to allow Jira integration to connect to local/private IP addresses (SSRF guard, default: false).
-  - `MANTIS_ALLOW_QUERY_TOKEN`: Set to `1` or `true` to allow `?token=` query auth on `/mcp/sse` for local dev/testing (disabled by default; prefer `Authorization: Bearer <token>`).
+  - `MANTIS_ALLOW_QUERY_TOKEN`: Set to `1` or `true` to allow `?token=` query auth on `/mcp/sse` and full-access API tokens in RSS query strings (`?token=` / `?key=`) for local dev/testing (disabled by default; prefer `Authorization: Bearer <token>` or a read-only `rss` token for feeds).
   - `SENDGRID_API_KEY`: Enables the background email queue worker when set.
   - `SENDGRID_FROM_EMAIL`, `SENDGRID_FROM_NAME`, `SENDGRID_ENDPOINT`: Optional sender identity and API endpoint overrides.
 
@@ -204,7 +212,7 @@ When tasked with implementing a feature or fixing a bug, follow this execution s
 
 6. **Security Middleware & Protections (CSRF, Headers, Sessions, Lockout):**
    - **CSRF Protection:** Handled by `csrf_protection_middleware` in `src/controllers/mod.rs` on state-changing methods (`POST`, `PUT`, `PATCH`, `DELETE`). Validates `Sec-Fetch-Site` (`same-origin`/`none`), and checks `Origin` / `Referer` against `X-Forwarded-Host` (taking precedence when present), `Host`, and `MANTIS_PUBLIC_ORIGIN`. For AJAX / JS `fetch` calls, include the `X-CSRF-Token` header (read from `<meta name="csrf-token" content="...">` rendered by `views/layout.rs`). Note that CSRF checks run only when origin/referer/token headers are supplied, and `/api/rest/*` and `/mcp*` routes are exempt.
-   - **Security Headers & CSP:** `security_headers_middleware` in `src/controllers/mod.rs` sets `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, Content Security Policy (restricts scripts and styles to `'self'` and `'unsafe-inline'`, preventing external CDN dependencies), and HSTS when `MANTIS_COOKIE_SECURE=1`.
+   - **Security Headers & CSP:** `security_headers_middleware` in `src/controllers/mod.rs` sets `X-Frame-Options: SAMEORIGIN`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, Content Security Policy (restricts scripts to `'self'` with zero inline JS, and styles to `'self'` and `'unsafe-inline'`, preventing external CDN dependencies), and HSTS when `MANTIS_COOKIE_SECURE=1`.
    - **Session Hardening & Lifecycle:** Session cookies (`MANTIS_STRING_COOKIE` / `mantis_string`) are marked `HttpOnly`, `SameSite=Lax`, and `Secure` (when configured). Sessions expire after `MANTIS_SESSION_TTL_SECS` of inactivity. The server-side cookie string is rotated on login (and upon logout, invalidating the active session while browser cookies are cleared with `Max-Age=0`).
    - **Brute-Force & SSRF Guards:** Account lockout prevents brute-force password guessing via `MANTIS_MAX_FAILED_LOGINS` and `MANTIS_LOCKOUT_SECS`. Jira outbound HTTP client validates resolved IP addresses to block SSRF against private/loopback networks unless `MANTIS_ALLOW_LOCAL_JIRA=1`.
 

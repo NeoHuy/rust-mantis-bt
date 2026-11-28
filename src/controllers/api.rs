@@ -96,6 +96,8 @@ pub async fn api_tokens_page(
 #[derive(Deserialize)]
 pub struct ApiTokenCreateForm {
     pub name: String,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 pub async fn api_token_create(
@@ -110,7 +112,12 @@ pub async fn api_token_create(
         );
     }
 
-    match db.create_api_token(ctx.user.id, &form.name) {
+    let scope = match form.scope.as_deref().map(str::trim) {
+        None | Some("") => "api".to_string(),
+        Some(s) => s.to_ascii_lowercase(),
+    };
+
+    match db.create_api_token_with_scope(ctx.user.id, &form.name, &scope) {
         Ok((_id, raw_token)) => {
             let mut res = Redirect::to("/api_tokens_page?msg=Token+created").into_response();
             let flash_cookie = make_cookie_header_with_path(
@@ -125,9 +132,11 @@ pub async fn api_token_create(
             }
             res
         }
-        Err(_) => {
-            Redirect::to("/api_tokens_page?err=Invalid+or+duplicate+token+name").into_response()
-        }
+        Err(e) => Redirect::to(&format!(
+            "/api_tokens_page?err={}",
+            crate::controllers::url_encode(&crate::controllers::sanitize_error_message(&e))
+        ))
+        .into_response(),
     }
 }
 
@@ -181,15 +190,17 @@ pub async fn manage_plugin_toggle(
     Path(basename): Path<String>,
     axum::Form(form): axum::Form<PluginToggleForm>,
 ) -> Response {
-    if ctx.user.access_level < 90 {
+    if ctx.user.access_level < crate::models::ACCESS_ADMINISTRATOR {
         return forbidden_html(&ctx, "Administrator access required.");
     }
     let enabled = parse_bool(form.enabled.as_deref());
-    match db.set_plugin_enabled(&basename, enabled) {
+    match db.set_plugin_enabled_admin(&basename, enabled) {
         Ok(()) => Redirect::to("/manage_plugin_page?msg=Plugin+updated").into_response(),
-        Err(_) => {
-            Redirect::to("/manage_plugin_page?err=Cannot+modify+protected+plugin").into_response()
-        }
+        Err(e) => Redirect::to(&format!(
+            "/manage_plugin_page?err={}",
+            crate::models::url_encode(&crate::controllers::sanitize_error_message(&e))
+        ))
+        .into_response(),
     }
 }
 
@@ -407,6 +418,7 @@ fn serialize_issue_json(db: &Db, bug_id: i64, user_access: i32) -> Option<Value>
         .get_custom_field_values_for_bug(b.id)
         .unwrap_or_default()
         .into_iter()
+        .filter(|cf| user_access >= cf.access_level_r)
         .map(|cf| {
             json!({
                 "field": { "id": cf.field_id, "name": cf.field_name },
@@ -580,7 +592,13 @@ pub async fn rest_create_issue(
         .unwrap_or(70) as i32;
     let view_state = payload.view_state.as_ref().and_then(|v| v.id).unwrap_or(10) as i32;
 
-    match db.create_bug(
+    let mentions = crate::models::collect_mentions(&[
+        payload.description.as_deref().unwrap_or(""),
+        payload.steps_to_reproduce.as_deref().unwrap_or(""),
+        payload.additional_information.as_deref().unwrap_or(""),
+    ]);
+
+    match db.create_bug_with_mentions(
         project_id,
         auth.user.id,
         category_id,
@@ -596,6 +614,7 @@ pub async fn rest_create_issue(
         "",
         "",
         view_state,
+        &mentions,
     ) {
         Ok(bug_id) => {
             if let Some(ref tv) = payload.target_version {
@@ -608,6 +627,24 @@ pub async fn rest_create_issue(
                     },
                 );
             }
+
+            // Mention notifications
+            if !mentions.is_empty() {
+                let context_text = crate::models::combine_context(
+                    &payload.summary,
+                    &[
+                        payload.description.as_deref().unwrap_or(""),
+                        payload.steps_to_reproduce.as_deref().unwrap_or(""),
+                        payload.additional_information.as_deref().unwrap_or(""),
+                    ],
+                );
+                if let Err(e) =
+                    db.notify_bug_mentions(bug_id, auth.user.id, &mentions, false, &context_text)
+                {
+                    eprintln!("[rest] failed to notify mentions on issue create: {}", e);
+                }
+            }
+
             let issue_json =
                 serialize_issue_json(&db, bug_id, eff).unwrap_or(json!({ "id": bug_id }));
             (StatusCode::CREATED, Json(json!({ "issue": issue_json }))).into_response()
@@ -686,6 +723,15 @@ pub async fn rest_update_issue(
         .filter(|&new_st| new_st != bug.status);
 
     if let Some(new_st) = requested_status_change {
+        if bug.status == 90 && new_st != 20 && new_st != 90 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "message": "Closed bug can only be reopened to feedback (status 20)"
+                })),
+            )
+                .into_response();
+        }
         let is_reporter_reopen =
             bug.status == 80 && new_st == 20 && eff >= 25 && bug.reporter_id == auth.user.id;
         if !is_reporter_reopen {
@@ -708,6 +754,34 @@ pub async fn rest_update_issue(
         }
     }
 
+    let old_full = db.get_bug_full(id).ok().flatten();
+    let old_mentions: std::collections::HashSet<String> = if let Some(ref f) = old_full {
+        let mut m = std::collections::HashSet::new();
+        for u in crate::models::extract_mentions(&f.description) {
+            m.insert(u.to_ascii_lowercase());
+        }
+        for u in crate::models::extract_mentions(&f.steps_to_reproduce) {
+            m.insert(u.to_ascii_lowercase());
+        }
+        for u in crate::models::extract_mentions(&f.additional_information) {
+            m.insert(u.to_ascii_lowercase());
+        }
+        m
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let effective_summary = payload
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&bug.summary)
+        .to_string();
+    let new_desc = payload.description.clone();
+    let new_steps = payload.steps_to_reproduce.clone();
+    let new_add = payload.additional_information.clone();
+
     let update = BugUpdate {
         summary: payload.summary,
         description: payload.description,
@@ -725,13 +799,49 @@ pub async fn rest_update_issue(
         return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
     }
 
+    // Mention notifications for newly added mentions
+    let updated_mentions = crate::models::collect_mentions(&[
+        new_desc.as_deref().unwrap_or(""),
+        new_steps.as_deref().unwrap_or(""),
+        new_add.as_deref().unwrap_or(""),
+    ]);
+    let newly_added = crate::models::diff_new_mentions(&old_mentions, &updated_mentions);
+    if !newly_added.is_empty() {
+        let base_context = crate::models::combine_context(
+            &effective_summary,
+            &[
+                new_desc.as_deref().unwrap_or(""),
+                new_steps.as_deref().unwrap_or(""),
+                new_add.as_deref().unwrap_or(""),
+            ],
+        );
+        let context = if let Some(new_st) = requested_status_change {
+            let status_name = BugStatus::from_i32(new_st)
+                .map(|s| s.as_str())
+                .unwrap_or("updated");
+            format!("[Status changed to {}]\n\n{}", status_name, base_context)
+        } else {
+            base_context
+        };
+        if let Err(e) = db.notify_bug_mentions(id, auth.user.id, &newly_added, false, &context) {
+            eprintln!("[rest] failed to notify mentions on issue update: {}", e);
+        }
+    }
+
     if let Some(new_st) = requested_status_change {
         let res_code = payload
             .resolution
             .and_then(|r| r.id)
             .map(|v| v as i32)
             .unwrap_or(bug.resolution);
-        if let Err(e) = db.change_bug_status(id, auth.user.id, new_st, res_code, None) {
+        if let Err(e) = db.change_bug_status_with_exclude(
+            id,
+            auth.user.id,
+            new_st,
+            res_code,
+            None,
+            &newly_added,
+        ) {
             return (StatusCode::BAD_REQUEST, Json(json!({ "message": e }))).into_response();
         }
     }
@@ -815,13 +925,34 @@ pub async fn rest_add_issue_note(
             .into_response();
     }
     let mins = if eff >= 55 {
-        payload.time_tracking.unwrap_or(0).max(0)
+        crate::models::clamp_time_tracking_minutes(i64::from(payload.time_tracking.unwrap_or(0)))
     } else {
         0
     };
 
-    match db.add_bugnote_with_time(id, auth.user.id, &payload.text, vs, mins) {
+    let mentions = crate::models::collect_mentions(&[&payload.text]);
+
+    match db.add_bugnote_with_time_and_mentions(
+        id,
+        auth.user.id,
+        &payload.text,
+        vs,
+        mins,
+        &mentions,
+    ) {
         Ok(note_id) => {
+            if !mentions.is_empty() {
+                if let Err(e) = db.notify_bug_mentions(
+                    id,
+                    auth.user.id,
+                    &mentions,
+                    vs == crate::models::VIEW_STATE_PRIVATE,
+                    &payload.text,
+                ) {
+                    eprintln!("[rest] failed to notify mentions on add_note: {}", e);
+                }
+            }
+
             let note = db.get_bugnote_by_id(note_id).ok().flatten();
             (
                 StatusCode::CREATED,
@@ -839,9 +970,17 @@ pub async fn rest_add_issue_note(
     }
 }
 
+async fn account_manage_api_tokens_redirect() -> Redirect {
+    Redirect::to("/api_tokens_page")
+}
+
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/api_tokens_page", get(api_tokens_page))
+        .route(
+            "/account_manage_api_tokens_page",
+            get(account_manage_api_tokens_redirect),
+        )
         .route("/api_token_create", post(api_token_create))
         .route("/api_token_revoke/:id", post(api_token_revoke))
         .route("/manage_plugin_page", get(manage_plugin_page))

@@ -60,9 +60,7 @@ pub async fn mcp_sse_handler(
 
     let bearer_token = crate::auth::extract_bearer_token(auth_header);
     // Allow query parameter only when explicitly enabled in environment for development/testing
-    let allow_query = std::env::var("MANTIS_ALLOW_QUERY_TOKEN")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let allow_query = crate::models::env_flag_enabled("MANTIS_ALLOW_QUERY_TOKEN");
 
     let raw_token = if !bearer_token.is_empty() {
         bearer_token
@@ -174,7 +172,7 @@ pub async fn mcp_messages_handler(
                 },
                 "serverInfo": {
                     "name": "rust-mantis-bt",
-                    "version": "0.1.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }),
         ),

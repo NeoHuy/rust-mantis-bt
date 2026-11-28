@@ -1,11 +1,14 @@
 pub mod api;
 pub mod auth;
 pub mod bugs;
+pub mod columns;
 pub mod custom_fields;
 pub mod filters;
 pub mod jira;
+pub mod manage;
 pub mod planning;
 pub mod projects;
+pub mod rss;
 pub mod tags;
 pub mod users;
 
@@ -25,6 +28,18 @@ pub fn parse_bool(opt: Option<&str>) -> bool {
     }
 }
 
+pub fn sanitize_error_message(s: &str) -> String {
+    let single_line = s.replace(['\r', '\n', '\t'], " ");
+    let trimmed = single_line.trim();
+    if trimmed.chars().count() > 120 {
+        format!("{}...", trimmed.chars().take(117).collect::<String>())
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub use crate::models::url_encode;
+
 pub async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
     if ctx.user.access_level >= 70 {
         Redirect::to("/manage_proj_page")
@@ -33,17 +48,80 @@ pub async fn root_handler(ctx: AuthContext) -> impl IntoResponse {
     }
 }
 
-async fn favicon_handler() -> impl IntoResponse {
+fn static_asset_response<T: IntoResponse>(
+    content_type: &'static str,
+    body: T,
+) -> axum::response::Response {
     (
-        [(axum::http::header::CONTENT_TYPE, "image/x-icon")],
-        include_bytes!("../../assets/favicon.ico"),
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+async fn favicon_handler() -> impl IntoResponse {
+    static_asset_response(
+        "image/x-icon",
+        include_bytes!("../../assets/favicon.ico").as_slice(),
     )
 }
 
 async fn logo_handler() -> impl IntoResponse {
-    (
-        [(axum::http::header::CONTENT_TYPE, "image/png")],
-        include_bytes!("../../assets/mantis_logo_notext.png"),
+    static_asset_response(
+        "image/png",
+        include_bytes!("../../assets/mantis_logo_notext.png").as_slice(),
+    )
+}
+
+async fn full_logo_handler() -> impl IntoResponse {
+    static_asset_response(
+        "image/png",
+        include_bytes!("../../assets/mantis_logo.png").as_slice(),
+    )
+}
+
+async fn tailwind_css_handler() -> impl IntoResponse {
+    static_asset_response(
+        "text/css; charset=utf-8",
+        include_str!("../../assets/css/tailwind.css"),
+    )
+}
+
+async fn font_awesome_css_handler() -> impl IntoResponse {
+    static_asset_response(
+        "text/css; charset=utf-8",
+        include_str!("../../assets/css/font-awesome.min.css"),
+    )
+}
+
+async fn mantis_js_handler() -> impl IntoResponse {
+    static_asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../../assets/js/mantis.js"),
+    )
+}
+
+async fn mantis_init_js_handler() -> impl IntoResponse {
+    static_asset_response(
+        "application/javascript; charset=utf-8",
+        include_str!("../../assets/js/mantis-init.js"),
+    )
+}
+
+async fn fontawesome_woff2_handler() -> impl IntoResponse {
+    static_asset_response(
+        "font/woff2",
+        include_bytes!("../../assets/fonts/fontawesome-webfont.woff2").as_slice(),
+    )
+}
+
+async fn fontawesome_woff_handler() -> impl IntoResponse {
+    static_asset_response(
+        "font/woff",
+        include_bytes!("../../assets/fonts/fontawesome-webfont.woff").as_slice(),
     )
 }
 
@@ -92,16 +170,10 @@ pub async fn security_headers_middleware(
     headers.insert(
         axum::http::header::CONTENT_SECURITY_POLICY,
         axum::http::HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'self'; base-uri 'self'",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; form-action 'self'; frame-ancestors 'self'; base-uri 'self'",
         ),
     );
-    let secure_cookie = std::env::var("MANTIS_COOKIE_SECURE")
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true"
-        })
-        .unwrap_or(false);
-    if secure_cookie {
+    if crate::models::env_flag_enabled("MANTIS_COOKIE_SECURE") {
         headers.insert(
             axum::http::header::STRICT_TRANSPORT_SECURITY,
             axum::http::HeaderValue::from_static("max-age=31536000; includeSubDomains"),
@@ -257,14 +329,33 @@ pub fn router() -> Router<Db> {
         .route("/", get(root_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/images/mantis_logo.png", get(logo_handler))
+        .route("/assets/tailwind.css", get(tailwind_css_handler))
+        .route(
+            "/assets/font-awesome.min.css",
+            get(font_awesome_css_handler),
+        )
+        .route("/assets/mantis.js", get(mantis_js_handler))
+        .route("/assets/mantis-init.js", get(mantis_init_js_handler))
+        .route("/assets/mantis_logo.png", get(full_logo_handler))
+        .route(
+            "/fonts/fontawesome-webfont.woff2",
+            get(fontawesome_woff2_handler),
+        )
+        .route(
+            "/fonts/fontawesome-webfont.woff",
+            get(fontawesome_woff_handler),
+        )
         .merge(auth::router())
+        .merge(manage::router())
         .merge(users::router())
         .merge(projects::router())
         .merge(bugs::router())
         .merge(tags::router())
         .merge(custom_fields::router())
         .merge(filters::router())
+        .merge(columns::router())
         .merge(planning::router())
+        .merge(rss::router())
         .merge(api::router())
         .merge(jira::router())
         .layer(axum::middleware::from_fn(csrf_protection_middleware))

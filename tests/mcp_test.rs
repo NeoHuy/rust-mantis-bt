@@ -815,6 +815,7 @@ async fn test_mcp_sse_and_messages_e2e() {
     assert!(sse_msg.contains("event: message"));
     assert!(sse_msg.contains(r#""protocolVersion":"2024-11-05""#));
     assert!(sse_msg.contains("rust-mantis-bt"));
+    assert!(sse_msg.contains(&format!(r#""version":"{}""#, env!("CARGO_PKG_VERSION"))));
 
     // 6. POST tools/list
     let res = app
@@ -964,4 +965,156 @@ async fn test_mcp_sse_and_messages_e2e() {
         .unwrap();
     assert_eq!(res_dev.status(), StatusCode::OK);
     std::env::remove_var("MANTIS_ALLOW_QUERY_TOKEN");
+
+    // 12. Read-only RSS tokens are rejected on /mcp/sse (header & query) and cannot access /mcp/messages
+    let (_rss_id, rss_tok) = db
+        .create_api_token_with_scope(rep_id, "mcp_rss_blocked", "rss")
+        .unwrap();
+    let res_rss_sse = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/mcp/sse")
+                .header("authorization", format!("Bearer {}", rss_tok))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rss_sse.status(), StatusCode::UNAUTHORIZED);
+
+    std::env::set_var("MANTIS_ALLOW_QUERY_TOKEN", "1");
+    let res_rss_sse_query = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/mcp/sse?token={}", rss_tok))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    std::env::remove_var("MANTIS_ALLOW_QUERY_TOKEN");
+    assert_eq!(res_rss_sse_query.status(), StatusCode::UNAUTHORIZED);
+
+    let res_rss_msg = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/messages?session_id=nonexistent")
+                .header("authorization", format!("Bearer {}", rss_tok))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res_rss_msg.status(), StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn test_mcp_mentions_on_create_issue_and_add_note() {
+    use rust_mantis_bt::mcp::tools::dispatch_tool_call;
+    use serde_json::json;
+
+    let db = Db::open_in_memory().unwrap();
+    let actor_id = db
+        .create_user(
+            "mcp_actor",
+            "Actor",
+            "actor@test.com",
+            "pw",
+            55,
+            true,
+            false,
+        )
+        .unwrap();
+    let actor = db.get_user_by_id(actor_id).unwrap().unwrap();
+    let _dev_id = db
+        .create_user("mcp_dev", "Dev", "dev@test.com", "pw", 55, true, false)
+        .unwrap();
+    let _rep_id = db
+        .create_user("mcp_rep", "Rep", "rep@test.com", "pw", 25, true, false)
+        .unwrap();
+
+    let proj_id = db
+        .create_project("McpMentionProj", 10, 10, "", true)
+        .unwrap();
+    let cat_id = db.add_category(proj_id, "General", 0).unwrap();
+    db.flush_email_queue().unwrap();
+
+    // 1. create_issue with @mcp_dev and @mcp_rep
+    let res = dispatch_tool_call(
+        &db,
+        &actor,
+        "create_issue",
+        json!({
+            "project_id": proj_id,
+            "category_id": cat_id,
+            "summary": "MCP mention issue",
+            "description": "Please inspect @mcp_dev and @mcp_rep"
+        }),
+    );
+    assert!(!res.is_error);
+    let parsed: serde_json::Value = serde_json::from_str(&res.content[0].text).unwrap();
+    let issue_id = parsed["issue_id"].as_i64().unwrap();
+
+    let emails = db.list_queued_emails().unwrap();
+    assert!(emails
+        .iter()
+        .any(|e| e.email == "dev@test.com" && e.subject.contains("Mentioned by mcp_actor")));
+    assert!(emails
+        .iter()
+        .any(|e| e.email == "rep@test.com" && e.subject.contains("Mentioned by mcp_actor")));
+
+    // 2. add_issue_note (private) mentions @mcp_dev and @mcp_rep -> only @mcp_dev (55+) notified
+    db.flush_email_queue().unwrap();
+    let res = dispatch_tool_call(
+        &db,
+        &actor,
+        "add_issue_note",
+        json!({
+            "issue_id": issue_id,
+            "text": "Private check @mcp_dev and @mcp_rep",
+            "view_state": 50
+        }),
+    );
+    assert!(!res.is_error);
+    let note_emails = db.list_queued_emails().unwrap();
+    let dev_note_emails: Vec<_> = note_emails
+        .iter()
+        .filter(|e| e.email == "dev@test.com")
+        .collect();
+    assert_eq!(dev_note_emails.len(), 1);
+    assert!(dev_note_emails[0]
+        .subject
+        .contains("Mentioned by mcp_actor"));
+    assert!(
+        !note_emails.iter().any(|e| e.email == "rep@test.com"),
+        "Reporter must not receive private note mention email"
+    );
+
+    // 3. add_issue_note clamps u32-overflowing time_tracking to MAX_TIME_TRACKING_MINUTES (100_000)
+    let res_overflow = dispatch_tool_call(
+        &db,
+        &actor,
+        "add_issue_note",
+        json!({
+            "issue_id": issue_id,
+            "text": "Overflow time test",
+            "time_tracking": 4_294_967_356i64
+        }),
+    );
+    assert!(!res_overflow.is_error);
+    let notes = db.list_bugnotes(issue_id, 55).unwrap();
+    let overflow_note = notes
+        .iter()
+        .find(|n| n.note == "Overflow time test")
+        .unwrap();
+    assert_eq!(
+        overflow_note.time_tracking,
+        rust_mantis_bt::models::MAX_TIME_TRACKING_MINUTES
+    );
 }

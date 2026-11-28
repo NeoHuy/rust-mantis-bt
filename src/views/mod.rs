@@ -1,11 +1,17 @@
 pub mod api;
 pub mod auth;
 pub mod bugs;
+pub mod charts;
+pub mod columns;
 pub mod custom_fields;
+pub mod filters;
+pub mod formatting;
 pub mod jira;
 pub mod layout;
+pub mod manage;
 pub mod planning;
 pub mod projects;
+pub mod rss;
 pub mod tags;
 pub mod users;
 
@@ -26,6 +32,59 @@ pub fn html_escape(s: &str) -> String {
         }
     }
     out
+}
+
+/// Escapes text for safe inclusion inside XML 1.0 text nodes and attributes,
+/// stripping disallowed XML control characters.
+pub fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if (c < ' ' && c != '\t' && c != '\n' && c != '\r') || c == '\u{FFFE}' || c == '\u{FFFF}' {
+            continue;
+        }
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Formats a Unix timestamp (seconds) as UTC RFC 2822 date-time string for RSS 2.0 feeds.
+pub fn format_rfc2822_timestamp(ts: i64) -> String {
+    let ts = ts.max(0);
+    let days = ts.div_euclid(86_400);
+    let secs_of_day = ts.rem_euclid(86_400);
+    let hour = secs_of_day / 3600;
+    let minute = (secs_of_day % 3600) / 60;
+    let second = secs_of_day % 60;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let wday = WEEKDAYS[((days + 4).rem_euclid(7)) as usize];
+    let month_name = MONTHS[(m as usize).saturating_sub(1).min(11)];
+
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} +0000",
+        wday, d, month_name, year, hour, minute, second
+    )
 }
 
 /// Convert Unix timestamp (seconds) to `YYYY-MM-DD HH:MM` in UTC using Howard Hinnant's civil calendar algorithm.
@@ -50,6 +109,53 @@ pub fn format_timestamp(ts: i64) -> String {
     let year = if m <= 2 { y + 1 } else { y };
 
     format!("{:04}-{:02}-{:02} {:02}:{:02}", year, m, d, hour, minute)
+}
+
+/// Convert Unix timestamp (seconds) to `YYYY-MM-DD` in UTC. Returns empty string if `ts <= 0`.
+pub fn format_date(ts: i64) -> String {
+    if ts <= 0 {
+        return String::new();
+    }
+    let formatted = format_timestamp(ts);
+    if let Some(date_part) = formatted.split_whitespace().next() {
+        date_part.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Parse `YYYY-MM-DD` to UTC epoch seconds using Howard Hinnant's days_from_civil algorithm.
+/// Returns `0` if empty or invalid.
+pub fn parse_date_to_epoch(s: &str) -> i64 {
+    let s = s.trim();
+    if s.is_empty() {
+        return 0;
+    }
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return 0;
+    }
+    let year: i64 = match parts[0].parse() {
+        Ok(y) => y,
+        Err(_) => return 0,
+    };
+    let month: u32 = match parts[1].parse() {
+        Ok(m) if (1..=12).contains(&m) => m,
+        _ => return 0,
+    };
+    let day: u32 = match parts[2].parse() {
+        Ok(d) if (1..=31).contains(&d) => d,
+        _ => return 0,
+    };
+
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64;
+    let m = month as u64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + (day as u64) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era * 146_097 + (doe as i64)) - 719_468;
+    days * 86_400
 }
 
 /// Official MantisBT status color palette
@@ -120,6 +226,85 @@ pub fn render_not_found_page(ctx: &AuthContext, message: &str) -> Response {
         ),
     )
         .into_response()
+}
+
+/// Renders the unified MantisBT 2.28.4 `.nav-tabs` navigation bar across all Manage pages.
+pub fn render_manage_tabs(ctx: &AuthContext, active_tab: &str) -> String {
+    let mut tabs: Vec<(&str, &str, &str, bool)> = Vec::new();
+    if ctx.user.access_level >= 90 {
+        tabs.push((
+            "overview",
+            "/manage_overview_page",
+            r#"<i class="fa fa-info-circle" aria-hidden="true"></i> Overview"#,
+            active_tab == "overview",
+        ));
+        tabs.push((
+            "users",
+            "/manage_user_page",
+            r#"<i class="fa fa-users" aria-hidden="true"></i> Manage Users"#,
+            active_tab == "users",
+        ));
+    }
+    if ctx.user.access_level >= 70 {
+        tabs.push((
+            "projects",
+            "/manage_proj_page",
+            r#"<i class="fa fa-folder-open" aria-hidden="true"></i> Manage Projects"#,
+            active_tab == "projects",
+        ));
+    }
+    tabs.push((
+        "tags",
+        "/manage_tags_page",
+        r#"<i class="fa fa-tags" aria-hidden="true"></i> Manage Tags"#,
+        active_tab == "tags",
+    ));
+    if ctx.user.access_level >= 90 {
+        tabs.push((
+            "custom_fields",
+            "/manage_custom_field_page",
+            r#"<i class="fa fa-sliders" aria-hidden="true"></i> Manage Custom Fields"#,
+            active_tab == "custom_fields",
+        ));
+        tabs.push((
+            "plugins",
+            "/manage_plugin_page",
+            r#"<i class="fa fa-plug" aria-hidden="true"></i> Manage Plugins"#,
+            active_tab == "plugins",
+        ));
+        tabs.push((
+            "jira",
+            "/manage_jira_page",
+            r#"<i class="fa fa-exchange" aria-hidden="true"></i> Manage Jira"#,
+            active_tab == "jira",
+        ));
+        tabs.push((
+            "email_queue",
+            "/manage_email_queue_page",
+            r#"<i class="fa fa-envelope-o" aria-hidden="true"></i> Email Queue"#,
+            active_tab == "email_queue",
+        ));
+    }
+
+    if tabs.is_empty() {
+        return String::new();
+    }
+
+    let mut html = String::from(r#"<nav aria-label="Manage sections"><ul class="nav-tabs">"#);
+    for (_key, href, label, is_active) in tabs {
+        let li_cls = if is_active { r#" class="active""# } else { "" };
+        let current = if is_active {
+            r#" aria-current="page""#
+        } else {
+            ""
+        };
+        html.push_str(&format!(
+            r#"<li{}><a href="{}"{}>{}</a></li>"#,
+            li_cls, href, current, label
+        ));
+    }
+    html.push_str("</ul></nav>");
+    html
 }
 
 #[cfg(test)]

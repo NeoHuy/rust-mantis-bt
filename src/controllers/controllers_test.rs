@@ -21,6 +21,26 @@ fn test_parse_bool() {
     assert!(!parse_bool(None));
 }
 
+#[test]
+fn test_sanitize_error_message_and_url_encode() {
+    assert_eq!(sanitize_error_message("Normal error"), "Normal error");
+    assert_eq!(
+        sanitize_error_message("Line 1\r\nLine 2\tTabbed"),
+        "Line 1  Line 2 Tabbed"
+    );
+    assert_eq!(
+        sanitize_error_message("   padded message   "),
+        "padded message"
+    );
+    let long_str = "a".repeat(150);
+    let sanitized = sanitize_error_message(&long_str);
+    assert_eq!(sanitized.chars().count(), 120);
+    assert!(sanitized.ends_with("..."));
+
+    assert_eq!(url_encode("hello world"), "hello+world");
+    assert_eq!(url_encode("foo@bar=1&baz=2"), "foo%40bar%3D1%26baz%3D2");
+}
+
 #[tokio::test]
 async fn test_security_headers_middleware() {
     use axum::body::Body;
@@ -65,8 +85,67 @@ async fn test_security_headers_middleware() {
             .unwrap()
             .to_str()
             .unwrap();
+        assert!(csp.contains("script-src 'self';"));
+        assert!(!csp.contains("script-src 'self' 'unsafe-inline'"));
         assert!(csp.contains("frame-ancestors 'self'"));
         assert!(csp.contains("form-action 'self'"));
+        assert!(csp.contains("font-src 'self'"));
+    }
+}
+
+#[tokio::test]
+async fn test_static_assets_endpoints() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let app = build_router(db);
+
+    let endpoints = [
+        ("/assets/tailwind.css", "text/css; charset=utf-8"),
+        ("/assets/font-awesome.min.css", "text/css; charset=utf-8"),
+        ("/assets/mantis.js", "application/javascript; charset=utf-8"),
+        (
+            "/assets/mantis-init.js",
+            "application/javascript; charset=utf-8",
+        ),
+        ("/assets/mantis_logo.png", "image/png"),
+        ("/fonts/fontawesome-webfont.woff2", "font/woff2"),
+        ("/fonts/fontawesome-webfont.woff", "font/woff"),
+    ];
+
+    for (uri, expected_ct) in endpoints {
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {uri} should return 200");
+        let headers = res.headers();
+        assert_eq!(
+            headers.get("content-type").unwrap().to_str().unwrap(),
+            expected_ct,
+            "Unexpected content-type for {uri}"
+        );
+        assert_eq!(
+            headers.get("cache-control").unwrap().to_str().unwrap(),
+            "public, max-age=86400",
+            "Missing cache-control for {uri}"
+        );
+        let csp = headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("font-src 'self'"),
+            "CSP should include font-src 'self' on {uri}"
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!bytes.is_empty(), "Empty asset body for {uri}");
     }
 }
 
@@ -293,4 +372,129 @@ async fn test_csrf_protection_middleware() {
         .unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
     std::env::remove_var("MANTIS_PUBLIC_ORIGIN");
+}
+
+#[tokio::test]
+async fn test_core_pages_have_zero_inline_js_and_zero_inline_event_handlers() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let db = Db::open_in_memory().unwrap();
+    let admin = db.get_user_by_username("administrator").unwrap().unwrap();
+    let proj_id = db
+        .create_project("CSP Test Project", 10, 10, "desc", true)
+        .unwrap();
+    let bug_id = db
+        .create_bug(
+            proj_id,
+            admin.id,
+            0,
+            "Test Bug",
+            "Test description",
+            "",
+            "",
+            30,
+            50,
+            10,
+            "",
+            "",
+            "",
+            "",
+            10,
+        )
+        .unwrap();
+    db.add_bugnote(bug_id, admin.id, "Test note for CSP", 10)
+        .unwrap();
+
+    let app = build_router(db);
+    let cookie = format!("MANTIS_STRING_COOKIE={}", admin.cookie_string);
+
+    let view_bug_uri = format!("/view_bug_page/{}", bug_id);
+    let proj_edit_uri = format!("/manage_proj_edit_page/{}", proj_id);
+    let user_edit_uri = format!("/manage_user_edit_page/{}", admin.id);
+    let rev_view_uri = format!("/bug_revision_view_page/{}", bug_id);
+    let pages: &[(&str, bool)] = &[
+        ("/my_view_page", true),
+        ("/my_view_config_page", true),
+        ("/view_all_bug_page", true),
+        ("/print_all_bug_page", true),
+        ("/bug_report_page", true),
+        (view_bug_uri.as_str(), true),
+        (rev_view_uri.as_str(), true),
+        ("/news_page", true),
+        ("/summary_page", true),
+        ("/manage_proj_page", true),
+        (proj_edit_uri.as_str(), true),
+        ("/manage_user_page", true),
+        (user_edit_uri.as_str(), true),
+        ("/manage_tags_page", true),
+        ("/manage_email_queue_page", true),
+        ("/manage_overview_page", true),
+        ("/account_page", true),
+        ("/account_manage_columns_page", true),
+        ("/api_tokens_page", true),
+        ("/signup_page", false),
+        ("/login", false),
+    ];
+
+    let inline_handler_re = regex::Regex::new(r#"(?i)\son[a-z]+\s*="#).unwrap();
+    let assert_no_inline_js = |uri: &str, html: &str| {
+        let lower = html.to_ascii_lowercase();
+        let mut search_from = 0;
+        while let Some(idx) = lower[search_from..].find("<script") {
+            let abs_idx = search_from + idx;
+            let tag_end = lower[abs_idx..]
+                .find('>')
+                .map(|e| abs_idx + e)
+                .unwrap_or(lower.len());
+            let tag_slice = &lower[abs_idx..tag_end];
+            assert!(
+                tag_slice.contains("src="),
+                "Inline <script> found on {uri}: {}",
+                &html[abs_idx..tag_end.min(abs_idx + 120)]
+            );
+            search_from = tag_end;
+        }
+        assert!(
+            !inline_handler_re.is_match(html),
+            "Inline event handler found on {uri}: {:?}",
+            inline_handler_re.find(html).map(|m| m.as_str())
+        );
+    };
+
+    for &(uri, with_auth) in pages {
+        let mut req_builder = Request::builder().uri(uri);
+        if with_auth {
+            req_builder = req_builder.header("cookie", &cookie);
+        }
+        let res = app
+            .clone()
+            .oneshot(req_builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "GET {uri} should return 200");
+
+        let csp = res
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            csp.contains("script-src 'self';"),
+            "CSP on {uri} must have script-src 'self'; got: {csp}"
+        );
+
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&bytes);
+        assert_no_inline_js(uri, &html);
+    }
+
+    // Also verify signup success HTML has zero inline JS / handlers
+    let signup_success_html = crate::views::auth::render_signup_success_page("csp_user").0;
+    assert_no_inline_js("render_signup_success_page", &signup_success_html);
 }

@@ -28,3 +28,17 @@ fn test_link_project_form_deserialize() {
     assert_eq!(form.project_id, 10);
     assert_eq!(form.sequence, Some(2));
 }
+
+#[test]
+fn test_custom_field_form_deserialize_with_valid_regexp() {
+    let form: CustomFieldForm = serde_json::from_str(
+        r#"{
+            "name": "Serial Number",
+            "field_type": 0,
+            "valid_regexp": "^[A-Z0-9]{10}$"
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(form.name, "Serial Number");
+    assert_eq!(form.valid_regexp.as_deref(), Some("^[A-Z0-9]{10}$"));
+}

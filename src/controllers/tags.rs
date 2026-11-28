@@ -31,9 +31,42 @@ pub async fn manage_tags_page(
     ctx: AuthContext,
     Query(q): Query<FlashQuery>,
 ) -> Response {
-    let tags = db.list_tags().unwrap_or_default();
+    let tags = db.list_tags_with_counts().unwrap_or_default();
     views::tags::render_manage_tags_page(&ctx, &tags, q.msg.as_deref(), q.err.as_deref())
         .into_response()
+}
+
+pub async fn tag_view_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(q): Query<FlashQuery>,
+) -> Response {
+    let (tag, count) = match db.get_tag_with_count_by_id(id) {
+        Ok(Some(res)) => res,
+        Ok(None) => return views::render_not_found_page(&ctx, "Tag not found"),
+        Err(_) => return views::render_not_found_page(&ctx, "Tag not found"),
+    };
+
+    let creator_username = if tag.user_id > 0 {
+        db.get_user_by_id(tag.user_id)
+            .ok()
+            .flatten()
+            .map(|u| u.username)
+            .unwrap_or_else(|| format!("user#{}", tag.user_id))
+    } else {
+        "administrator".to_string()
+    };
+
+    views::tags::render_tag_view_page(
+        &ctx,
+        &tag,
+        &creator_username,
+        count,
+        q.msg.as_deref(),
+        q.err.as_deref(),
+    )
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -70,8 +103,10 @@ pub async fn tag_update(
         return forbidden(&ctx, "Manager access required to update tags.");
     }
     match db.update_tag(id, &form.name, form.description.as_deref().unwrap_or("")) {
-        Ok(()) => Redirect::to("/manage_tags_page?msg=Tag+updated").into_response(),
-        Err(_) => Redirect::to("/manage_tags_page?err=Failed+to+update+tag").into_response(),
+        Ok(()) => Redirect::to(&format!("/tag_view_page/{}?msg=Tag+updated", id)).into_response(),
+        Err(_) => {
+            Redirect::to(&format!("/tag_view_page/{}?err=Failed+to+update+tag", id)).into_response()
+        }
     }
 }
 
@@ -168,6 +203,7 @@ pub async fn bug_tag_detach(
 pub fn router() -> Router<Db> {
     Router::new()
         .route("/manage_tags_page", get(manage_tags_page))
+        .route("/tag_view_page/:id", get(tag_view_page))
         .route("/tag_create", post(tag_create))
         .route("/tag_update/:id", post(tag_update))
         .route("/tag_delete/:id", post(tag_delete))

@@ -1,20 +1,83 @@
 use crate::auth::AuthContext;
 use crate::controllers::parse_bool;
 use crate::db::Db;
-use crate::models::{Bug, BugFilter};
+use crate::models::{
+    compute_extended_summary, BillingFilterOptions, BillingIssueSummary, Bug, BugFilter,
+    ExtendedSummaryData, TimeTrackingEntry,
+};
 use crate::views;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize, Default)]
 pub struct FlashQuery {
     pub msg: Option<String>,
     pub err: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct RoadmapQuery {
+    pub show_released: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct SummaryQuery {
+    pub days: Option<String>,
+}
+
+fn parse_summary_days(raw: Option<&str>) -> i64 {
+    raw.and_then(|s| s.trim().parse::<i64>().ok()).unwrap_or(30)
+}
+
+fn summary_access(db: &Db, ctx: &AuthContext) -> Result<bool, Box<Response>> {
+    if ctx.active_project_id > 0 {
+        let eff = db
+            .effective_access_level(&ctx.user, ctx.active_project_id)
+            .unwrap_or(0);
+        if eff < 10 {
+            return Err(Box::new(forbidden(ctx, "Access denied to this project.")));
+        }
+        let descendants = db
+            .list_project_descendant_ids(ctx.active_project_id)
+            .unwrap_or_else(|_| vec![ctx.active_project_id]);
+        let mut in_scope = Vec::new();
+        for pid in descendants {
+            let enabled = matches!(db.get_project_by_id(pid), Ok(Some(p)) if p.enabled != 0);
+            if enabled {
+                let peff = db.effective_access_level(&ctx.user, pid).unwrap_or(0);
+                if peff >= 10 {
+                    in_scope.push(peff);
+                }
+            }
+        }
+        if in_scope.is_empty() {
+            Ok(eff >= 70)
+        } else {
+            Ok(in_scope.iter().all(|&lvl| lvl >= 70))
+        }
+    } else {
+        let all_mgr = ctx.user.access_level >= 70
+            && ctx
+                .visible_projects
+                .iter()
+                .filter(|(p, _)| p.enabled != 0)
+                .all(|(p, _)| db.effective_access_level(&ctx.user, p.id).unwrap_or(0) >= 70);
+        Ok(all_mgr)
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct BillingQuery {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub include_subprojects: Option<String>,
+    pub cost: Option<String>,
 }
 
 fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
@@ -29,7 +92,12 @@ fn forbidden(ctx: &AuthContext, msg: &str) -> Response {
         .into_response()
 }
 
-pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
+pub async fn roadmap_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<RoadmapQuery>,
+) -> Response {
+    let show_released = parse_bool(q.show_released.as_deref());
     let filter = BugFilter {
         project_id: if ctx.active_project_id > 0 {
             Some(ctx.active_project_id)
@@ -45,18 +113,69 @@ pub async fn roadmap_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
+    let categories_map: HashMap<i64, String> = db
+        .list_all_categories()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
-    let mut by_target: BTreeMap<String, Vec<Bug>> = BTreeMap::new();
-    for b in bugs {
-        if !b.target_version.trim().is_empty() {
-            by_target
-                .entry(b.target_version.trim().to_string())
-                .or_default()
-                .push(b);
+    // Determine accessible projects and their names
+    let (accessible_project_ids, project_names): (Vec<i64>, HashMap<i64, String>) =
+        if ctx.active_project_id > 0 {
+            let desc_ids = db
+                .list_project_descendant_ids(ctx.active_project_id)
+                .unwrap_or_default();
+            let mut pids = Vec::new();
+            let mut pnames = HashMap::new();
+            for pid in desc_ids {
+                if db.effective_access_level(&ctx.user, pid).unwrap_or(0)
+                    >= crate::models::AccessLevel::Viewer as i32
+                {
+                    pids.push(pid);
+                    if let Ok(Some(proj)) = db.get_project_by_id(pid) {
+                        pnames.insert(pid, proj.name);
+                    }
+                }
+            }
+            (pids, pnames)
+        } else {
+            let visible = db.list_visible_projects(&ctx.user).unwrap_or_default();
+            let mut pids = Vec::new();
+            let mut pnames = HashMap::new();
+            for (p, _) in visible {
+                pids.push(p.id);
+                pnames.insert(p.id, p.name);
+            }
+            (pids, pnames)
+        };
+
+    // Load project versions from DB across all accessible projects
+    let mut all_project_versions = Vec::new();
+    for pid in &accessible_project_ids {
+        if let Ok(mut v_list) = db.list_versions(*pid) {
+            all_project_versions.append(&mut v_list);
         }
     }
 
-    views::planning::render_roadmap_page(&ctx, &by_target, &users_map).into_response()
+    let mut version_groups = crate::models::build_roadmap_groups(
+        &accessible_project_ids,
+        all_project_versions,
+        bugs,
+        &project_names,
+    );
+
+    if !show_released {
+        version_groups.retain(|g| !g.released);
+    }
+
+    views::planning::render_roadmap_page_with_options(
+        &ctx,
+        &version_groups,
+        &users_map,
+        &categories_map,
+        show_released,
+    )
+    .into_response()
 }
 
 pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response {
@@ -75,10 +194,17 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
+    let categories_map: HashMap<i64, String> = db
+        .list_all_categories()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
     let mut by_fixed: BTreeMap<String, Vec<Bug>> = BTreeMap::new();
+    let mut project_ids = std::collections::BTreeSet::new();
     for b in bugs {
         if b.status >= 80 && !b.fixed_in_version.trim().is_empty() {
+            project_ids.insert(b.project_id);
             by_fixed
                 .entry(b.fixed_in_version.trim().to_string())
                 .or_default()
@@ -86,10 +212,28 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         }
     }
 
-    views::planning::render_changelog_page(&ctx, &by_fixed, &users_map).into_response()
+    let mut version_dates: HashMap<String, i64> = HashMap::new();
+    for pid in project_ids {
+        for v in db.list_versions(pid).unwrap_or_default() {
+            if v.released != 0 && v.date_order > 0 {
+                version_dates
+                    .entry(v.version.trim().to_string())
+                    .or_insert(v.date_order);
+            }
+        }
+    }
+
+    views::planning::render_changelog_page_with_dates(
+        &ctx,
+        &by_fixed,
+        &users_map,
+        &categories_map,
+        &version_dates,
+    )
+    .into_response()
 }
 
-pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
+fn load_extended_summary(db: &Db, ctx: &AuthContext, trend_days: i64) -> ExtendedSummaryData {
     let filter = BugFilter {
         project_id: if ctx.active_project_id > 0 {
             Some(ctx.active_project_id)
@@ -105,109 +249,287 @@ pub async fn summary_page(State(db): State<Db>, ctx: AuthContext) -> Response {
         .into_iter()
         .map(|u| (u.id, u.username))
         .collect();
+    let categories_map: HashMap<i64, String> = db
+        .list_all_categories()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let projects_map: HashMap<i64, String> = ctx
+        .visible_projects
+        .iter()
+        .map(|(p, _)| (p.id, p.name.clone()))
+        .collect();
 
-    let mut by_status: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_severity: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_priority: BTreeMap<i32, usize> = BTreeMap::new();
-    let mut by_reporter: BTreeMap<String, usize> = BTreeMap::new();
-    let mut by_handler: BTreeMap<String, usize> = BTreeMap::new();
+    let mut eff_cache: HashMap<i64, i32> = HashMap::new();
+    let bug_access_levels: HashMap<i64, i32> = bugs
+        .iter()
+        .map(|b| {
+            let eff = *eff_cache.entry(b.project_id).or_insert_with(|| {
+                db.effective_access_level(&ctx.user, b.project_id)
+                    .unwrap_or(0)
+            });
+            (b.id, eff)
+        })
+        .collect();
+    let bug_ids: Vec<i64> = bugs.iter().map(|b| b.id).collect();
+    let (history_counts, resolved_at_map) = db
+        .get_bug_history_summary_stats(&bug_ids, &bug_access_levels)
+        .unwrap_or_default();
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
 
-    let mut open_count = 0usize;
-    let mut resolved_count = 0usize;
-    let mut closed_count = 0usize;
+    compute_extended_summary(
+        &bugs,
+        now_ts,
+        &projects_map,
+        &categories_map,
+        &users_map,
+        &history_counts,
+        &resolved_at_map,
+        trend_days,
+    )
+}
 
-    for b in &bugs {
-        *by_status.entry(b.status).or_default() += 1;
-        *by_severity.entry(b.severity).or_default() += 1;
-        *by_priority.entry(b.priority).or_default() += 1;
+pub async fn summary_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<SummaryQuery>,
+) -> Response {
+    let show_user_metrics = match summary_access(&db, &ctx) {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+    let summary = load_extended_summary(&db, &ctx, parse_summary_days(q.days.as_deref()));
+    views::planning::render_summary_page_extended(&ctx, &summary, show_user_metrics).into_response()
+}
 
-        let rep = users_map
-            .get(&b.reporter_id)
-            .cloned()
-            .unwrap_or_else(|| format!("user#{}", b.reporter_id));
-        *by_reporter.entry(rep).or_default() += 1;
+pub async fn summary_graph_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<SummaryQuery>,
+) -> Response {
+    let show_user_metrics = match summary_access(&db, &ctx) {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+    let summary = load_extended_summary(&db, &ctx, parse_summary_days(q.days.as_deref()));
+    views::planning::render_summary_graph_page(&ctx, &summary, show_user_metrics).into_response()
+}
 
-        if b.handler_id > 0 {
-            let hnd = users_map
-                .get(&b.handler_id)
-                .cloned()
-                .unwrap_or_else(|| format!("user#{}", b.handler_id));
-            *by_handler.entry(hnd).or_default() += 1;
-        }
+struct BillingReportData {
+    entries: Vec<TimeTrackingEntry>,
+    by_user: BTreeMap<String, i64>,
+    by_issue: Vec<BillingIssueSummary>,
+    total_mins: i64,
+    opts: BillingFilterOptions,
+    warning: Option<String>,
+}
 
-        if b.status == 90 {
-            closed_count += 1;
-        } else if b.status >= 80 {
-            resolved_count += 1;
-        } else {
-            open_count += 1;
-        }
+fn load_billing_report(
+    db: &Db,
+    ctx: &AuthContext,
+    q: &BillingQuery,
+) -> Result<BillingReportData, Box<Response>> {
+    let eff = if ctx.active_project_id > 0 {
+        db.effective_access_level(&ctx.user, ctx.active_project_id)
+            .unwrap_or(0)
+    } else if ctx.user.access_level >= 55 {
+        ctx.user.access_level
+    } else {
+        ctx.visible_projects
+            .iter()
+            .filter(|(p, _)| p.enabled != 0)
+            .filter_map(|(p, _)| db.effective_access_level(&ctx.user, p.id).ok())
+            .max()
+            .unwrap_or(0)
+    };
+    if eff < 55 {
+        return Err(Box::new(forbidden(
+            ctx,
+            "Developer access required to view Time Tracking.",
+        )));
     }
 
-    views::planning::render_summary_page(
+    let from_raw = q
+        .from
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let to_raw =
+        q.to.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+    let from_ts = from_raw
+        .as_deref()
+        .map(views::parse_date_to_epoch)
+        .filter(|&t| t > 0);
+    let to_ts = to_raw
+        .as_deref()
+        .map(views::parse_date_to_epoch)
+        .filter(|&t| t > 0)
+        .map(|t| t + 86_399);
+    let from_clean = if from_ts.is_some() {
+        from_raw.clone()
+    } else {
+        None
+    };
+    let to_clean = if to_ts.is_some() {
+        to_raw.clone()
+    } else {
+        None
+    };
+    let invalid_date =
+        (from_raw.is_some() && from_ts.is_none()) || (to_raw.is_some() && to_ts.is_none());
+    let reversed_range = matches!((from_ts, to_ts), (Some(f), Some(t)) if f > t);
+    let warning = if invalid_date {
+        Some("Invalid date filter ignored; expected YYYY-MM-DD.".to_string())
+    } else if reversed_range {
+        Some("Start date is after end date; no entries match this range.".to_string())
+    } else {
+        None
+    };
+
+    let include_subprojects = parse_bool(q.include_subprojects.as_deref());
+    let hourly_rate = q
+        .cost
+        .as_deref()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|r| r.is_finite() && *r >= 0.0)
+        .map(|r| r.min(1_000_000.0))
+        .unwrap_or(0.0);
+
+    let entries = if reversed_range {
+        Vec::new()
+    } else {
+        db.list_time_tracking_filtered(
+            &ctx.user,
+            ctx.active_project_id,
+            include_subprojects,
+            from_ts,
+            to_ts,
+        )
+        .unwrap_or_default()
+    };
+
+    let mut total_mins = 0i64;
+    let mut by_user: BTreeMap<String, i64> = BTreeMap::new();
+    let mut by_issue_map: HashMap<i64, BillingIssueSummary> = HashMap::new();
+
+    for e in &entries {
+        let mins = i64::from(e.minutes.max(0));
+        total_mins = total_mins.saturating_add(mins);
+        let u_entry = by_user.entry(e.username.clone()).or_default();
+        *u_entry = u_entry.saturating_add(mins);
+        by_issue_map
+            .entry(e.bug_id)
+            .and_modify(|item| item.minutes = item.minutes.saturating_add(mins))
+            .or_insert_with(|| BillingIssueSummary {
+                bug_id: e.bug_id,
+                bug_summary: e.bug_summary.clone(),
+                project_name: e.project_name.clone(),
+                minutes: mins,
+            });
+    }
+
+    let mut by_issue: Vec<BillingIssueSummary> = by_issue_map.into_values().collect();
+    by_issue.sort_by(|a, b| {
+        b.minutes
+            .cmp(&a.minutes)
+            .then_with(|| a.bug_id.cmp(&b.bug_id))
+    });
+
+    Ok(BillingReportData {
+        entries,
+        by_user,
+        by_issue,
+        total_mins,
+        opts: BillingFilterOptions {
+            from: from_clean,
+            to: to_clean,
+            include_subprojects,
+            hourly_rate,
+        },
+        warning,
+    })
+}
+
+pub async fn billing_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<BillingQuery>,
+) -> Response {
+    let report = match load_billing_report(&db, &ctx, &q) {
+        Ok(r) => r,
+        Err(res) => return *res,
+    };
+
+    views::planning::render_billing_page_extended(
         &ctx,
-        bugs.len(),
-        open_count,
-        resolved_count,
-        closed_count,
-        &by_status,
-        &by_severity,
-        &by_priority,
-        &by_reporter,
-        &by_handler,
+        &report.entries,
+        &report.by_user,
+        &report.by_issue,
+        report.total_mins,
+        &report.opts,
+        report.warning.as_deref(),
     )
     .into_response()
 }
 
-pub async fn billing_page(State(db): State<Db>, ctx: AuthContext) -> Response {
-    let eff = if ctx.active_project_id > 0 {
-        db.effective_access_level(&ctx.user, ctx.active_project_id)
-            .unwrap_or(0)
-    } else {
-        ctx.user.access_level
+pub async fn billing_export_csv(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<BillingQuery>,
+) -> Response {
+    let report = match load_billing_report(&db, &ctx, &q) {
+        Ok(r) => r,
+        Err(res) => return *res,
     };
-    if eff < 55 {
-        return forbidden(&ctx, "Developer access required to view Time Tracking.");
-    }
+    let csv = views::planning::render_billing_csv(&report.entries, report.opts.hourly_rate);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"billing.csv\"".to_string(),
+            ),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+        ],
+        csv,
+    )
+        .into_response()
+}
 
-    let raw_entries = db
-        .list_time_tracking(ctx.active_project_id)
-        .unwrap_or_default();
-    let entries: Vec<_> = if ctx.active_project_id > 0 {
-        raw_entries
-    } else {
-        let mut bug_proj_cache: std::collections::HashMap<i64, Option<i64>> =
-            std::collections::HashMap::new();
-        let mut proj_access_cache: std::collections::HashMap<i64, i32> =
-            std::collections::HashMap::new();
-        raw_entries
-            .into_iter()
-            .filter(|e| {
-                let project_id = *bug_proj_cache
-                    .entry(e.bug_id)
-                    .or_insert_with(|| db.get_bug(e.bug_id).ok().flatten().map(|b| b.project_id));
-                match project_id {
-                    Some(pid) => {
-                        let p_eff = *proj_access_cache.entry(pid).or_insert_with(|| {
-                            db.effective_access_level(&ctx.user, pid).unwrap_or(0)
-                        });
-                        p_eff >= 55
-                    }
-                    None => false,
-                }
-            })
-            .collect()
+pub async fn billing_export_excel(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Query(q): Query<BillingQuery>,
+) -> Response {
+    let report = match load_billing_report(&db, &ctx, &q) {
+        Ok(r) => r,
+        Err(res) => return *res,
     };
-
-    let mut total_mins = 0i32;
-    let mut by_user: BTreeMap<String, i32> = BTreeMap::new();
-
-    for e in &entries {
-        total_mins += e.minutes;
-        *by_user.entry(e.username.clone()).or_default() += e.minutes;
-    }
-
-    views::planning::render_billing_page(&ctx, &entries, &by_user, total_mins).into_response()
+    let xml = views::planning::render_billing_excel_xml(&report.entries, report.opts.hourly_rate);
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.ms-excel; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"billing.xml\"".to_string(),
+            ),
+            (header::CACHE_CONTROL, "private, no-store".to_string()),
+        ],
+        xml,
+    )
+        .into_response()
 }
 
 pub async fn news_page(
@@ -298,6 +620,60 @@ pub async fn news_delete(State(db): State<Db>, ctx: AuthContext, Path(id): Path<
     Redirect::to("/news_page?msg=News+deleted").into_response()
 }
 
+#[derive(Deserialize)]
+pub struct NewsUpdateForm {
+    pub headline: String,
+    pub body: String,
+    pub announcement: Option<String>,
+    pub view_state: Option<i32>,
+}
+
+pub async fn news_edit_page(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    Query(q): Query<FlashQuery>,
+) -> Response {
+    if ctx.user.access_level < 70 {
+        return forbidden(&ctx, "Manager access required to edit news.");
+    }
+    let item = match db.get_news(id) {
+        Ok(Some(item)) => item,
+        Ok(None) => return views::render_not_found_page(&ctx, "News item not found"),
+        Err(_) => return views::render_not_found_page(&ctx, "News item not found"),
+    };
+    views::planning::render_news_edit_page(&ctx, &item, q.msg.as_deref(), q.err.as_deref())
+        .into_response()
+}
+
+pub async fn news_update(
+    State(db): State<Db>,
+    ctx: AuthContext,
+    Path(id): Path<i64>,
+    axum::Form(form): axum::Form<NewsUpdateForm>,
+) -> Response {
+    if ctx.user.access_level < 70 {
+        return forbidden(&ctx, "Manager access required to update news.");
+    }
+    match db.get_news(id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return views::render_not_found_page(&ctx, "News item not found"),
+        Err(_) => return views::render_not_found_page(&ctx, "News item not found"),
+    }
+    let ann = if parse_bool(form.announcement.as_deref()) {
+        1
+    } else {
+        0
+    };
+    let vs = form.view_state.unwrap_or(10);
+    match db.update_news(id, &form.headline, &form.body, vs, ann) {
+        Ok(_) => Redirect::to("/news_page?msg=News+updated").into_response(),
+        Err(_) => {
+            Redirect::to(&format!("/news_edit_page/{}?err=Invalid+news+fields", id)).into_response()
+        }
+    }
+}
+
 pub async fn manage_email_queue_page(
     State(db): State<Db>,
     ctx: AuthContext,
@@ -349,9 +725,14 @@ pub fn router() -> Router<Db> {
         .route("/roadmap_page", get(roadmap_page))
         .route("/changelog_page", get(changelog_page))
         .route("/summary_page", get(summary_page))
+        .route("/summary_graph_page", get(summary_graph_page))
         .route("/billing_page", get(billing_page))
+        .route("/billing_export_csv", get(billing_export_csv))
+        .route("/billing_export_excel", get(billing_export_excel))
         .route("/news_page", get(news_page))
         .route("/news_add", post(news_add))
+        .route("/news_edit_page/:id", get(news_edit_page))
+        .route("/news_update/:id", post(news_update))
         .route("/news_delete/:id", post(news_delete))
         .route("/manage_email_queue_page", get(manage_email_queue_page))
         .route("/manage_email_queue_flush", post(manage_email_queue_flush))

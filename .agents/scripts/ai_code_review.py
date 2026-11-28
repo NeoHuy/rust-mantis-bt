@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 AGENTS_DIR = SCRIPT_DIR.parent
 DEFAULT_CONFIG_PATH = AGENTS_DIR / "ai-review-config.json"
-STATE_DIR = Path(f"/tmp/agy-ai-review-{os.getuid()}")
+STATE_DIR = Path(tempfile.gettempdir()) / f"agy-ai-review-{os.getuid()}"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
@@ -33,6 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": "",
     "reviewer_by_runtime": {
         "claude": {"provider": "codex", "model": ""},
+        "codex": {"provider": "claude", "model": ""},
     },
     "max_review_rounds": 5,
     "include_nits": True,
@@ -137,7 +139,7 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
     cfg["model"] = str(cfg.get("model", "")).strip()
     cfg["max_review_rounds"] = _safe_int(cfg.get("max_review_rounds"), 5, 1)
     cfg["include_nits"] = bool(cfg.get("include_nits", True))
-    cfg["timeout_seconds"] = _safe_int(cfg.get("timeout_seconds"), 120, 10)
+    cfg["timeout_seconds"] = min(150, _safe_int(cfg.get("timeout_seconds"), 120, 10))
     cfg["max_diff_chars"] = _safe_int(cfg.get("max_diff_chars"), 60000, 1000)
     if not isinstance(cfg.get("ignore_patterns"), list):
         cfg["ignore_patterns"] = list(DEFAULT_CONFIG["ignore_patterns"])
@@ -249,10 +251,14 @@ def get_state_path(conversation_id: str | None) -> Path:
 
 def _ensure_state_dir() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    try:
-        os.chmod(STATE_DIR, 0o700)
-    except OSError:
-        pass
+    os.chmod(STATE_DIR, 0o700)
+    st = os.lstat(STATE_DIR)
+    if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+        raise PermissionError(f"Unsafe state directory (not a real directory): {STATE_DIR}")
+    if st.st_uid != os.getuid():
+        raise PermissionError(f"Unsafe state directory owner ({st.st_uid} != {os.getuid()}): {STATE_DIR}")
+    if (st.st_mode & 0o077) != 0:
+        raise PermissionError(f"Unsafe state directory permissions ({oct(st.st_mode)}): {STATE_DIR}")
 
 
 def default_state() -> dict[str, Any]:
@@ -269,6 +275,11 @@ def default_state() -> dict[str, Any]:
 
 
 def load_state(conversation_id: str | None) -> dict[str, Any]:
+    try:
+        _ensure_state_dir()
+    except OSError as exc:
+        print(f"[ai-code-review] State dir check failed: {exc}", file=sys.stderr)
+        return default_state()
     path = get_state_path(conversation_id)
     if not path.is_file():
         return default_state()
@@ -281,7 +292,7 @@ def load_state(conversation_id: str | None) -> dict[str, Any]:
         state.update(data)
         if not isinstance(state.get("edited_files"), list):
             state["edited_files"] = []
-        state["turn_rounds"] = int(state.get("turn_rounds", 0))
+        state["turn_rounds"] = _safe_int(state.get("turn_rounds"), 0, 0)
         return state
     except Exception:
         return default_state()
@@ -353,9 +364,12 @@ def is_subpath(path: Path, parent: Path) -> bool:
 
 def run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
+        env = dict(os.environ)
+        env["GIT_LITERAL_PATHSPECS"] = "1"
         return subprocess.run(
             ["git", *args],
             cwd=str(cwd),
+            env=env,
             capture_output=True,
             text=True,
             timeout=5,
@@ -407,34 +421,27 @@ def _read_text_preview_and_hash(
     file_path: Path,
     root: Path,
     max_preview_bytes: int = 20000,
-    max_hash_bytes: int = 50 * 1024 * 1024,
 ) -> tuple[str, str]:
-    """Stream file to compute full-content SHA-256 and bounded text preview."""
+    """Stream entire file to compute SHA-256 while keeping only a bounded text preview."""
     if not is_subpath(file_path, root):
         return "<symlink outside workspace omitted>", "symlink-outside-workspace"
 
     hasher = hashlib.sha256()
     preview_chunks: list[bytes] = []
     preview_len = 0
-    total_bytes = 0
     try:
         with file_path.open("rb") as fh:
             while True:
                 chunk = fh.read(65536)
                 if not chunk:
                     break
-                if total_bytes < max_hash_bytes:
-                    hasher.update(chunk[: max_hash_bytes - total_bytes])
-                total_bytes += len(chunk)
+                hasher.update(chunk)
                 if preview_len <= max_preview_bytes:
                     need = (max_preview_bytes + 1) - preview_len
                     preview_chunks.append(chunk[:need])
                     preview_len += len(chunk[:need])
     except OSError as exc:
         return f"<unreadable: {exc}>", f"unreadable:{exc}"
-
-    if total_bytes > max_hash_bytes:
-        hasher.update(f":size={total_bytes}".encode("ascii"))
 
     raw_preview = b"".join(preview_chunks)
     if b"\x00" in raw_preview[:4096]:
@@ -550,11 +557,16 @@ def collect_tracked_file_changes(
     parts: list[str] = []
     file_hashes: dict[str, str] = {}
     for rel in sorted(set(kept)):
-        target = cwd / rel
-        if target.is_file():
-            preview, file_hash = _read_text_preview_and_hash(target, cwd)
+        raw_p = Path(rel)
+        target = raw_p if raw_p.is_absolute() else (cwd / raw_p)
+        root_for_check = raw_p.parent if raw_p.is_absolute() else cwd
+        if target.is_file() or target.is_symlink():
+            preview, file_hash = _read_text_preview_and_hash(target, root_for_check)
             file_hashes[rel] = file_hash
             parts.append(f"### Modified File: {rel}\n```\n{preview}\n```")
+        elif not target.exists():
+            file_hashes[rel] = "deleted"
+            parts.append(f"### Deleted File: {rel}\n<file deleted>")
 
     bundle = "\n\n".join(parts).strip()
     if not bundle:
@@ -952,8 +964,13 @@ def handle_track(
         if is_ignored(rel_path, config["ignore_patterns"]):
             continue
 
-        if rel_path not in state["edited_files"]:
-            state["edited_files"].append(rel_path)
+        stored_ref = (
+            rel_path
+            if (git_root is not None or matched_root == cwd)
+            else str(candidate)
+        )
+        if stored_ref not in state["edited_files"]:
+            state["edited_files"].append(stored_ref)
             changed = True
 
     if changed:
@@ -1015,9 +1032,17 @@ def handle_review(
     if current_hash == state["last_reviewed_diff_hash"]:
         if state.get("last_verdict") == "NEEDS_FIX":
             if state["turn_rounds"] >= max_rounds:
-                state["baseline_diff_hash"] = current_hash
                 if git_root:
-                    state["baseline_head"] = get_git_head(git_root)
+                    new_head = get_git_head(git_root)
+                    state["baseline_head"] = new_head
+                    _, _, synced_hash = collect_git_changes(
+                        git_root, config["ignore_patterns"], baseline_head=new_head
+                    )
+                    state["baseline_diff_hash"] = synced_hash
+                    state["last_reviewed_diff_hash"] = synced_hash
+                else:
+                    state["baseline_diff_hash"] = current_hash
+                    state["last_reviewed_diff_hash"] = current_hash
                 state["last_verdict"] = "CAPPED"
                 state["last_reason"] = ""
                 state["last_model_tag"] = ""
@@ -1041,10 +1066,17 @@ def handle_review(
         return allow_response(runtime, "review")
 
     if state["turn_rounds"] >= max_rounds:
-        state["last_reviewed_diff_hash"] = current_hash
-        state["baseline_diff_hash"] = current_hash
         if git_root:
-            state["baseline_head"] = get_git_head(git_root)
+            new_head = get_git_head(git_root)
+            state["baseline_head"] = new_head
+            _, _, synced_hash = collect_git_changes(
+                git_root, config["ignore_patterns"], baseline_head=new_head
+            )
+            state["baseline_diff_hash"] = synced_hash
+            state["last_reviewed_diff_hash"] = synced_hash
+        else:
+            state["last_reviewed_diff_hash"] = current_hash
+            state["baseline_diff_hash"] = current_hash
         state["last_verdict"] = "CAPPED"
         state["last_reason"] = ""
         state["last_model_tag"] = ""
@@ -1120,10 +1152,17 @@ def handle_review(
         save_state(session_key, state)
         return allow_response(runtime, "review")
 
-    state["last_reviewed_diff_hash"] = current_hash
-    state["baseline_diff_hash"] = current_hash
     if git_root:
-        state["baseline_head"] = get_git_head(git_root)
+        new_head = get_git_head(git_root)
+        state["baseline_head"] = new_head
+        _, _, synced_hash = collect_git_changes(
+            git_root, config["ignore_patterns"], baseline_head=new_head
+        )
+        state["last_reviewed_diff_hash"] = synced_hash
+        state["baseline_diff_hash"] = synced_hash
+    else:
+        state["last_reviewed_diff_hash"] = current_hash
+        state["baseline_diff_hash"] = current_hash
     state["last_verdict"] = "PASS"
     state["last_reason"] = ""
     state["last_model_tag"] = ""

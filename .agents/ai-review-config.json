@@ -3,7 +3,8 @@
   "provider": "claude",
   "model": "",
   "reviewer_by_runtime": {
-    "claude": { "provider": "codex", "model": "" }
+    "claude": { "provider": "codex", "model": "" },
+    "codex": { "provider": "claude", "model": "" }
   },
   "max_review_rounds": 5,
   "include_nits": true,

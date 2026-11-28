@@ -799,6 +799,54 @@ class AiCodeReviewHookTests(unittest.TestCase):
         self.assertEqual(victim.read_text(encoding="utf-8"), "KEEP_ME")
         self.assertFalse(report_link.is_symlink())
 
+    def test_state_dir_security_mixed_commit_pass_non_git_delete_and_timeout_cap(self) -> None:
+        # 1. _ensure_state_dir rejects unsafe permissions/owner
+        with mock.patch.object(Path, "mkdir"), mock.patch.object(
+            hook.os, "chmod", side_effect=PermissionError("wrong owner")
+        ):
+            with self.assertRaises(PermissionError):
+                hook._ensure_state_dir()
+
+        # 2. Mixed committed + dirty changes: PASS syncs baseline_diff_hash so next Stop allows
+        hook.handle_session_start(self._base_payload(), self.cfg)
+        (self.repo / "src" / "main.rs").write_text("fn main() { let x = 1; }\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "c1"], cwd=self.repo, check=True, capture_output=True)
+        (self.repo / "src" / "main.rs").write_text("fn main() { let x = 2; }\n", encoding="utf-8")
+
+        with mock.patch.object(
+            hook, "run_reviewer", return_value=(True, "VERDICT: PASS\n- ok", "")
+        ) as m_rev:
+            r1 = hook.handle_review(
+                self._base_payload(terminationReason="NO_TOOL_CALL", fullyIdle=True),
+                self.cfg,
+            )
+            r2 = hook.handle_review(
+                self._base_payload(terminationReason="NO_TOOL_CALL", fullyIdle=True),
+                self.cfg,
+            )
+            self.assertEqual(r1, {"decision": "allow"})
+            self.assertEqual(r2, {"decision": "allow"})
+            self.assertEqual(m_rev.call_count, 1)
+
+        # 3. Non-git deleted file produces Deleted File bundle + hash
+        nongit = self.root / "ng_del"
+        nongit.mkdir()
+        summary, bundle, dhash = hook.collect_tracked_file_changes(
+            nongit, ["missing.rs"], []
+        )
+        self.assertIn("Deleted File: missing.rs", bundle)
+        self.assertTrue(dhash)
+
+        # 4. Codex cross-routes to claude when provider == codex, and timeout capped at 150
+        cfg_path = self.root / "codex-cfg.json"
+        cfg_path.write_text(
+            json.dumps({"provider": "codex", "timeout_seconds": 999}), encoding="utf-8"
+        )
+        loaded = hook.load_config(cfg_path)
+        self.assertEqual(loaded["timeout_seconds"], 150)
+        self.assertEqual(hook.resolve_reviewer_config(loaded, "codex")["provider"], "claude")
+
 
 if __name__ == "__main__":
     unittest.main()

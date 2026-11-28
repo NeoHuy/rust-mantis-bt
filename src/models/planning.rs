@@ -677,7 +677,7 @@ pub fn compute_extended_summary(
         let cat_name = categories_map
             .get(&b.category_id)
             .cloned()
-            .unwrap_or_else(|| "General".to_string());
+            .unwrap_or_else(|| "(none)".to_string());
         by_category
             .entry(cat_name)
             .or_default()

@@ -201,8 +201,10 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         .collect();
 
     let mut by_fixed: BTreeMap<String, Vec<Bug>> = BTreeMap::new();
+    let mut project_ids = std::collections::BTreeSet::new();
     for b in bugs {
         if b.status >= 80 && !b.fixed_in_version.trim().is_empty() {
+            project_ids.insert(b.project_id);
             by_fixed
                 .entry(b.fixed_in_version.trim().to_string())
                 .or_default()
@@ -210,8 +212,25 @@ pub async fn changelog_page(State(db): State<Db>, ctx: AuthContext) -> Response 
         }
     }
 
-    views::planning::render_changelog_page(&ctx, &by_fixed, &users_map, &categories_map)
-        .into_response()
+    let mut version_dates: HashMap<String, i64> = HashMap::new();
+    for pid in project_ids {
+        for v in db.list_versions(pid).unwrap_or_default() {
+            if v.released != 0 && v.date_order > 0 {
+                version_dates
+                    .entry(v.version.trim().to_string())
+                    .or_insert(v.date_order);
+            }
+        }
+    }
+
+    views::planning::render_changelog_page_with_dates(
+        &ctx,
+        &by_fixed,
+        &users_map,
+        &categories_map,
+        &version_dates,
+    )
+    .into_response()
 }
 
 fn load_extended_summary(db: &Db, ctx: &AuthContext, trend_days: i64) -> ExtendedSummaryData {

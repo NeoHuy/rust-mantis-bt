@@ -62,6 +62,10 @@ fn test_render_manage_filter_page_rbac_and_permalink() {
     assert!(html.contains("/manage_filter_edit_page/11"));
     assert!(!html.contains("/manage_filter_edit_page/12"));
     assert!(html.contains("data-copy-target=\"filter-permalink-11\""));
+    assert!(html.contains("Copy Permalink"));
+    assert!(html.contains("reminder-badge"));
+    assert!(!html.contains("<script>"));
+    assert!(!html.contains("onclick="));
 
     let mut mgr_manageable = HashSet::new();
     mgr_manageable.insert(12);

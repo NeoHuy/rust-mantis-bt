@@ -323,3 +323,72 @@ fn test_render_extended_summary_graphs_and_billing_exports() {
     assert!(bill_html.contains("Invalid date &lt;xss&gt; ignored"));
     assert!(!bill_html.contains("<xss>"));
 }
+
+#[test]
+fn test_roadmap_scheduled_for_release_changelog_dates_and_summary_tabs() {
+    let ctx = dummy_ctx();
+    let groups = vec![RoadmapVersionGroup {
+        version: "2.0.0".to_string(),
+        date_order: 1_750_000_000,
+        released: false,
+        project_id: Some(1),
+        project_name: Some("Core".to_string()),
+        bugs: Vec::new(),
+    }];
+    let Html(roadmap_html) = render_roadmap_page(&ctx, &groups, &HashMap::new());
+    assert!(roadmap_html.contains("Scheduled For Release:"));
+    assert!(!roadmap_html.contains("<script>"));
+    assert!(!roadmap_html.contains("onclick="));
+
+    let mut by_fixed = BTreeMap::new();
+    by_fixed.insert(
+        "1.0.0".to_string(),
+        vec![Bug {
+            id: 1,
+            project_id: 1,
+            reporter_id: 1,
+            handler_id: 0,
+            duplicate_id: 0,
+            priority: 30,
+            severity: 50,
+            reproducibility: 10,
+            status: 80,
+            resolution: 20,
+            category_id: 1,
+            date_submitted: 1_700_000_000,
+            last_updated: 1_700_000_000,
+            os: String::new(),
+            os_build: String::new(),
+            platform: String::new(),
+            version: String::new(),
+            fixed_in_version: "1.0.0".to_string(),
+            target_version: String::new(),
+            build: String::new(),
+            summary: "Released fix".to_string(),
+            view_state: 10,
+            sticky: 0,
+            due_date: 0,
+        }],
+    );
+    let mut ver_dates = HashMap::new();
+    ver_dates.insert("1.0.0".to_string(), 1_740_000_000);
+    let Html(changelog_html) = render_changelog_page_with_dates(
+        &ctx,
+        &by_fixed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &ver_dates,
+    );
+    assert!(changelog_html.contains("Released:"));
+    assert!(!changelog_html.contains("<script>"));
+
+    let summary = ExtendedSummaryData::default();
+    let Html(sum_html) = render_summary_page_extended(&ctx, &summary, false);
+    assert!(sum_html.contains(r#"class="sub-nav-tabs""#));
+    assert!(sum_html.contains(r#"href="/summary_page" class="active""#));
+    assert!(sum_html.contains(r#"href="/summary_graph_page""#));
+
+    let Html(graph_html) = render_summary_graph_page(&ctx, &summary, false);
+    assert!(graph_html.contains(r#"class="sub-nav-tabs""#));
+    assert!(graph_html.contains(r#"href="/summary_graph_page" class="active""#));
+}

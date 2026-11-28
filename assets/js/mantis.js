@@ -552,9 +552,11 @@
         var grp = groups[i];
         var acts = grp.getAttribute('data-actions') || '';
         if (acts.split(',').indexOf(act) !== -1) {
-          grp.style.display = 'inline-flex';
+          grp.classList.remove('hidden');
+          grp.classList.add('inline-flex');
         } else {
-          grp.style.display = 'none';
+          grp.classList.add('hidden');
+          grp.classList.remove('inline-flex');
         }
       }
     }
@@ -600,9 +602,11 @@
           }
           var origHtml = btn.innerHTML;
           function showCopied() {
-            btn.textContent = 'Copied!';
+            btn.innerHTML = '<i class="fa fa-check" aria-hidden="true"></i> Copied!';
+            btn.classList.add('is-copied');
             setTimeout(function () {
               btn.innerHTML = origHtml;
+              btn.classList.remove('is-copied');
             }, 1500);
           }
           if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -625,6 +629,87 @@
         });
       })(btns[i]);
     }
+  }
+
+  function initColumnPicker() {
+    var form = document.getElementById('manage-columns-form');
+    if (!form) return;
+    var textareas = form.querySelectorAll('textarea');
+    var activeTextarea = document.getElementById('view_issues_columns') || textareas[0] || null;
+    for (var i = 0; i < textareas.length; i++) {
+      (function (ta) {
+        ta.addEventListener('focus', function () {
+          activeTextarea = ta;
+        });
+      })(textareas[i]);
+    }
+
+    var appendBtns = document.querySelectorAll('[data-append-col]');
+    for (var j = 0; j < appendBtns.length; j++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          var colId = (btn.getAttribute('data-append-col') || '').trim();
+          if (!colId || !activeTextarea) return;
+          var parts = activeTextarea.value
+            .split(',')
+            .map(function (s) { return s.trim(); })
+            .filter(function (s) { return s.length > 0; });
+          if (parts.indexOf(colId) === -1) {
+            parts.push(colId);
+            activeTextarea.value = parts.join(', ');
+          }
+          activeTextarea.focus();
+        });
+      })(appendBtns[j]);
+    }
+
+    var resetBtns = document.querySelectorAll('[data-reset-cols-target]');
+    for (var k = 0; k < resetBtns.length; k++) {
+      (function (btn) {
+        btn.addEventListener('click', function () {
+          var targetId = btn.getAttribute('data-reset-cols-target');
+          var defCols = btn.getAttribute('data-default-cols') || '';
+          var ta = targetId ? document.getElementById(targetId) : null;
+          if (ta && defCols) {
+            ta.value = defCols;
+            activeTextarea = ta;
+            ta.focus();
+          }
+        });
+      })(resetBtns[k]);
+    }
+  }
+
+  function initMyViewReorder() {
+    var table = document.getElementById('my-view-config-table');
+    if (!table) return;
+    var tbody = table.querySelector('tbody');
+    if (!tbody) return;
+
+    function syncOrderInputs() {
+      var rows = tbody.querySelectorAll('tr');
+      for (var i = 0; i < rows.length; i++) {
+        var inp = rows[i].querySelector('input[name^="order_"]');
+        if (inp) {
+          inp.value = String(i + 1);
+        }
+      }
+    }
+
+    table.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('[data-move-box]') : null;
+      if (!btn) return;
+      var dir = btn.getAttribute('data-move-box');
+      var row = btn.closest('tr');
+      if (!row) return;
+      if (dir === 'up' && row.previousElementSibling) {
+        tbody.insertBefore(row, row.previousElementSibling);
+        syncOrderInputs();
+      } else if (dir === 'down' && row.nextElementSibling) {
+        tbody.insertBefore(row.nextElementSibling, row);
+        syncOrderInputs();
+      }
+    });
   }
 
   function initPrintButtons() {
@@ -668,6 +753,8 @@
     initDropzones();
     initBulkActionForm();
     initCopyButtons();
+    initColumnPicker();
+    initMyViewReorder();
     initPrintButtons();
   });
 })();

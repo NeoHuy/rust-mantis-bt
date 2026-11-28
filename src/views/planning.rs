@@ -112,7 +112,7 @@ pub fn render_roadmap_page_with_options(
                     let date_label = if group.released {
                         "Released"
                     } else {
-                        "Scheduled"
+                        "Scheduled For Release"
                     };
                     format!(
                         r#"<span class="badge badge-info"><i class="fa fa-calendar" aria-hidden="true"></i> {}: {}</span>"#,
@@ -233,6 +233,17 @@ pub fn render_changelog_page(
     users_map: &HashMap<i64, String>,
     categories_map: &HashMap<i64, String>,
 ) -> Html<String> {
+    let empty_dates = HashMap::new();
+    render_changelog_page_with_dates(ctx, by_fixed, users_map, categories_map, &empty_dates)
+}
+
+pub fn render_changelog_page_with_dates(
+    ctx: &AuthContext,
+    by_fixed: &BTreeMap<String, Vec<Bug>>,
+    users_map: &HashMap<i64, String>,
+    categories_map: &HashMap<i64, String>,
+    version_dates: &HashMap<String, i64>,
+) -> Html<String> {
     let mut sections_html = String::new();
     if by_fixed.is_empty() {
         sections_html.push_str(
@@ -300,11 +311,25 @@ pub fn render_changelog_page(
             } else {
                 format!("/view_all_bug_page?fixed_in_version={}", url_encode(ver))
             };
+            let release_date_badge = version_dates
+                .get(ver)
+                .copied()
+                .filter(|&d| d > 0)
+                .map(format_date)
+                .filter(|d| !d.is_empty())
+                .map(|d| {
+                    format!(
+                        r#"<span class="badge badge-info"><i class="fa fa-calendar" aria-hidden="true"></i> Released: {}</span>"#,
+                        html_escape(&d)
+                    )
+                })
+                .unwrap_or_default();
             sections_html.push_str(&format!(
                 r#"<div class="widget-box widget-color-blue2">
                     <div class="widget-header">
                         <h4 class="widget-title"><i class="fa fa-retweet" aria-hidden="true"></i> Version: {ver} ({count} issues fixed)</h4>
                         <div class="widget-toolbar">
+                            {release_date_badge}
                             <a href="{view_issues_href}" class="btn btn-white btn-round btn-sm"><i class="fa fa-list" aria-hidden="true"></i> View Issues</a>
                         </div>
                     </div>
@@ -316,6 +341,7 @@ pub fn render_changelog_page(
                 </div>"#,
                 ver = html_escape(ver),
                 count = items.len(),
+                release_date_badge = release_date_badge,
                 view_issues_href = view_issues_href,
                 list_html = list_html
             ));
@@ -505,22 +531,22 @@ pub fn render_summary_page(
 
 fn render_summary_subnav(active_graphs: bool) -> String {
     let summary_cls = if !active_graphs {
-        "btn btn-primary btn-sm"
+        r#" class="active""#
     } else {
-        "btn btn-white btn-round btn-sm"
+        ""
     };
     let graph_cls = if active_graphs {
-        "btn btn-primary btn-sm"
+        r#" class="active""#
     } else {
-        "btn btn-white btn-round btn-sm"
+        ""
     };
     format!(
-        r#"<div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+        r#"<div class="sub-nav-tabs">
+            <a href="/summary_page"{summary_cls}><i class="fa fa-table" aria-hidden="true"></i> Summary Tables</a>
+            <a href="/summary_graph_page"{graph_cls}><i class="fa fa-area-chart" aria-hidden="true"></i> Graphs &amp; Charts</a>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h2 class="section-title mb-0 border-none"><i class="fa fa-bar-chart-o" aria-hidden="true"></i> Summary Statistics</h2>
-            <div class="flex flex-wrap items-center gap-1.5">
-                <a href="/summary_page" class="{summary_cls}"><i class="fa fa-table" aria-hidden="true"></i> Summary Tables</a>
-                <a href="/summary_graph_page" class="{graph_cls}"><i class="fa fa-area-chart" aria-hidden="true"></i> Graphs &amp; Trends</a>
-            </div>
         </div>"#,
         summary_cls = summary_cls,
         graph_cls = graph_cls,
@@ -556,7 +582,7 @@ fn render_summary_chart_widget(
                 <h4 class="widget-title"><i class="fa {icon}" aria-hidden="true"></i> {title}</h4>
                 <div class="widget-toolbar">{toolbar_html}</div>
             </div>
-            <div class="widget-body">{chart_svg}</div>
+            <div class="widget-body overflow-x-auto">{chart_svg}</div>
         </div>"#,
         icon = icon,
         title = html_escape(title),
@@ -1278,30 +1304,35 @@ pub fn render_billing_page_extended(
         <div class="widget-box widget-color-blue2">
             <div class="widget-header widget-header-small">
                 <h4 class="widget-title"><i class="fa fa-filter" aria-hidden="true"></i> Billing Filters &amp; Rate</h4>
+                <div class="widget-toolbar">
+                    <span class="badge badge-info">Total: {hh:02}:{mm:02} ({total_mins} mins){cost_suffix}</span>
+                </div>
             </div>
-            <div class="widget-body">
-                <form method="GET" action="/billing_page" class="flex flex-wrap items-end gap-3">
-                    <div>
-                        <label for="billing_from" class="block text-xs font-semibold text-gray-700 mb-1">From Date</label>
-                        <input type="date" id="billing_from" name="from" value="{from}" class="text-xs">
-                    </div>
-                    <div>
-                        <label for="billing_to" class="block text-xs font-semibold text-gray-700 mb-1">To Date</label>
-                        <input type="date" id="billing_to" name="to" value="{to}" class="text-xs">
-                    </div>
-                    <div>
-                        <label for="billing_cost" class="block text-xs font-semibold text-gray-700 mb-1">Hourly Rate ($/h)</label>
-                        <input type="number" step="0.01" min="0" id="billing_cost" name="cost" value="{rate}" placeholder="0.00" class="!w-28 text-xs">
-                    </div>
-                    <label class="inline-flex items-center gap-1.5 text-xs font-semibold pb-1.5 cursor-pointer">
-                        <input type="checkbox" name="include_subprojects" value="1" {sub_checked}>
-                        <span>Include Subprojects</span>
-                    </label>
-                    <div class="flex items-center gap-1.5">
-                        <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-check" aria-hidden="true"></i> Apply</button>
-                        <a href="/billing_page" class="btn btn-white btn-round btn-sm">Reset</a>
-                    </div>
-                </form>
+            <div class="widget-body !p-0">
+                <div class="widget-toolbox">
+                    <form method="GET" action="/billing_page" class="flex flex-wrap items-end gap-3">
+                        <div>
+                            <label for="billing_from" class="block text-xs font-semibold text-gray-700 mb-1">From Date</label>
+                            <input type="date" id="billing_from" name="from" value="{from}" class="text-xs">
+                        </div>
+                        <div>
+                            <label for="billing_to" class="block text-xs font-semibold text-gray-700 mb-1">To Date</label>
+                            <input type="date" id="billing_to" name="to" value="{to}" class="text-xs">
+                        </div>
+                        <div>
+                            <label for="billing_cost" class="block text-xs font-semibold text-gray-700 mb-1">Hourly Rate ($/h)</label>
+                            <input type="number" step="0.01" min="0" id="billing_cost" name="cost" value="{rate}" placeholder="0.00" class="!w-28 text-xs">
+                        </div>
+                        <label class="inline-flex items-center gap-1.5 text-xs font-semibold pb-1.5 cursor-pointer">
+                            <input type="checkbox" name="include_subprojects" value="1" {sub_checked}>
+                            <span>Include Subprojects</span>
+                        </label>
+                        <div class="flex items-center gap-1.5">
+                            <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-check" aria-hidden="true"></i> Apply</button>
+                            <a href="/billing_page" class="btn btn-white btn-round btn-sm">Reset</a>
+                        </div>
+                    </form>
+                </div>
             </div>
         </div>
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">

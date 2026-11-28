@@ -2333,3 +2333,63 @@ fn test_saved_filter_active_count_matches_actual_criteria() {
     assert!(html.contains("Active (1)"));
     assert!(!html.contains("Active (2)"));
 }
+
+#[test]
+fn test_phase3_polish_filters_reorder_print_and_zero_inline_js() {
+    let ctx = dummy_ctx(1, 55);
+    let filter = BugFilter::default();
+    let q = ListBugsQuery::default();
+    let Html(view_html) = render_view_all_bug_page(
+        &ctx,
+        &[],
+        0,
+        1,
+        25,
+        &filter,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        None,
+        &q,
+        &ViewIssuesMeta::default(),
+    );
+    assert!(view_html.contains("People &amp; Status"));
+    assert!(view_html.contains("Classification &amp; Versions"));
+    assert!(view_html.contains("Dates, Relationships &amp; Custom Fields"));
+    assert!(view_html.contains("Ctrl/Cmd+Click for multiple"));
+    assert!(view_html.contains("grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"));
+    assert!(!view_html.contains("<script>"));
+    assert!(!view_html.contains("onclick="));
+    assert_no_nested_forms(&view_html);
+
+    let cfg = MyViewConfig::default().normalize();
+    let Html(cfg_html) = render_my_view_config_page(&ctx, &cfg, None, None);
+    assert!(cfg_html.contains(r#"id="my-view-config-table""#));
+    assert!(cfg_html.contains(r#"data-move-box="up""#));
+    assert!(cfg_html.contains(r#"data-move-box="down""#));
+    assert!(!cfg_html.contains("<script>"));
+    assert!(!cfg_html.contains("onclick="));
+    assert_no_nested_forms(&cfg_html);
+
+    let Html(print_html) = render_print_all_bug_page(
+        &ctx,
+        "All Projects",
+        &q,
+        &["ID".to_string(), "Summary".to_string()],
+        &["id".to_string(), "summary".to_string()],
+        &[],
+        &[],
+        None,
+    );
+    assert!(print_html.contains(r#"class="no-print"#));
+    assert!(print_html.contains(r#"data-action="print""#));
+    assert!(print_html.contains("Back to View Issues"));
+    assert!(!print_html.contains("onclick="));
+    assert_no_nested_forms(&print_html);
+}

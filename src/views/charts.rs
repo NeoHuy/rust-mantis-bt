@@ -60,7 +60,7 @@ pub fn render_horizontal_bar_chart(title: &str, items: &[(String, usize, &str)])
 
     let width = 560usize;
     let label_w = 155usize;
-    let right_pad = 75usize;
+    let right_pad = 88usize;
     let bar_max_w = width - label_w - right_pad;
     let row_h = 26usize;
     let top_pad = 14usize;
@@ -165,7 +165,7 @@ pub fn render_donut_chart(title: &str, items: &[(String, usize, &str)]) -> Strin
 
     let height = 200usize.max(36 + non_zero.len() * 20);
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 460 {height}" class="w-full h-auto" role="img" aria-label="{title}">
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 {height}" class="w-full h-auto" role="img" aria-label="{title}">
             <circle cx="{cx}" cy="{cy}" r="{r}" fill="transparent" stroke="#e5e7eb" stroke-width="26" />
             {slices_svg}
             <text x="{cx}" y="{tot_y}" text-anchor="middle" font-size="20" font-weight="700" fill="#111827">{total}</text>

@@ -114,3 +114,18 @@ fn test_trend_y_axis_ticks_are_unique_increasing_integers() {
         );
     }
 }
+
+#[test]
+fn test_charts_zero_inline_scripts_and_responsive_viewbox() {
+    let items = vec![("Open".to_string(), 5usize, "#2b7dbc")];
+    let bar = render_horizontal_bar_chart("By Status", &items);
+    let donut = render_donut_chart("By Status", &items);
+    assert!(bar.contains("viewBox=\"0 0 560"));
+    assert!(bar.contains("class=\"w-full h-auto\""));
+    assert!(donut.contains("viewBox=\"0 0 480"));
+    assert!(donut.contains("class=\"w-full h-auto\""));
+    assert!(!bar.contains("<script"));
+    assert!(!donut.contains("<script"));
+    assert!(!bar.contains("onclick="));
+    assert!(!donut.contains("onclick="));
+}

@@ -159,7 +159,7 @@ pub fn render_manage_filter_page(
     let mut rows_html = String::new();
     if filters.is_empty() {
         rows_html.push_str(
-            r#"<tr><td colspan="6" class="text-center py-4 text-gray-500">No saved filters found for the selected project.</td></tr>"#,
+            r#"<tr><td colspan="7" class="text-center py-4 text-gray-500">No saved filters found for the selected project.</td></tr>"#,
         );
     } else {
         for (idx, sf) in filters.iter().enumerate() {
@@ -185,6 +185,18 @@ pub fn render_manage_filter_page(
             } else {
                 r#"<span class="badge badge-info">Private</span>"#
             };
+            let parsed_filter: BugFilter =
+                serde_json::from_str(&sf.filter_string).unwrap_or_default();
+            let criteria_pills: String = summarize_filter_criteria(&parsed_filter)
+                .into_iter()
+                .map(|item| {
+                    format!(
+                        r#"<span class="reminder-badge">{}</span>"#,
+                        html_escape(&item)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             let permalink = format!("/view_all_bug_page?filter_id={}", sf.id);
             let can_manage = manageable_ids.contains(&sf.id);
             let edit_btn = if can_manage {
@@ -211,12 +223,13 @@ pub fn render_manage_filter_page(
                 r#"<tr class="{}">
                     <td><a href="{}" class="font-semibold text-blue-700 hover:underline">{}</a></td>
                     <td class="whitespace-nowrap">{}</td>
+                    <td><div class="flex flex-wrap gap-1">{}</div></td>
                     <td class="text-center whitespace-nowrap">{}</td>
                     <td class="whitespace-nowrap">{}</td>
                     <td>
                         <div class="inline-flex items-center gap-1.5">
-                            <input type="text" id="filter-permalink-{}" value="{}" readonly class="!w-52 text-xs bg-gray-50" aria-label="Filter permalink">
-                            <button type="button" class="btn btn-white btn-round btn-sm" data-copy-target="filter-permalink-{}" title="Copy Permalink"><i class="fa fa-link" aria-hidden="true"></i> Copy</button>
+                            <input type="text" id="filter-permalink-{}" value="{}" readonly class="!w-44 text-xs bg-gray-50" aria-label="Filter permalink">
+                            <button type="button" class="btn btn-white btn-round btn-sm" data-copy-target="filter-permalink-{}" title="Copy Permalink"><i class="fa fa-link" aria-hidden="true"></i> Copy Permalink</button>
                         </div>
                     </td>
                     <td class="whitespace-nowrap">
@@ -232,6 +245,7 @@ pub fn render_manage_filter_page(
                 permalink,
                 html_escape(&sf.name),
                 html_escape(&proj_name),
+                criteria_pills,
                 vis_badge,
                 html_escape(&owner_name),
                 sf.id,
@@ -266,6 +280,7 @@ pub fn render_manage_filter_page(
                                 <tr>
                                     <th>Filter Name</th>
                                     <th>Project</th>
+                                    <th>Criteria</th>
                                     <th class="text-center">Visibility</th>
                                     <th>Owner</th>
                                     <th>Shareable Permalink</th>
@@ -433,7 +448,7 @@ pub fn render_manage_filter_edit_page(
                     </table>
                     <div class="mt-3 flex items-center gap-2">
                         <button type="submit" class="btn btn-primary btn-sm"><i class="fa fa-save" aria-hidden="true"></i> Update Filter</button>
-                        <a href="/manage_filter_page" class="btn btn-secondary btn-sm">Cancel</a>
+                        <a href="/manage_filter_page" class="btn btn-white btn-round btn-sm">Cancel</a>
                     </div>
                 </form>
                 <div class="mt-4 pt-3 border-t border-gray-200">

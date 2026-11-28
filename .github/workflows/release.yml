@@ -9,18 +9,24 @@ on:
     branches:
       - main
 
+# Deny-by-default permissions baseline; each job grants only what it needs.
+permissions: {}
+
+# GitHub keeps at most one pending run per concurrency group when
+# cancel-in-progress is false; intermediate queued runs are dropped, which is
+# safe because the surviving run evaluates the latest Cargo.toml on main.
 concurrency:
   group: auto-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Check Version & Create Release
+  check:
+    name: Check Cargo.toml Version
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     outputs:
-      created: ${{ steps.create_release.outputs.created || 'false' }}
+      should_release: ${{ steps.check.outputs.should_release }}
       tag: ${{ steps.check.outputs.tag }}
       is_prerelease: ${{ steps.check.outputs.prerelease }}
       commit_sha: ${{ github.sha }}
@@ -28,14 +34,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Fetch all tags
-        run: git fetch --tags --force
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Check Cargo.toml version against existing tags
         id: check
         shell: python3 {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           import os
           import re
@@ -73,15 +80,16 @@ jobs:
                           return m.group(1).strip()
               raise RuntimeError("Could not find [package].version in Cargo.toml")
 
+          # Reject '+build' metadata because Docker tags cannot contain '+'.
           SEMVER_RE = re.compile(
-              r"^([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
+              r"([0-9]+)\.([0-9]+)\.([0-9]+)(?:-([0-9A-Za-z.-]+))?"
           )
           LEGACY_TAG_RE = re.compile(
-              r"^v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$"
+              r"v?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?"
           )
 
           def parse_strict_semver(ver: str):
-              m = SEMVER_RE.match(ver)
+              m = SEMVER_RE.fullmatch(ver)
               if not m:
                   return None
               major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -89,7 +97,7 @@ jobs:
               return (major, minor, patch, pre)
 
           def parse_tag_semver(tag_name: str):
-              m = LEGACY_TAG_RE.match(tag_name)
+              m = LEGACY_TAG_RE.fullmatch(tag_name)
               if not m:
                   return None
               major = int(m.group(1))
@@ -130,7 +138,7 @@ jobs:
           parsed_cargo = parse_strict_semver(version)
           if parsed_cargo is None:
               print(
-                  f"ERROR: Cargo.toml version '{version}' is not valid strict SemVer (X.Y.Z[-prerelease]).",
+                  f"ERROR: Cargo.toml version '{version}' must be strict SemVer X.Y.Z[-prerelease] without '+build' metadata.",
                   file=sys.stderr,
               )
               sys.exit(1)
@@ -138,7 +146,11 @@ jobs:
           tag = f"v{version}"
           is_prerelease = "true" if parsed_cargo[3] else "false"
 
-          tags_raw = subprocess.check_output(["git", "tag", "--list"], text=True)
+          repo = os.environ["GITHUB_REPOSITORY"]
+          tags_raw = subprocess.check_output(
+              ["gh", "api", "--paginate", f"repos/{repo}/tags", "--jq", ".[].name"],
+              text=True,
+          )
           existing_tags = {line.strip() for line in tags_raw.splitlines() if line.strip()}
 
           if tag in existing_tags or version in existing_tags:
@@ -156,12 +168,20 @@ jobs:
                   highest_ver = parsed
                   highest_tag_name = t
 
-          if highest_ver is not None and cmp_semver(parsed_cargo, highest_ver) <= 0:
-              print(
-                  f"Skipping release: Cargo.toml version '{version}' is not newer than highest existing tag '{highest_tag_name}'."
-              )
-              write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
-              sys.exit(0)
+          if highest_ver is not None:
+              cmp_res = cmp_semver(parsed_cargo, highest_ver)
+              if cmp_res < 0:
+                  print(
+                      f"::warning::Cargo.toml version '{version}' is lower than highest existing tag '{highest_tag_name}' — skipping release."
+                  )
+                  write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
+                  sys.exit(0)
+              if cmp_res == 0:
+                  print(
+                      f"Skipping release: Cargo.toml version '{version}' matches highest existing tag '{highest_tag_name}'."
+                  )
+                  write_output({"should_release": "false", "tag": tag, "version": version, "prerelease": is_prerelease})
+                  sys.exit(0)
 
           print(f"Ready to release {tag} (prerelease={is_prerelease}, previous highest={highest_tag_name}).")
           write_output({
@@ -171,17 +191,39 @@ jobs:
               "prerelease": is_prerelease,
           })
 
+  publish-image:
+    name: Build & Publish Release Image
+    needs: check
+    if: needs.check.outputs.should_release == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-and-publish.yml
+    with:
+      release_tag: ${{ needs.check.outputs.tag }}
+      commit_sha: ${{ needs.check.outputs.commit_sha }}
+      is_prerelease: ${{ needs.check.outputs.is_prerelease == 'true' }}
+
+  create-release:
+    name: Create Git Tag & GitHub Release
+    needs: [check, publish-image]
+    if: needs.check.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Note: Releases created with GITHUB_TOKEN do not trigger `on: release` workflows.
       - name: Create GitHub Release and tag
-        id: create_release
-        if: steps.check.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.check.outputs.tag }}
-          IS_PRERELEASE: ${{ steps.check.outputs.prerelease }}
-          TARGET_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.check.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.check.outputs.is_prerelease }}
+          TARGET_SHA: ${{ needs.check.outputs.commit_sha }}
         run: |
           args=(
             "$RELEASE_TAG"
+            --repo "$GITHUB_REPOSITORY"
             --target "$TARGET_SHA"
             --title "$RELEASE_TAG"
             --generate-notes
@@ -190,17 +232,3 @@ jobs:
             args+=(--prerelease)
           fi
           gh release create "${args[@]}"
-          echo "created=true" >> "$GITHUB_OUTPUT"
-
-  publish-image:
-    name: Build & Publish Release Image
-    needs: release
-    if: needs.release.outputs.created == 'true'
-    permissions:
-      contents: read
-      packages: write
-    uses: ./.github/workflows/build-and-publish.yml
-    with:
-      release_tag: ${{ needs.release.outputs.tag }}
-      commit_sha: ${{ needs.release.outputs.commit_sha }}
-      is_prerelease: ${{ needs.release.outputs.is_prerelease == 'true' }}

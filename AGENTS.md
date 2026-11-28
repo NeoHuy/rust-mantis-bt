@@ -66,6 +66,8 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test
   ```
+- **Automated Release Flow:**
+  When preparing a release PR (`develop` → `main`), bump `[package].version` in `Cargo.toml` (strict SemVer `X.Y.Z` or `X.Y.Z-prerelease`, without `+build` metadata) and update `Cargo.lock`. Merging to `main` triggers `.github/workflows/release.yml`, which verifies the version is newer than existing tags, runs tests and publishes multi-arch GHCR Docker images (`vX.Y.Z`, `X.Y.Z`, `X.Y`, and `latest` when on `main` head for non-prereleases), and then creates git tag `vX.Y.Z` + GitHub Release with generated notes.
 - **PR Content Structure:**
   - **Summary:** Concise explanation of the problem solved.
   - **Key Changes:** Grouped by architectural layer (Model, View, Controller, DB, Integration).
